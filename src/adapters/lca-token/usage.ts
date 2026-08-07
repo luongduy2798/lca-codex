@@ -1,8 +1,8 @@
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
-import type { CompiledChatGptWebPrompt } from "./prompt";
-import { compileChatGptWebPrompt } from "./prompt";
-import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import type { CompiledLcaTokenPrompt } from "./prompt";
+import { compileLcaTokenPrompt } from "./prompt";
+import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
 import type { BrokerToolRequest } from "./turn-broker";
 
 // The real capability has the same length. Keeping it out of usage accounting would make
@@ -15,7 +15,7 @@ const CHATGPT_PLATFORM_RESERVE_TOKENS = 8_192;
 const CHATGPT_IMAGE_RESERVE_TOKENS = 4_096;
 const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
 
-export interface ChatGptWebRoundEvidence {
+export interface LcaTokenRoundEvidence {
   answer?: string;
   reasoning?: string[];
   toolRequests?: BrokerToolRequest[];
@@ -25,8 +25,8 @@ function conservativeTextTokens(text: string, modelId: string): number {
   return estimateTokens(text, modelId);
 }
 
-export function estimateCompiledChatGptWebInputTokens(
-  compiled: CompiledChatGptWebPrompt,
+export function estimateCompiledLcaTokenInputTokens(
+  compiled: CompiledLcaTokenPrompt,
   modelId: string,
 ): number {
   const imageTokens = compiled.images.reduce(
@@ -41,20 +41,20 @@ export function estimateCompiledChatGptWebInputTokens(
     + imageTokens;
 }
 
-export function estimateChatGptWebInputTokens(
+export function estimateLcaTokenInputTokens(
   parsed: CodexParsedRequest,
-  capabilities: ChatGptWebCapabilities,
+  capabilities: LcaTokenCapabilities,
 ): number {
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const compiled = compileChatGptWebPrompt(
+  const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const compiled = compileLcaTokenPrompt(
     parsed,
     capabilities,
     mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
   );
-  return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
+  return estimateCompiledLcaTokenInputTokens(compiled, parsed.modelId);
 }
 
-function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {
+function roundEvidenceText(evidence: LcaTokenRoundEvidence): string {
   return JSON.stringify({
     reasoning: evidence.reasoning ?? [],
     ...(evidence.answer !== undefined ? { answer: evidence.answer } : {}),
@@ -70,12 +70,12 @@ function roundEvidenceText(evidence: ChatGptWebRoundEvidence): string {
   });
 }
 
-export function estimateChatGptWebUsage(
+export function estimateLcaTokenUsage(
   parsed: CodexParsedRequest,
-  evidence: ChatGptWebRoundEvidence,
-  capabilities: ChatGptWebCapabilities,
+  evidence: LcaTokenRoundEvidence,
+  capabilities: LcaTokenCapabilities,
 ): CodexUsage {
-  const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
+  const inputTokens = estimateLcaTokenInputTokens(parsed, capabilities);
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,

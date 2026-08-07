@@ -4,18 +4,18 @@ import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "..
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError } from "./adapter-error";
+import { LcaTokenAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
-import { resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileChatGptWebPrompt } from "./prompt";
+import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
+import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaTokenPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage } from "./usage";
+import { estimateLcaTokenUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
-  const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
+  const configured = provider.lcaToken?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
@@ -30,7 +30,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
 }
 
 function abortError(): DOMException {
-  return new DOMException("ChatGPT web turn aborted", "AbortError");
+  return new DOMException("Lca Token turn aborted", "AbortError");
 }
 
 function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -120,7 +120,7 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
 
 function emitProContextWarning(
   parsed: CodexParsedRequest,
-  capabilities: ChatGptWebCapabilities,
+  capabilities: LcaTokenCapabilities,
   emit: (event: AdapterEvent) => void,
 ): void {
   const warning = chatGptReadOnlyContextWarning(parsed, capabilities);
@@ -153,21 +153,22 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
-export function createChatGptWebAdapter(provider: CodexProviderConfig): ProviderAdapter {
+export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = TurnBroker.forSocket(brokerSocketPath(provider));
-  const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
-  const configuredCapabilities: ChatGptWebCapabilities = {
-    localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
-    proAvailable: provider.chatgptWeb?.proAvailable === true,
+  const timeoutMs = provider.lcaToken?.turnTimeoutMs;
+  const connectorName = provider.lcaToken?.appName?.trim() || "lca-token";
+  const configuredCapabilities: LcaTokenCapabilities = {
+    localToolsEnabled: provider.lcaToken?.localToolsEnabled === true,
+    proAvailable: provider.lcaToken?.proAvailable === true,
   };
   const executionNamespace = createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
+    lcaToken: provider.lcaToken ?? {},
   })).digest("hex");
   const environmentStore = new ChatGptThreadEnvironmentStore(
-    provider.chatgptWeb?.threadEnvironmentStatePath
-      ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
+    provider.lcaToken?.threadEnvironmentStatePath
+      ? resolve(expandUserPath(provider.lcaToken.threadEnvironmentStatePath))
       : undefined,
   );
 
@@ -175,9 +176,9 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
-    turnCapabilities: ChatGptWebCapabilities,
+    turnCapabilities: LcaTokenCapabilities,
   ): ChatGptTurnRuntime => {
-    const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+    const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
@@ -187,7 +188,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
-        prepare: async () => ({ ...compileChatGptWebPrompt(parsed, turnCapabilities), release: () => {} }),
+        prepare: async () => ({ ...compileLcaTokenPrompt(parsed, turnCapabilities, undefined, undefined, connectorName), release: () => {} }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
@@ -201,7 +202,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         cancel: () => browserAbort.abort(),
       };
     }
-    if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
+    if (!environment) throw new Error("Tool-capable Lca Token mode requires a trusted Codex environment");
     const token = deferred<string>();
     let tokenSettled = false;
     let activeToken: string | undefined;
@@ -222,7 +223,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileChatGptWebPrompt(parsed, turnCapabilities, turnToken, contextSnapshot);
+          const compiled = compileLcaTokenPrompt(parsed, turnCapabilities, turnToken, contextSnapshot, connectorName);
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -254,19 +255,19 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   };
 
   return {
-    name: "chatgpt-web",
+    name: "lca-token",
     async runTurn(parsed, incoming, emit) {
       if (parsed._opaqueMultiAgentV2Payload) {
         throw new Error(
-          "ChatGPT Web subagents currently require a V1-rooted task. "
-          + "Start a new task with a ChatGPT Web model before spawning ChatGPT Web Pro. "
+          "Lca Token subagents currently require a V1-rooted task. "
+          + "Start a new task with a Lca Token model before spawning Lca Token Pro. "
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
       const turnCapabilities = parsed._compactionRequest
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
-      const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+      const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
@@ -274,7 +275,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         } catch (error) {
           const identity = extractChatGptTurnIdentity(parsed);
           console.warn(
-            `[chatgpt-web] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
+            `[lca-token] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
           );
           throw error;
         }
@@ -318,14 +319,14 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            emitBrowserCompletion(settled, estimateLcaTokenUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
             return;
           }
 
           let turnToken: string | undefined;
           if (session.runtime.mode === "tools") {
             turnToken = await withAbort(session.runtime.token, incoming.abortSignal);
-            if (!environment) throw new Error("Tool-capable ChatGPT web runtime lost its trusted environment");
+            if (!environment) throw new Error("Tool-capable Lca Token runtime lost its trusted environment");
             broker.updateEnvironment(turnToken, environment);
 
             const outstanding = session.outstanding();
@@ -334,7 +335,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
                 replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateChatGptWebUsage(parsed, { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
+                emitToolBatch(outstanding, estimateLcaTokenUsage(parsed, { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -346,7 +347,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               }
             }
           } else if (session.outstanding().length > 0) {
-            throw new Error("Read-only ChatGPT Web runtime cannot own local tool calls");
+            throw new Error("Read-only Lca Token runtime cannot own local tool calls");
           }
 
           const toolWaitAbort = new AbortController();
@@ -400,30 +401,26 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
                   if (turnToken) broker.revoke(turnToken);
                   throw next.outcome.error;
                 }
-                if (turnToken && !broker.contextLoaded(turnToken)) {
-                  broker.revoke(turnToken);
-                  throw new Error("ChatGPT completed before loading the complete immutable Codex context snapshot");
-                }
                 if (turnToken) broker.revoke(turnToken);
                 if (session.runtime.text.value() !== next.outcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateChatGptWebUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
+                  estimateLcaTokenUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
                 return;
               }
               if (!turnToken || session.runtime.mode !== "tools") {
-                throw new Error("Read-only ChatGPT Web runtime received a broker tool batch");
+                throw new Error("Read-only Lca Token runtime received a broker tool batch");
               }
               if (next.requests.length === 0) throw new Error("ChatGPT tool bridge returned an empty batch");
               validateBatchTools(parsed, next.requests);
               session.setOutstanding(next.requests, roundReasoning, roundEvents);
               emitToolBatch(
                 next.requests,
-                estimateChatGptWebUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
+                estimateLcaTokenUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
                 emit,
               );
               return;
@@ -433,7 +430,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           }
         });
       } catch (error) {
-        if (error instanceof ChatGptWebAdapterError && error.retryable) {
+        if (error instanceof LcaTokenAdapterError && error.retryable) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
@@ -444,7 +441,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         if (session.runtime.mode === "tools") {
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
         }
-        if (error instanceof ChatGptWebAdapterError) {
+        if (error instanceof LcaTokenAdapterError) {
           emit({
             type: "error",
             message: error.message,

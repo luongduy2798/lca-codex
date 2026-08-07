@@ -4,7 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { dirname } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import type { ChatGptTurnEnvironment } from "./environment";
-import { CHATGPT_CONTEXT_CHUNK_TARGET_CHARS, type ChatGptContextSnapshot } from "./prompt";
+import { withoutRetiredTurnHandles, type ChatGptContextEntry, type ChatGptContextSnapshot } from "./prompt";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
   expiresAt?: number;
@@ -38,13 +38,15 @@ interface ToolWaiter {
   onAbort?: () => void;
 }
 
-interface BrokerContextChunk {
-  snapshot_id: string;
-  sha256: string;
+type ContextQueryAction = "instructions" | "recent" | "search" | "get" | "full" | "image";
+
+interface BrokerContextEntry {
+  id: string;
   index: number;
+  role: string;
   content: string;
-  next_cursor: string | null;
-  eof: boolean;
+  attachment_refs: string[];
+  truncated: boolean;
 }
 
 interface TurnChannel {
@@ -53,9 +55,6 @@ interface TurnChannel {
   bindingId?: string;
   context?: {
     snapshot: ChatGptContextSnapshot;
-    nextChunk: number;
-    loaded: boolean;
-    lastDelivered?: { cursor: string; response: BrokerContextChunk };
   };
   queuedCallIds: string[];
   invocations: Map<string, PendingInvocation>;
@@ -65,10 +64,16 @@ interface TurnChannel {
 
 interface BrokerRequest {
   id: string;
-  method: "claim" | "resolve" | "release" | "context_manifest" | "context_next" | "invoke";
+  method: "claim" | "resolve" | "release" | "context_query" | "invoke";
   token?: string;
   bindingId?: string;
-  cursor?: string;
+  action?: ContextQueryAction;
+  query?: string;
+  ids?: string[];
+  offset?: number;
+  limit?: number;
+  maxChars?: number;
+  attachmentRef?: string;
   wireName?: string;
   freeform?: boolean;
   arguments?: Record<string, unknown>;
@@ -159,7 +164,7 @@ export class TurnBroker {
     await this.start();
     this.prune();
     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
-      throw new Error("ChatGPT web turn broker TTL must be a positive finite number");
+      throw new Error("Lca Token turn broker TTL must be a positive finite number");
     }
     const token = opaqueId("turn");
     const channel: TurnChannel = {
@@ -169,7 +174,7 @@ export class TurnBroker {
         ...(ttlMs !== undefined ? { expiresAt: Date.now() + ttlMs } : {}),
       },
       ...(contextSnapshot ? {
-        context: { snapshot: contextSnapshot, nextChunk: 0, loaded: false },
+        context: { snapshot: contextSnapshot },
       } : {}),
       queuedCallIds: [],
       invocations: new Map(),
@@ -178,13 +183,6 @@ export class TurnBroker {
     this.channels.set(token, channel);
     this.pending.set(token, channel);
     return token;
-  }
-
-  contextLoaded(token: string): boolean {
-    this.prune();
-    const channel = this.channels.get(token);
-    if (!channel) throw new Error("turn token is invalid or expired");
-    return channel.context?.loaded ?? true;
   }
 
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void {
@@ -230,7 +228,7 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
-    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
+    console.info(`[lca-token] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
 
@@ -285,7 +283,7 @@ export class TurnBroker {
         server.once("error", rejectStart);
         server.on("error", error => {
           console.error(
-            `[chatgpt-web] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
+            `[lca-token] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
           );
         });
         server.listen(this.socketPath, () => {
@@ -304,17 +302,17 @@ export class TurnBroker {
         return;
       }
       if (!lstatSync(this.socketPath).isSocket()) {
-        rejectStart(new Error(`ChatGPT web broker path exists and is not a socket: ${this.socketPath}`));
+        rejectStart(new Error(`Lca Token broker path exists and is not a socket: ${this.socketPath}`));
         return;
       }
       const socketStat = lstatSync(this.socketPath);
       const getuid = process.getuid;
       if (typeof getuid === "function" && socketStat.uid !== getuid()) {
-        rejectStart(new Error(`ChatGPT web broker socket is not owned by the current user: ${this.socketPath}`));
+        rejectStart(new Error(`Lca Token broker socket is not owned by the current user: ${this.socketPath}`));
         return;
       }
       if ((socketStat.mode & 0o077) !== 0) {
-        rejectStart(new Error(`ChatGPT web broker socket has unsafe permissions: ${this.socketPath}`));
+        rejectStart(new Error(`Lca Token broker socket has unsafe permissions: ${this.socketPath}`));
         return;
       }
       const probe = createConnection(this.socketPath);
@@ -326,11 +324,11 @@ export class TurnBroker {
         action();
       };
       probe.setTimeout(2_000, () => finishProbe(() => {
-        rejectStart(new Error(`Timed out while checking existing ChatGPT web broker socket: ${this.socketPath}`));
+        rejectStart(new Error(`Timed out while checking existing Lca Token broker socket: ${this.socketPath}`));
       }));
       probe.once("connect", () => {
         finishProbe(() => {
-          rejectStart(new Error(`ChatGPT web broker socket is already owned by another process: ${this.socketPath}`));
+          rejectStart(new Error(`Lca Token broker socket is already owned by another process: ${this.socketPath}`));
         });
       });
       probe.once("error", error => {
@@ -338,7 +336,7 @@ export class TurnBroker {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "ECONNREFUSED" && code !== "ENOENT") {
             rejectStart(new Error(
-              `Could not verify existing ChatGPT web broker socket ${this.socketPath}: ${error.message}`,
+              `Could not verify existing Lca Token broker socket ${this.socketPath}: ${error.message}`,
             ));
             return;
           }
@@ -403,8 +401,7 @@ export class TurnBroker {
     if (request.method !== "claim"
       && request.method !== "resolve"
       && request.method !== "release"
-      && request.method !== "context_manifest"
-      && request.method !== "context_next"
+      && request.method !== "context_query"
       && request.method !== "invoke") {
       throw new Error("turn broker method is invalid");
     }
@@ -418,7 +415,7 @@ export class TurnBroker {
       const channel = this.channels.get(token);
       const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
       console.error(
-        `[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
+        `[lca-token] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
         + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
       );
       if (!channel) {
@@ -447,7 +444,7 @@ export class TurnBroker {
     if (!binding) {
       const retiredTurn = this.retiredBindings.get(bindingId);
       console.error(
-        `[chatgpt-web] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
+        `[lca-token] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
         + ` retiredTurn=${retiredTurn ?? "unknown"})`,
       );
       throw new Error(retiredTurn !== undefined
@@ -460,53 +457,109 @@ export class TurnBroker {
       return { released: true };
     }
     if (request.method === "resolve") {
-      return {
-        environment: binding.channel.environment,
-        contextLoaded: binding.channel.context?.loaded ?? true,
-      };
+      return { environment: binding.channel.environment };
     }
-    if (request.method === "context_manifest") {
+    if (request.method === "context_query") {
       const context = binding.channel.context;
-      if (!context) throw new Error("this Codex turn has no MCP context snapshot");
-      return {
-        snapshot_id: context.snapshot.id,
-        sha256: context.snapshot.digest,
-        format: "codex-context-json-v4",
-        total_chars: context.snapshot.totalChars,
-        total_chunks: context.snapshot.chunks.length,
-        chunk_target_chars: CHATGPT_CONTEXT_CHUNK_TARGET_CHARS,
-        next_cursor: context.loaded ? null : String(context.nextChunk),
-        loaded: context.loaded,
-      };
-    }
-    if (request.method === "context_next") {
-      const context = binding.channel.context;
-      if (!context) throw new Error("this Codex turn has no MCP context snapshot");
-      if (context.lastDelivered?.cursor === request.cursor) return context.lastDelivered.response;
-      if (context.loaded) throw new Error("the complete Codex context snapshot has already been delivered");
-      const expectedCursor = String(context.nextChunk);
-      if (request.cursor !== expectedCursor) {
-        throw new Error(`Codex context cursor mismatch: expected ${expectedCursor}`);
+      if (!context) throw new Error("this Codex turn has no lazy context snapshot");
+      const action = request.action;
+      if (!action) throw new Error("context action is required");
+      const snapshot = context.snapshot;
+      const maxChars = Math.min(100_000, Math.max(1_000, request.maxChars ?? 24_000));
+      const limit = Math.min(20, Math.max(1, request.limit ?? 6));
+      const offset = Math.max(0, request.offset ?? 0);
+
+      if (action === "image") {
+        const ref = request.attachmentRef?.trim();
+        if (!ref) throw new Error("attachment_ref is required for context image retrieval");
+        const attachment = snapshot.attachments.find(candidate => candidate.ref === ref);
+        if (!attachment) throw new Error(`historical attachment is not available: ${ref}`);
+        return {
+          snapshot_id: snapshot.id,
+          sha256: snapshot.digest,
+          action,
+          attachment: {
+            ref: attachment.ref,
+            message_id: attachment.messageId,
+            image_url: attachment.imageUrl,
+            ...(attachment.detail ? { detail: attachment.detail } : {}),
+          },
+        };
       }
-      const index = context.nextChunk;
-      const content = context.snapshot.chunks[index];
-      if (content === undefined) throw new Error("Codex context snapshot cursor is out of range");
-      context.nextChunk += 1;
-      const eof = context.nextChunk >= context.snapshot.chunks.length;
-      if (eof) context.loaded = true;
-      const response: BrokerContextChunk = {
-        snapshot_id: context.snapshot.id,
-        sha256: context.snapshot.digest,
-        index,
-        content,
-        next_cursor: eof ? null : String(context.nextChunk),
-        eof,
+
+      if (action === "full") {
+        const fullHistory = withoutRetiredTurnHandles(JSON.stringify({
+          version: 1,
+          messages: snapshot.history.map(entry => ({ id: entry.id, ...entry.payload })),
+        }));
+        const content = fullHistory.slice(offset, offset + maxChars);
+        const nextOffset = offset + content.length < fullHistory.length ? offset + content.length : null;
+        return {
+          snapshot_id: snapshot.id,
+          sha256: snapshot.digest,
+          action,
+          offset,
+          content,
+          next_offset: nextOffset,
+          total_chars: fullHistory.length,
+        };
+      }
+
+      let entries: ChatGptContextEntry[];
+      if (action === "instructions") {
+        entries = snapshot.history.filter(entry => entry.role === "developer").slice(0, limit);
+      } else if (action === "recent") {
+        entries = snapshot.history.filter(entry => entry.role !== "developer").slice(-limit);
+      } else if (action === "get") {
+        const ids = new Set((request.ids ?? []).map(id => id.trim()).filter(Boolean));
+        if (ids.size === 0) throw new Error("ids are required for context get");
+        entries = snapshot.history.filter(entry => ids.has(entry.id)).slice(0, limit);
+      } else if (action === "search") {
+        const query = request.query?.trim().toLowerCase();
+        if (!query) throw new Error("query is required for context search");
+        const terms = query.split(/\s+/).filter(Boolean);
+        entries = snapshot.history
+          .filter(entry => entry.role !== "developer")
+          .map(entry => {
+            const haystack = entry.searchText.toLowerCase();
+            const score = terms.reduce((total, term) => total + (haystack.includes(term) ? 1 : 0), 0);
+            return { entry, score };
+          })
+          .filter(match => match.score > 0)
+          .sort((left, right) => right.score - left.score || right.entry.index - left.entry.index)
+          .slice(offset, offset + limit)
+          .map(match => match.entry);
+      } else {
+        throw new Error(`unsupported context action: ${action}`);
+      }
+
+      let remaining = maxChars;
+      const packed: BrokerContextEntry[] = [];
+      for (const entry of entries) {
+        if (remaining <= 0) break;
+        const serialized = withoutRetiredTurnHandles(JSON.stringify(entry.payload));
+        const truncated = serialized.length > remaining;
+        const content = truncated ? `${serialized.slice(0, Math.max(0, remaining - 18))}...[truncated]` : serialized;
+        packed.push({
+          id: entry.id,
+          index: entry.index,
+          role: entry.role,
+          content,
+          attachment_refs: entry.attachmentRefs,
+          truncated,
+        });
+        remaining -= content.length;
+      }
+      return {
+        snapshot_id: snapshot.id,
+        sha256: snapshot.digest,
+        action,
+        entries: packed,
+        total_entries: action === "instructions"
+          ? snapshot.history.filter(entry => entry.role === "developer").length
+          : snapshot.history.filter(entry => entry.role !== "developer").length,
+        ...(action === "search" ? { query: request.query ?? "", next_offset: packed.length === limit ? offset + packed.length : null } : {}),
       };
-      context.lastDelivered = { cursor: expectedCursor, response };
-      return response;
-    }
-    if (binding.channel.context && !binding.channel.context.loaded) {
-      throw new Error("load the complete Codex context snapshot before invoking lca-token tools");
     }
 
     const wireName = request.wireName?.trim();
@@ -522,7 +575,7 @@ export class TurnBroker {
       binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
       binding.channel.queuedCallIds.push(callId);
       console.info(
-        `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
+        `[lca-token] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
       this.scheduleToolWaiters(binding.channel);
     });
@@ -546,7 +599,7 @@ export class TurnBroker {
     if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
     const batch = this.takeQueued(channel);
     console.info(
-      `[chatgpt-web] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
+      `[lca-token] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
     );
     const waiters = [...channel.waiters];
     channel.waiters.clear();
@@ -608,16 +661,16 @@ export async function callTurnBroker<T>(
     };
     const timer = timeoutMs === null
       ? undefined
-      : setTimeout(() => finishError(new Error("ChatGPT web turn broker timed out")), timeoutMs);
+      : setTimeout(() => finishError(new Error("Lca Token turn broker timed out")), timeoutMs);
     socket.setEncoding("utf8");
-    socket.once("error", error => finishError(new Error(`ChatGPT web turn broker unavailable: ${error.message}`)));
-    socket.once("close", () => finishError(new Error("ChatGPT web turn broker closed the connection")));
+    socket.once("error", error => finishError(new Error(`Lca Token turn broker unavailable: ${error.message}`)));
+    socket.once("close", () => finishError(new Error("Lca Token turn broker closed the connection")));
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...request })}\n`));
     socket.on("data", chunk => {
       if (settled) return;
       buffered += chunk;
       if (buffered.length > MAX_BROKER_LINE_CHARS) {
-        finishError(new Error("ChatGPT web turn broker response exceeds size limit"));
+        finishError(new Error("Lca Token turn broker response exceeds size limit"));
         return;
       }
       const newline = buffered.indexOf("\n");
@@ -626,11 +679,11 @@ export async function callTurnBroker<T>(
       try {
         response = JSON.parse(buffered.slice(0, newline)) as BrokerResponse;
       } catch (error) {
-        finishError(new Error(`ChatGPT web turn broker returned invalid JSON: ${errorOf(error).message}`));
+        finishError(new Error(`Lca Token turn broker returned invalid JSON: ${errorOf(error).message}`));
         return;
       }
       if (response.id !== id) {
-        finishError(new Error("ChatGPT web turn broker response id mismatch"));
+        finishError(new Error("Lca Token turn broker response id mismatch"));
         return;
       }
       settled = true;

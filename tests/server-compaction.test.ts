@@ -4,10 +4,10 @@ import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary } from "../src/responses/compaction";
 import { compactRequest, responseRequest } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
-import { extractChatGptTurnIdentity } from "../src/adapters/chatgpt-web/environment";
-import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
+import { extractChatGptTurnIdentity } from "../src/adapters/lca-token/environment";
+import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/lca-token/turn-execution";
 
-const model = "chatgpt-web/high";
+const model = "lca-token";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
 
 function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
@@ -33,7 +33,7 @@ function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
   };
 }
 
-test("compacts ChatGPT Web v1 through a dedicated read-only browser summarization turn", async () => {
+test("compacts Lca Token v1 through a dedicated read-only browser summarization turn", async () => {
   const providers: CodexProviderConfig[] = [];
   const config = defaultConfig("full");
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
@@ -51,7 +51,7 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
 
   expect(response.status).toBe(200);
   expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
+  expect(providers[0]!.lcaToken?.localToolsEnabled).toBe(true);
   const body = await response.json() as { output: Array<{ role: string; content: Array<{ text: string }> }> };
   expect(body.output.map(item => item.content[0]!.text)).toEqual([
     "First request",
@@ -122,7 +122,7 @@ test("compaction identity accepts a historical source message from the pre-compa
   expect(response.status).toBe(200);
 });
 
-test("returns exactly one native compaction item for a ChatGPT Web v2 request", async () => {
+test("returns exactly one native compaction item for a Lca Token v2 request", async () => {
   const providers: CodexProviderConfig[] = [];
   const config = defaultConfig("full");
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
@@ -140,7 +140,7 @@ test("returns exactly one native compaction item for a ChatGPT Web v2 request", 
 
   expect(response.status).toBe(200);
   expect(providers).toHaveLength(1);
-  expect(providers[0]!.chatgptWeb?.localToolsEnabled).toBe(true);
+  expect(providers[0]!.lcaToken?.localToolsEnabled).toBe(true);
   const body = await response.json() as {
     status: string;
     output: Array<{ type: string; encrypted_content?: string }>;
@@ -165,11 +165,11 @@ test("streams one compaction item without leaking the summary as a normal assist
   expect(sse.match(/\"type\":\"compaction\"/g)).toHaveLength(2);
 });
 
-test("rejects an unknown routed compact model instead of treating it as ChatGPT Web", async () => {
+test("rejects an unknown routed compact model instead of treating it as Lca Token", async () => {
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "chatgpt-web/not-enabled", input: [] }),
+    body: JSON.stringify({ model: "lca-token/not-enabled", input: [] }),
   }), defaultConfig("browser-only"));
 
   expect(response.status).toBe(400);
@@ -177,20 +177,20 @@ test("rejects an unknown routed compact model instead of treating it as ChatGPT 
   expect(body.error.message).toContain("model is not enabled");
 });
 
-test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
-  for (const [routedModel, label] of [
-    ["chatgpt-web/extra-high", "Extra High"],
-    ["chatgpt-web/pro", "Pro"],
+test("rejects Pro-only reasoning levels before opening a browser when the account has no Pro access", async () => {
+  for (const [effort, label] of [
+    ["xhigh", "Extra High"],
+    ["max", "Pro"],
   ] as const) {
     const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: routedModel, input: "test", stream: false }),
+      body: JSON.stringify({ model, reasoning: { effort }, input: "test", stream: false }),
     }), defaultConfig("browser-only"));
 
     expect(response.status).toBe(400);
     const body = await response.json() as { error: { message: string } };
-    expect(body.error.message).toContain(`${label} is not available for this account`);
+    expect(body.error.message).toContain(`${label} effort is not available for this account`);
   }
 });
 
@@ -204,7 +204,7 @@ test("preserves a structured browser preflight failure through the v1 compaction
     async runTurn(_parsed, _incoming, emit) {
       emit({
         type: "error",
-        message: "This task exceeds the ChatGPT Web context window.",
+        message: "This task exceeds the Lca Token context window.",
         status: 400,
         errorType: "invalid_request_error",
         code: "context_length_exceeded",
@@ -216,14 +216,14 @@ test("preserves a structured browser preflight failure through the v1 compaction
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({
     error: {
-      message: "This task exceeds the ChatGPT Web context window.",
+      message: "This task exceeds the Lca Token context window.",
       type: "invalid_request_error",
       code: "context_length_exceeded",
     },
   });
 });
 
-test("refuses a ChatGPT Web continuation when local previous-response state is unavailable", async () => {
+test("refuses a Lca Token continuation when local previous-response state is unavailable", async () => {
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },

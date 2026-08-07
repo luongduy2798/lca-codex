@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "author": "thayduytrutri",
-  "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT web session.",
+  "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT session.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/luongduy2798/lca-token.git"

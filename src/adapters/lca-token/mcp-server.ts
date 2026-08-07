@@ -13,27 +13,24 @@ interface ClaimedTurn {
 
 interface ResolvedTurn {
   environment: ChatGptTurnEnvironment & { expiresAt?: number };
-  contextLoaded?: boolean;
 }
 
-interface ContextManifest {
+interface ContextQueryResult {
   snapshot_id: string;
   sha256: string;
-  format: string;
-  total_chars: number;
-  total_chunks: number;
-  chunk_target_chars: number;
-  next_cursor: string | null;
-  loaded: boolean;
-}
-
-interface ContextChunk {
-  snapshot_id: string;
-  sha256: string;
-  index: number;
-  content: string;
-  next_cursor: string | null;
-  eof: boolean;
+  action: "instructions" | "recent" | "search" | "get" | "full" | "image";
+  entries?: Array<Record<string, unknown>>;
+  content?: string;
+  next_offset?: number | null;
+  total_chars?: number;
+  total_entries?: number;
+  query?: string;
+  attachment?: {
+    ref: string;
+    message_id: string;
+    image_url: string;
+    detail?: string;
+  };
 }
 
 const turnTokenSchema = z.string()
@@ -42,7 +39,7 @@ const bindingSchema = z.string()
   .regex(/^binding_[A-Za-z0-9_-]{32}$/, "binding_id must be the exact binding_ value returned by codex_bind_turn; never pass turn_token here")
   .describe("Exact binding_ value returned by codex_bind_turn. This is not the turn_token.");
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
-const contextCursorSchema = z.string().regex(/^\d+$/, "cursor must be the exact next_cursor returned by lca-token");
+const contextActionSchema = z.enum(["instructions", "recent", "search", "get", "full", "image"]);
 
 function scopeHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
@@ -79,6 +76,35 @@ function result(value: Record<string, unknown>, isError = false) {
     content: [{ type: "text" as const, text: JSON.stringify(value) }],
     structuredContent: value,
     ...(isError ? { isError: true } : {}),
+  };
+}
+
+function contextImageResult(value: ContextQueryResult) {
+  const attachment = value.attachment;
+  if (!attachment) throw new Error("lazy context image response did not include an attachment");
+  const dataMatch = /^data:([^;,]+);base64,(.*)$/s.exec(attachment.image_url);
+  const metadata = {
+    snapshot_id: value.snapshot_id,
+    sha256: value.sha256,
+    action: value.action,
+    attachment_ref: attachment.ref,
+    message_id: attachment.message_id,
+  };
+  if (dataMatch) {
+    return {
+      content: [
+        { type: "text" as const, text: JSON.stringify(metadata) },
+        { type: "image" as const, data: dataMatch[2]!, mimeType: dataMatch[1]! },
+      ] as never,
+      structuredContent: metadata,
+    };
+  }
+  return {
+    content: [
+      { type: "text" as const, text: JSON.stringify(metadata) },
+      { type: "resource_link" as const, uri: attachment.image_url, name: attachment.ref, mimeType: "image/*" },
+    ] as never,
+    structuredContent: metadata,
   };
 }
 
@@ -205,7 +231,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_bind_turn",
     {
       title: "Bind this response to its Codex turn",
-      description: "Idempotently exchange the current turn_token for a distinct binding_id. Copy the returned binding_ value exactly into every later lca-token call; never reuse the turn_ value as binding_id.",
+      description: "Idempotently exchange the current turn_token for a distinct binding_id. Copy the returned binding_ value exactly into every later connector call; never reuse the turn_ value as binding_id.",
       inputSchema: { turn_token: turnTokenSchema },
       outputSchema: {
         binding_id: bindingSchema,
@@ -222,24 +248,20 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         command_tool: z.string().nullable(),
         outer_tool_gateway: z.string().nullable(),
         capabilities: z.array(z.string()),
-        context_transport: z.enum(["mcp_pull", "none"]),
+        context_transport: z.enum(["mcp_lazy", "none"]),
         context_required: z.boolean(),
         next_action: z.string(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ turn_token }, extra) => {
-      console.error(`[chatgpt-web-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-token-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
       const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, { method: "claim", token: turn_token });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
       const expiresAt = claimed.environment.expiresAt === undefined
         ? null
         : new Date(claimed.environment.expiresAt).toISOString();
-      const manifest = await callTurnBroker<ContextManifest>(options.brokerSocketPath, {
-        method: "context_manifest",
-        bindingId: claimed.bindingId,
-      });
       return result({
         binding_id: claimed.bindingId,
         binding_status: "active",
@@ -254,60 +276,44 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         tool_count: claimed.environment.tools.length,
         command_tool: commandTool ? wireName(commandTool) : gateway ? "exec_command" : null,
         outer_tool_gateway: gateway ? wireName(gateway) : null,
-        capabilities: ["native_tool_loop", "session_history", "context_pull", "exec", "apply_patch", "images", "tool_registry"],
-        context_transport: "mcp_pull",
-        context_required: !manifest.loaded,
-        next_action: manifest.loaded
-          ? "The immutable Codex context is already loaded; continue the task with this binding_id."
-          : "Call codex_context_manifest with this binding_id, then codex_context_next in strict next_cursor order until eof=true before any other action.",
+        capabilities: ["native_tool_loop", "session_history", "lazy_context", "lazy_instructions", "lazy_images", "exec", "apply_patch", "images", "tool_registry"],
+        context_transport: "mcp_lazy",
+        context_required: false,
+        next_action: "Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool. Call codex_context selectively; do not preload history or instruction catalogs.",
       });
     },
   );
 
   server.registerTool(
-    "codex_context_manifest",
+    "codex_context",
     {
-      title: "Inspect the immutable Codex context snapshot",
-      description: "Return metadata for the current turn's immutable Codex context. Call this immediately after codex_bind_turn, before commentary, answers, or other tools.",
-      inputSchema: { binding_id: bindingSchema },
+      title: "Read historical Codex context on demand",
+      description: "Retrieve only the Codex context needed for the current request. Use instructions for Codex-generated skill/capability guidance, recent/search/get for older task history, full only when selective retrieval cannot preserve correctness, and image for an older attachment_ref.",
+      inputSchema: {
+        binding_id: bindingSchema,
+        action: contextActionSchema,
+        query: z.string().max(2_000).optional(),
+        ids: z.array(z.string().max(128)).max(20).optional(),
+        offset: z.number().int().min(0).max(10_000_000).optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+        max_chars: z.number().int().min(1_000).max(100_000).optional(),
+        attachment_ref: z.string().max(256).optional(),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ binding_id }) => {
-      const manifest = await callTurnBroker<ContextManifest>(options.brokerSocketPath, {
-        method: "context_manifest",
+    async ({ binding_id, action, query, ids, offset, limit, max_chars, attachment_ref }) => {
+      const context = await callTurnBroker<ContextQueryResult>(options.brokerSocketPath, {
+        method: "context_query",
         bindingId: binding_id,
+        action,
+        ...(query !== undefined ? { query } : {}),
+        ...(ids !== undefined ? { ids } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(max_chars !== undefined ? { maxChars: max_chars } : {}),
+        ...(attachment_ref !== undefined ? { attachmentRef: attachment_ref } : {}),
       });
-      return result({
-        ...manifest,
-        next_action: manifest.loaded
-          ? "Context loading is complete."
-          : `Call codex_context_next with cursor ${manifest.next_cursor}.`,
-      });
-    },
-  );
-
-  server.registerTool(
-    "codex_context_next",
-    {
-      title: "Read the next Codex context chunk",
-      description: "Read exactly the next immutable Codex context chunk. Pass the exact next_cursor from the manifest or previous chunk; do not skip or reorder chunks. Repeat until eof=true.",
-      inputSchema: { binding_id: bindingSchema, cursor: contextCursorSchema },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
-    async ({ binding_id, cursor }) => {
-      const chunk = await callTurnBroker<ContextChunk>(options.brokerSocketPath, {
-        method: "context_next",
-        bindingId: binding_id,
-        cursor,
-      });
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({
-          ...chunk,
-          next_action: chunk.eof
-            ? "The complete Codex context is loaded. Execute the latest active user request now."
-            : `Call codex_context_next again with cursor ${chunk.next_cursor}.`,
-        }) }],
-      };
+      return action === "image" ? contextImageResult(context) : result(context as unknown as Record<string, unknown>);
     },
   );
 
@@ -327,7 +333,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ binding_id, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => {
-      console.error(`[chatgpt-web-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-token-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
       const commandName = tool?.name ?? "exec_command";

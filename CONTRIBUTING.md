@@ -1,6 +1,6 @@
 # Contributing
 
-Keep the project narrow: ChatGPT web-backed Codex models only. Generic providers and unrelated
+Keep the project narrow: Lca Token-backed Codex models only. Generic providers and unrelated
 OpenCodex product surfaces are out of scope.
 
 Core invariants:

@@ -5,7 +5,7 @@ Codex app / CLI
       │ Responses API on loopback
       ▼
 launcher-owned lca-token daemon
-  ├─ official /models passthrough + fixed ChatGPT Web models
+  ├─ official /models passthrough + fixed Lca Token models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
   ├─ capability broker (full mode only)
@@ -20,17 +20,17 @@ launcher-owned lca-token daemon
 
 ### `browser-only`
 
-- Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
-  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
-  the authenticated account exposes Pro.
+- Exposes one `lca-token` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
+  matching ChatGPT browser mode; Extra High and Pro are advertised only when the authenticated
+  account exposes Pro.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat. Because this mode has no connector, the context remains an inline composer payload.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
 ### `full`
 
-- Exposes the same fixed models; Instant through Extra High are tool-capable, while Pro remains
-  read-only.
+- Exposes the same single model; Instant through Extra High are tool-capable, while Pro remains
+  read-only after reasoning is resolved at runtime.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
@@ -48,25 +48,34 @@ controls.
 
 In full mode, tool-capable turns no longer carry the accumulated Codex history through the visible
 composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective Codex
-context into an immutable per-turn broker snapshot, assigns it a SHA-256 identity, and gives the
-composer only a small `<codex_context_ref>` bootstrap plus the turn capability. After
-`codex_bind_turn`, ChatGPT must call `codex_context_manifest` and then `codex_context_next` in strict
-cursor order until `eof=true`. The broker rejects native Codex tool execution before the final
-context chunk is delivered, and the Responses adapter rejects a browser final answer that skipped
-context loading. A repeated delivery of the immediately previous cursor is replay-idempotent so a
-transport retry cannot corrupt the cursor. The snapshot dies with its outer Codex turn.
+context into an immutable per-turn broker snapshot and sends only a projected active bootstrap:
+active system instructions, unknown/custom developer overrides, the Codex-resolved AGENTS/project
+instruction fragment, the latest user request, and current-turn images. Standard Codex base-model,
+skill, permission, app, and plugin developer scaffolding stays in the broker instead of being replayed
+into every Temporary Chat. One read-only `codex_context` tool exposes `instructions` for that Codex
+capability guidance plus `recent`, `search`, `get`, `full`, and `image` for older task state. The model
+is explicitly told not to bind or retrieve either history or instruction catalogs when the active
+bootstrap is sufficient. `lca-token` never discovers AGENTS.md or chooses a skill itself; it only
+projects and serves the exact instruction material already supplied by the outer Codex harness.
 
-Context chunks contain the same sanitized role-preserving JSON envelope that the old inline route
-used; the change is transport, not context authority. Codex still decides the accumulated history,
-compaction, tool results, and current user revision. Image bytes remain outside the snapshot and are
-attached natively with stable references. Read-only routes that cannot use the custom connector —
-including Pro, browser-only mode, and routed compaction — retain the inline JSON fallback.
+`codex_bind_turn` is therefore on demand. A direct answer can finish with zero connector calls. If
+history or a native tool is needed, binding still scopes every later request to the exact outer Codex
+turn. Native tool invocation is no longer gated on replaying unrelated history; `codex_tool_inventory`
+and `codex_tool_call` still expose only the registry advertised by that outer turn, preserving Codex
+sandbox, approvals, sessions, and tool lifecycle as the execution authority. The snapshot dies with
+its outer Codex turn.
 
-The appended models advertise the authenticated account's context window and a ten-percent
-auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
-reserves. For MCP-pulled turns the estimate still includes the complete snapshot even though the
-visible bootstrap is small, so Codex compacts against effective model context rather than composer
-length. The independent composer-size boundary therefore applies only to inline fallback routes.
+Historical image bytes remain in the broker and are returned only when `codex_context` is called with
+`action=image` for an attachment reference discovered by a history result. They are no longer
+re-uploaded into every fresh Temporary Chat. Read-only routes that cannot use the custom connector —
+including Pro, browser-only mode, and routed compaction — retain the complete inline JSON fallback.
+
+The appended model advertises the conservative Instant/Medium window because Codex catalog context
+size is model-wide rather than reasoning-specific. The runtime still enforces the exact per-mode
+150k/185k/256k/272k limits and a ten-percent auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
+reserves. Lazy-context turns account for the active browser bootstrap immediately; historical content
+is no longer charged up front merely because it exists in the broker snapshot. The independent
+composer-size boundary therefore applies primarily to inline fallback routes.
 
 Routed compaction v1/v2 runs as a dedicated read-only browser summarization turn with no broker or
 local tools, then returns the native replacement-history shape expected by Codex. A prompt-level
@@ -96,8 +105,8 @@ removed during an explicit launcher migration; launchd remains only for the adva
 mode.
 
 Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
-forwards the authenticated official model catalog and appends only the routed models owned by the
-`chatgpt-web/` namespace; no static catalog is installed.
+forwards the authenticated official model catalog and appends only the single routed `lca-token`
+model; stale `lca-token/*` routes are removed locally and no static catalog is installed.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky

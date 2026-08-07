@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { extractChatGptTurnEnvironment } from "../src/adapters/chatgpt-web/environment";
-import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
+import { extractChatGptTurnEnvironment } from "../src/adapters/lca-token/environment";
+import { ChatGptThreadEnvironmentStore } from "../src/adapters/lca-token/thread-environment";
 import type { CodexParsedRequest, CodexTool } from "../src/types";
 
 const root = resolve(process.cwd());

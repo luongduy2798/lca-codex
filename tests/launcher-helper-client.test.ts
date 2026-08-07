@@ -2,9 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
-import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
-import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
+import { LcaTokenAdapterError } from "../src/adapters/lca-token/adapter-error";
+import { LauncherBrowserHelperClient } from "../src/adapters/lca-token/launcher-helper-client";
+import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/lca-token/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND } from "../src/launcher-browser-host";
 
 const roots: string[] = [];
@@ -108,7 +108,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     if (message.type === "abort" && message.id) {
       queueMicrotask(() => internal.finishWithError(
         message.id!,
-        new DOMException("ChatGPT web turn aborted", "AbortError"),
+        new DOMException("Lca Token turn aborted", "AbortError"),
       ));
     }
   };
@@ -157,7 +157,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     internal.pending.set("rate-limit-123", {
       turn: {
         traceId: "rate-limit-123",
-        modelId: "chatgpt-web/medium",
+        modelId: "gpt-5.6-sol",
         capabilities: { localToolsEnabled: false, proAvailable: false },
         prepare: async () => ({ text: "inspect", images: [], release() {} }),
         onTextDelta() {},
@@ -170,7 +170,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
   internal.handleLine(child, JSON.stringify({
     type: "error",
     id: "rate-limit-123",
-    name: "ChatGptWebAdapterError",
+    name: "LcaTokenAdapterError",
     message: "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
     status: 429,
     errorType: "rate_limit_error",
@@ -179,7 +179,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
   }));
 
   const error = await result.then(() => undefined, failure => failure);
-  expect(error).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(error).toBeInstanceOf(LcaTokenAdapterError);
   expect(error).toMatchObject({
     status: 429,
     errorType: "rate_limit_error",

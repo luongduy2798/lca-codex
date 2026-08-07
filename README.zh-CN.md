@@ -1,7 +1,7 @@
 <h1 align="center">lca-token</h1>
 
 <p align="center">
-  <strong>将 ChatGPT Web（包括 Pro）作为 Codex 原生模型使用。</strong><br>
+  <strong>将 Lca Token（包括 Pro）作为 Codex 原生模型使用。</strong><br>
   切换模型档位，保留原有工作流。
 </p>
 
@@ -18,13 +18,13 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
 </p>
 
-在 Codex 原生模型选择器中选择 **ChatGPT Web — Instant**、**Medium**、**High**、
+在 Codex 原生模型选择器中选择 **Lca Token — Instant**、**Medium**、**High**、
 **Extra High** 或 **Pro**。桥接程序会把完整的 Codex 任务上下文发送到一个全新的
 ChatGPT 临时聊天，附加图片，并将可见的推理过程、工具活动和 Markdown 流式传回同一个
 Codex 任务。
 
 <p align="center">
-  <img src="assets/demo.gif" alt="ChatGPT Web 在原生 Codex harness 中运行" width="960">
+  <img src="assets/demo.gif" alt="Lca Token 在原生 Codex harness 中运行" width="960">
 </p>
 
 ```text
@@ -83,7 +83,7 @@ irm https://github.com/luongduy2798/lca-token/releases/latest/download/install-l
 
 1. 在内置浏览器中登录 ChatGPT。
 2. 运行浏览器冒烟测试。
-3. 点击 **安装模型**，重启一次 Codex，然后选择一个 **ChatGPT Web — …** 模型。
+3. 点击 **安装模型**，重启一次 Codex，然后选择一个 **Lca Token — …** 模型。
 
 只有已登录账户支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令
 的情况下引导你完成完整 harness 设置。
@@ -121,11 +121,11 @@ bun run app
 1. 完成启动器中的必需设置。
 2. 在启动器中打开 **MCP**。请在将使用 ChatGPT 连接器的同一个 OpenAI 账户中创建 Tunnel
    和普通 API 密钥；创建密钥本身免费，也不会消耗模型 API 额度。
-3. 粘贴 Tunnel ID 和 API 密钥，然后点击 **连接 Harness**。
+3. 输入你想使用的 ChatGPT 连接器名称，粘贴 Tunnel ID 和 API 密钥，然后点击 **连接 Harness**。
 4. 在 ChatGPT 设置中启用 **开发者模式**。创建连接器时选择 **Tunnel**，选择刚创建的
-   Tunnel，将 **身份验证** 设为 **无**，并将连接器准确命名为 `lca-token`。
-5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会逐字输入并确认完整的
-   `@lca-token` mention，然后检查连接器 pill。
+   Tunnel，将 **身份验证** 设为 **无**，并使用启动器当前显示的连接器名称。
+5. 扫描工具，选择需要的操作权限，然后运行 **验证运行时**。验证过程会精确选择已配置的
+   连接器名称，然后检查连接器 pill。
 
 写入/修改操作需要 ChatGPT 工作区及管理员政策允许。OpenAI 目前仅为 Business 和
 Enterprise/Edu 工作区说明了这些操作；个人 Pro 账户仅限 read/fetch MCP 权限。请参阅

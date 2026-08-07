@@ -1,5 +1,5 @@
 export type Language = "en" | "zh-CN";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "codex" | "mcp" | "activity" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -20,6 +20,7 @@ export interface LauncherState {
   mcpRuntimeInstalled?: boolean;
   codexRestartRequired?: boolean;
   mcpGuideStep: number;
+  connectorName: string;
   sessionRefreshReminderAt: string | null;
 }
 
@@ -75,6 +76,17 @@ export interface OperationState {
   message: string;
 }
 
+export interface CodexConfigSnapshot {
+  state: "configured" | "disconnected" | "inconsistent" | "not-configured";
+  installed: boolean;
+  active: boolean;
+  configPath: string;
+  exists: boolean;
+  content: string;
+  routeUrl?: string;
+  errors: string[];
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
@@ -87,7 +99,6 @@ export interface LauncherSnapshot {
   logs: LogRecord[];
   urls: {
     github: string;
-    x: string;
     connectors: string;
     tunnels: string;
     keys: string;
@@ -103,7 +114,7 @@ export interface LauncherSnapshot {
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   setLanguage(language: Language): Promise<LauncherState>;
-  openSocial(target: "github" | "x"): Promise<LauncherState>;
+  openSocial(target: "github"): Promise<LauncherState>;
   completeOnboarding(language: Language): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
@@ -119,6 +130,8 @@ export interface LauncherApi {
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
+  codexConfig(): Promise<CodexConfigSnapshot>;
+  resetCodexConfig(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   setBridgeEnabled(enabled: boolean): Promise<LauncherState>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
@@ -127,6 +140,7 @@ export interface LauncherApi {
     tunnelId?: string;
     runtimeKey?: string;
     replace?: boolean;
+    connectorName: string;
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;

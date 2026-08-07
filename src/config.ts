@@ -345,9 +345,9 @@ export function saveConfig(config: AppConfig): void {
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
   const models = ["gpt-5.6-sol"];
-  const efforts = ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])];
+  const efforts = ["low", "medium", "high", ...(config.proAvailable ? ["xhigh", "max"] : [])];
   return {
-    adapter: "chatgpt-web",
+    adapter: "lca-token",
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,
@@ -357,7 +357,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     modelReasoningEfforts: { "gpt-5.6-sol": efforts },
     modelDefaultReasoningEfforts: { "gpt-5.6-sol": "high" },
     noReasoningModels: [],
-    chatgptWeb: {
+    lcaToken: {
       appName: config.appName,
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,

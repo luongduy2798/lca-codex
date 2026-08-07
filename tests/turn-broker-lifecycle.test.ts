@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/lca-token/turn-execution";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
-import type { ChatGptContextSnapshot } from "../src/adapters/chatgpt-web/prompt";
+import { callTurnBroker, TurnBroker } from "../src/adapters/lca-token/turn-broker";
+import type { ChatGptContextSnapshot } from "../src/adapters/lca-token/prompt";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
@@ -135,9 +135,27 @@ test("turn broker serves immutable context in order, replays the last chunk, and
     id: "ctx_test",
     digest: "a".repeat(64),
     serialized,
-    chunks: [serialized.slice(0, 24), serialized.slice(24)],
     totalChars: serialized.length,
     estimatedTextTokens: 20,
+    history: [
+      {
+        id: "instructions-0",
+        index: 0,
+        role: "developer",
+        payload: { role: "developer", content: "<skills_instructions>skill-installer catalog</skills_instructions>" },
+        searchText: "skill-installer catalog",
+        attachmentRefs: [],
+      },
+      {
+        id: "history-0",
+        index: 1,
+        role: "user",
+        payload: { role: "user", content: "hello historical world" },
+        searchText: "hello historical world",
+        attachmentRefs: [],
+      },
+    ],
+    attachments: [],
     images: [],
   };
   try {
@@ -149,42 +167,41 @@ test("turn broker serves immutable context in order, replays the last chunk, and
       tools: [],
     }, 10_000, "context-test", snapshot);
     const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
-    await expect(callTurnBroker(socketPath, {
-      method: "invoke",
+    const recent = await callTurnBroker<{ entries: Array<{ id: string; content: string }> }>(socketPath, {
+      method: "context_query",
       bindingId: claimed.bindingId,
-      wireName: "exec_command",
-    })).rejects.toThrow("load the complete Codex context snapshot");
+      action: "recent",
+      limit: 4,
+    });
+    expect(recent.entries).toHaveLength(1);
+    expect(recent.entries[0]).toMatchObject({ id: "history-0" });
+    expect(recent.entries[0]!.content).toContain("hello historical world");
 
-    const manifest = await callTurnBroker<{ next_cursor: string | null; total_chunks: number }>(socketPath, {
-      method: "context_manifest",
+    const instructions = await callTurnBroker<{ entries: Array<{ id: string; content: string }> }>(socketPath, {
+      method: "context_query",
       bindingId: claimed.bindingId,
+      action: "instructions",
+      limit: 4,
     });
-    expect(manifest).toMatchObject({ next_cursor: "0", total_chunks: 2 });
-    const first = await callTurnBroker<{ content: string; next_cursor: string | null; eof: boolean }>(socketPath, {
-      method: "context_next",
+    expect(instructions.entries.map(entry => entry.id)).toEqual(["instructions-0"]);
+    expect(instructions.entries[0]!.content).toContain("skill-installer catalog");
+
+    const searched = await callTurnBroker<{ entries: Array<{ id: string }> }>(socketPath, {
+      method: "context_query",
       bindingId: claimed.bindingId,
-      cursor: "0",
+      action: "search",
+      query: "historical",
     });
-    const retriedFirst = await callTurnBroker<typeof first>(socketPath, {
-      method: "context_next",
+    expect(searched.entries.map(entry => entry.id)).toEqual(["history-0"]);
+
+    const full = await callTurnBroker<{ content: string; next_offset: number | null }>(socketPath, {
+      method: "context_query",
       bindingId: claimed.bindingId,
-      cursor: "0",
+      action: "full",
+      maxChars: 24_000,
     });
-    expect(retriedFirst).toEqual(first);
-    expect(first).toMatchObject({ content: snapshot.chunks[0], next_cursor: "1", eof: false });
-    const second = await callTurnBroker<{ content: string; next_cursor: string | null; eof: boolean }>(socketPath, {
-      method: "context_next",
-      bindingId: claimed.bindingId,
-      cursor: "1",
-    });
-    const retriedSecond = await callTurnBroker<typeof second>(socketPath, {
-      method: "context_next",
-      bindingId: claimed.bindingId,
-      cursor: "1",
-    });
-    expect(retriedSecond).toEqual(second);
-    expect(second).toMatchObject({ content: snapshot.chunks[1], next_cursor: null, eof: true });
-    expect(broker.contextLoaded(token)).toBe(true);
+    expect(full.content).toContain("hello historical world");
+    expect(full.next_offset).toBeNull();
   } finally {
     await broker.close();
     rmSync(root, { recursive: true, force: true });

@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
-import { callTurnBroker, closeTurnBrokers } from "../src/adapters/chatgpt-web/turn-broker";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/lca-token/turn-execution";
+import { callTurnBroker, closeTurnBrokers } from "../src/adapters/lca-token/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
 

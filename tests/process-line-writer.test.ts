@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Writable } from "node:stream";
-import { createProcessLineWriter } from "../src/adapters/chatgpt-web/process-line-writer";
+import { createProcessLineWriter } from "../src/adapters/lca-token/process-line-writer";
 
 test("browser helper output consumes a closed Windows pipe without an uncaught error", async () => {
   const failures: Error[] = [];

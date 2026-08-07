@@ -370,7 +370,8 @@ class RuntimeHost {
       throw new Error(`Another launcher operation is active: ${this.lifecycleOperation}`);
     }
     this.active = name;
-    this.publishOperation?.({ name, status: "running", message: options.message || name });
+    const publishOperation = options.publishOperation !== false;
+    if (publishOperation) this.publishOperation?.({ name, status: "running", message: options.message || name });
     this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
     try {
       const invocation = options.embedded
@@ -397,11 +398,11 @@ class RuntimeHost {
         };
         collect(child.stdout, stdout, (line) => {
           this.logger.info("runtime.stdout", { operation: name, line });
-          this.publishOperation?.({ name, status: "running", message: redactText(line) });
+          if (publishOperation) this.publishOperation?.({ name, status: "running", message: redactText(line) });
         }, recordPipeError("stdout"));
         collect(child.stderr, stderr, (line) => {
           this.logger.warn("runtime.stderr", { operation: name, line });
-          this.publishOperation?.({ name, status: "running", message: redactText(line) });
+          if (publishOperation) this.publishOperation?.({ name, status: "running", message: redactText(line) });
         }, recordPipeError("stderr"));
         let settled = false;
         let timedOut = null;
@@ -492,12 +493,12 @@ class RuntimeHost {
         throw new Error(detail);
       }
       this.logger.info("runtime.operation_completed", { name });
-      this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
+      if (publishOperation) this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
       return result;
     } catch (error) {
       const message = redactText(error instanceof Error ? error.message : String(error));
       this.logger.error("runtime.operation_failed", { name, message });
-      this.publishOperation?.({ name, status: "failed", message });
+      if (publishOperation) this.publishOperation?.({ name, status: "failed", message });
       throw new Error(message);
     } finally {
       this.active = null;
@@ -529,6 +530,67 @@ class RuntimeHost {
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
 
+  async codexConfigSnapshot() {
+    if (this.codexConfigSnapshotInFlight) return this.codexConfigSnapshotInFlight;
+
+    const snapshot = (async () => {
+      const result = await this.run("codex-config-status", ["route", "status"], {
+        embedded: true,
+        publishOperation: false,
+        timeoutMs: 15_000,
+      });
+      let route;
+      try {
+        route = JSON.parse(result.stdout);
+      } catch {
+        throw new Error("Codex route status returned invalid JSON");
+      }
+      if (typeof route?.installed !== "boolean" || typeof route?.active !== "boolean") {
+        throw new Error("Codex route status is incomplete");
+      }
+      const errors = Array.isArray(route.errors)
+        ? route.errors.filter(value => typeof value === "string" && value.trim()).map(value => value.trim())
+        : [];
+      const configPath = path.join(this.codexHome, "config.toml");
+      let content = "";
+      let exists = false;
+      try {
+        const stat = fs.lstatSync(configPath);
+        if (!stat.isFile()) throw new Error(`Codex config is not a regular file: ${configPath}`);
+        if (stat.size > MAX_CHECKPOINT_FILE_BYTES) {
+          throw new Error(`Codex config exceeds ${MAX_CHECKPOINT_FILE_BYTES} bytes: ${configPath}`);
+        }
+        content = fs.readFileSync(configPath, "utf8");
+        exists = true;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      return {
+        state: !route.installed
+          ? "not-configured"
+          : errors.length > 0
+            ? "inconsistent"
+            : route.active
+              ? "configured"
+              : "disconnected",
+        installed: route.installed,
+        active: route.active,
+        configPath,
+        exists,
+        content,
+        ...(typeof route.routeUrl === "string" && route.routeUrl ? { routeUrl: route.routeUrl } : {}),
+        errors,
+      };
+    })();
+
+    this.codexConfigSnapshotInFlight = snapshot;
+    try {
+      return await snapshot;
+    } finally {
+      if (this.codexConfigSnapshotInFlight === snapshot) this.codexConfigSnapshotInFlight = null;
+    }
+  }
+
   async restoreBridgeRouteWithinOperation(operationName) {
     const current = await this.bridgeStatus(operationName);
     if (!current.installed || !current.active) return current;
@@ -549,6 +611,45 @@ class RuntimeHost {
     this.lifecycleOperation = operationName;
     try {
       return await this.restoreBridgeRouteWithinOperation(operationName);
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
+  async resetCodexConfig() {
+    const name = "codex-config-reset";
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const previousRuntime = this.runtimeConfigSnapshot();
+    this.lifecycleOperation = name;
+    try {
+      if (previousRuntime.owner === "external") {
+        throw new Error("Reset Codex config is only available for a launcher-owned runtime");
+      }
+      await this.supervisor.stopForSetup();
+      const result = await this.run(name, ["route", "reset"], {
+        embedded: true,
+        message: "Resetting Codex configuration",
+        successMessage: "Codex configuration reset",
+        timeoutMs: 15_000,
+      });
+      return JSON.parse(result.stdout);
+    } catch (error) {
+      let recoveryError;
+      if (previousRuntime.owner === "launcher") {
+        try {
+          const runtime = await this.supervisor.startIfConfigured();
+          if (runtime.status !== "ready") {
+            throw new Error(`runtime recovery returned ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+          }
+        } catch (caught) {
+          recoveryError = caught;
+        }
+      }
+      if (!recoveryError) throw error;
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; restoring the previous runtime also failed:`
+        + ` ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+      );
     } finally {
       this.lifecycleOperation = null;
     }
@@ -684,7 +785,7 @@ class RuntimeHost {
     }
   }
 
-  async setupCore() {
+  async setupCore({ replaceCodexRoute = false } = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
     const mode = existing.mode;
@@ -696,8 +797,9 @@ class RuntimeHost {
       "--acknowledge-unofficial",
       "--restart-service",
     ];
+    if (replaceCodexRoute === true) args.push("--replace-codex-route");
     const result = await this.runSetup("core-setup", args, {
-      message: "Installing ChatGPT Web models into Codex",
+      message: "Installing Lca Token models into Codex",
       successMessage: "Codex integration installed",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
     });
@@ -736,8 +838,12 @@ class RuntimeHost {
     };
   }
 
-  setupMcp({ tunnelId = "", runtimeKey = "", replace = false } = {}) {
+  setupMcp({ tunnelId = "", runtimeKey = "", replace = false, appName = "" } = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const connectorName = typeof appName === "string" ? appName.trim() : "";
+    if (!connectorName || connectorName.length > 80) {
+      throw new Error("Connector name must contain 1 to 80 characters");
+    }
     const reuseSavedCredentials = replace !== true && this.mcpCredentialsConfigured();
     if (!reuseSavedCredentials && !/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) {
       throw new Error("Tunnel ID must be tunnel_ followed by 32 lowercase hexadecimal characters");
@@ -750,6 +856,8 @@ class RuntimeHost {
       "--full",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
+      "--app-name",
+      connectorName,
     ];
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");

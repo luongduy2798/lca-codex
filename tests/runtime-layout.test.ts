@@ -136,7 +136,7 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   const config = defaultConfig("browser-only");
   config.browserHost = "launcher";
   config.browserHostDescriptorPath = "/Users/example/.lca-token/runtime/launcher-browser.json";
-  expect(providerConfig(config).chatgptWeb).toMatchObject({
+  expect(providerConfig(config).lcaToken).toMatchObject({
     browserHost: "launcher",
     browserHostDescriptorPath: config.browserHostDescriptorPath,
   });

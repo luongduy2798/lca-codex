@@ -40,8 +40,11 @@ const COMPOSER_SELECTOR = [
 ].join(", ");
 const EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
+  '[data-testid="composer-intelligence-picker-content"]:has([role="slider"])',
   '[role="menu"]:has([role="menuitemradio"])',
+  '[role="menu"]:has([role="slider"])',
   '[role="group"]:has([role="menuitemradio"])',
+  '[role="group"]:has([role="slider"])',
 ].join(", ");
 const COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
 const ASSISTANT_TURN_SELECTOR = [
@@ -245,14 +248,14 @@ class BrowserHost {
   createTurnTab(traceId, helperPid) {
     if (this.turnTabs.size >= MAX_BROWSER_TABS) {
       throw new Error(
-        `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
+        `Lca Token already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
     }
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
     const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    if (!ordinal) throw new Error("Lca Token browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
         partition: CHATGPT_PARTITION,
@@ -1284,17 +1287,53 @@ class BrowserHost {
         const candidates = [...new Set(roots)].filter(visible).map((menu) => ({
           menu,
           items: Array.from(menu.querySelectorAll('[role="menuitemradio"]')).filter(visible),
-        })).filter(candidate => candidate.items.length > 0)
-          .sort((left, right) => right.items.length - left.items.length);
+          slider: menu.querySelector('[role="slider"][aria-valuenow][aria-valuemax]'),
+        })).filter(candidate => candidate.items.length > 0 || candidate.slider)
+          .sort((left, right) => {
+            const leftWeight = left.items.length || (left.slider ? 1 : 0);
+            const rightWeight = right.items.length || (right.slider ? 1 : 0);
+            return rightWeight - leftWeight;
+          });
         const candidate = candidates[0];
-        const target = candidate?.items[targetIndex];
-        if (!candidate || !target) {
-          return { open: Boolean(candidate), count: candidate?.items.length || 0, target: null };
+        if (!candidate) return { open: false, count: 0, mode: null, target: null };
+
+        if (candidate.slider) {
+          const slider = candidate.slider;
+          const min = Number(slider.getAttribute('aria-valuemin') || 0);
+          const max = Number(slider.getAttribute('aria-valuemax'));
+          const value = Number(slider.getAttribute('aria-valuenow'));
+          const targetValue = Math.min(max, Math.max(min, targetIndex));
+          if (![min, max, value, targetValue].every(Number.isFinite)) {
+            return { open: true, count: 0, mode: 'slider', target: null };
+          }
+          const effortItem = Array.from(candidate.menu.querySelectorAll('[role="menuitem"]')).find((item) => {
+            const label = normalize(item.innerText || item.textContent);
+            return /^Effort(?:\\s|$)/i.test(label);
+          });
+          const rect = slider.getBoundingClientRect();
+          return {
+            open: true,
+            count: max - min + 1,
+            mode: 'slider',
+            target: {
+              label: normalize(effortItem?.innerText || effortItem?.textContent),
+              checked: value === targetValue ? 'true' : 'false',
+              point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+              value,
+              targetValue,
+            },
+          };
+        }
+
+        const target = candidate.items[targetIndex];
+        if (!target) {
+          return { open: true, count: candidate.items.length, mode: 'radio', target: null };
         }
         const rect = target.getBoundingClientRect();
         return {
           open: true,
           count: candidate.items.length,
+          mode: 'radio',
           target: {
             label: normalize(target.innerText || target.textContent),
             checked: target.getAttribute('aria-checked'),
@@ -1326,6 +1365,21 @@ class BrowserHost {
     if (!menu.target?.point) {
       throw new Error(`ChatGPT effort item index ${targetIndex} disappeared before activation`);
     }
+    if (menu.mode === "slider") {
+      const focused = await this.evaluateBrowserPage(`(() => {
+        const slider = document.querySelector(${JSON.stringify(EFFORT_MENU_SELECTOR)})
+          ?.querySelector('[role="slider"][aria-valuenow][aria-valuemax]');
+        if (!slider) return false;
+        slider.focus({ preventScroll: true });
+        return document.activeElement === slider;
+      })()`);
+      if (!focused) throw new Error("ChatGPT effort slider could not receive focus");
+      const steps = Math.max(0, Number(menu.target.targetValue) - Number(menu.target.value));
+      for (let index = 0; index < steps; index += 1) {
+        await this.pressTrustedBrowserKey("ArrowRight");
+      }
+      return;
+    }
     await this.clickTrustedBrowserPoint(menu.target.point);
   }
 
@@ -1351,6 +1405,9 @@ class BrowserHost {
   } = {}) {
     const targetIndex = 2;
     const control = await this.waitForEffortControl(readyTimeoutMs, pollMs);
+    if (String(control.label || "").trim().toLowerCase() === "high") {
+      return { effort: "High", changed: false };
+    }
     let menu = await this.readEffortMenu(targetIndex);
     if (!menu.target) {
       menu = menu.open || control.expanded === "true"

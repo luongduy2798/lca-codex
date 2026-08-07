@@ -1,5 +1,5 @@
 /**
- * ChatGPT Web concurrency is deliberately bounded. Every active Codex turn owns a real
+ * Lca Token concurrency is deliberately bounded. Every active Codex turn owns a real
  * browser document in the signed-in account, so unbounded fan-out would create account-level
  * traffic that is indistinguishable from spam.
  */

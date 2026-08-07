@@ -173,7 +173,7 @@ cat > "$APPLICATIONS_DIR/lca-token.desktop" <<EOF
 Type=Application
 Version=1.0
 Name=lca-token
-Comment=ChatGPT Web models inside the native Codex harness
+Comment=Lca Token models inside the native Codex harness
 Exec="$DESKTOP_WRAPPER"
 Icon=lca-token
 Terminal=false

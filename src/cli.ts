@@ -14,7 +14,7 @@ import {
   uninstallCodexIntegration,
 } from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
-import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
+import { runChatGptMcpMain } from "./adapters/lca-token/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
@@ -25,7 +25,7 @@ import { VERSION } from "./version";
 
 const HELP = `lca-token ${VERSION}
 
-Focused ChatGPT web-backed models for the native Codex harness.
+Focused Lca Token models for the native Codex harness.
 
 Usage:
   lca-token setup --browser-only [options]
@@ -142,7 +142,7 @@ async function setupCommand(args: string[]): Promise<void> {
 
   if (!acknowledged) {
     stdout.write(
-      "This is independent, unofficial software. It automates your ChatGPT web session, can break when the UI changes, "
+      "This is independent, unofficial software. It automates your ChatGPT session, can break when the UI changes, "
       + "and must not be used to evade usage limits or access controls.\n",
     );
     acknowledged = await confirm("Continue and store this acknowledgement?");
@@ -202,7 +202,9 @@ async function routeCommand(args: string[]): Promise<void> {
       ? activateCodexIntegration()
       : action === "disconnect"
         ? deactivateCodexIntegration()
-        : undefined;
+        : action === "reset"
+          ? uninstallCodexIntegration()
+          : undefined;
   if (!result) throw new Error(`Unknown route action: ${action}`);
   stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }

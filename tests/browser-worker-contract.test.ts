@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaTokenInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-token/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('composer.fill("")');
   expect(workerSource).toContain("this.insertPromptText(page, prompt)");
   expect(workerSource).toContain("this.insertPromptText(page, ` ${prompt}`)");
@@ -13,7 +13,7 @@ test("Codex context uses the owned CDP composer transport, never the operating-s
 });
 
 test("completed prompts activate the scoped semantic send control", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('.getByTestId("send-button")');
   expect(workerSource).toContain('await sendButton.press("Enter")');
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
@@ -31,7 +31,7 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   }) as ChatGptBrowserWorker;
   const browserTurn = (traceId: string) => ({
     traceId,
-    modelId: "chatgpt-web/high",
+    modelId: "gpt-5.6-sol",
     capabilities: { localToolsEnabled: false, proAvailable: true },
     prepare: async () => ({ text: traceId, images: [], release() {} }),
     onTextDelta() {},
@@ -54,15 +54,15 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
 });
 
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {
-  const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
+  const provider = { adapter: "lca-token" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).turnTimeoutMs).toBeUndefined();
   expect(resolveBrowserConfig({
     ...provider,
-    chatgptWeb: { turnTimeoutMs: 123_000 },
+    lcaToken: { turnTimeoutMs: 123_000 },
   }).turnTimeoutMs).toBe(123_000);
   expect(() => resolveBrowserConfig({
     ...provider,
-    chatgptWeb: { turnTimeoutMs: 0 },
+    lcaToken: { turnTimeoutMs: 0 },
   })).toThrow("turnTimeoutMs must be a positive finite number");
 });
 
@@ -72,7 +72,7 @@ test("managed Chrome defaults follow the host platform", () => {
   expect(defaultChromeExecutable("win32", "D:\\Program Files")).toBe(
     "D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   );
-  const provider = { adapter: "chatgpt-web" as const, baseUrl: "browser://chatgpt" };
+  const provider = { adapter: "lca-token" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
 });
 
@@ -119,11 +119,13 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 });
 
 test("connector verification and real tool turns share one Playwright selector", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
-  expect(workerSource).toContain('composer.pressSequentially("@c", { delay: 25 })');
-  expect(workerSource).toContain('page.locator(\'.__menu-item[tabindex="0"]\')');
+  expect(workerSource).toContain('await composer.fill(`@${this.config.appName}`)');
+  expect(workerSource).toContain('const exactResult = menuRows');
+  expect(workerSource).toContain('exactResult.waitFor({ state: "visible", timeout: fastTimeout })');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
+  expect(workerSource).not.toContain('composer.pressSequentially("@c"');
   expect(workerSource).not.toContain('composer.press("Enter")');
   expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
   expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
@@ -219,10 +221,6 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
-    pressSequentially: async (value: string, options: { delay: number }) => {
-      expect(options).toEqual({ delay: 25 });
-      calls.push(["pressSequentially", value]);
-    },
   };
   const page = {
     getByText: (text: string, options: { exact: boolean }) => {
@@ -233,14 +231,20 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     locator: (selector: string) => {
       if (selector.includes("__menu-item")) {
         return {
-          filter: (options: { has: unknown }) => {
+          filter: (options: { has?: unknown; visible?: boolean }) => {
             expect(options).toEqual({ has: { exactConnectorLabel: true } });
-            return appResult;
+            return {
+              filter: (visibleOptions: { visible: boolean }) => {
+                expect(visibleOptions).toEqual({ visible: true });
+                return appResult;
+              },
+            };
           },
         };
       }
       throw new Error(`Unexpected locator: ${selector}`);
     },
+    keyboard: { press: async (value: string) => { calls.push(["pagePress", value]); } },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -261,9 +265,8 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   expect(activeComposerCalls).toBe(3);
   expect(calls).toEqual([
     ["fill", ""],
-    ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@c"],
+    ["fill", "@lca-token"],
     ["waitForResult"],
     ["dispatchResult", "click"],
     ["waitForSelectedConnector"],
@@ -299,18 +302,15 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     locator: () => ({ filter: () => selectedConnector }),
   };
   const initialComposer = {
-    fill: async () => { calls.push("clear"); },
+    fill: async (value: string) => { calls.push(value ? `fill:${value}` : "clear"); },
     focus: async () => { calls.push("focus"); },
-    pressSequentially: async (value: string) => {
-      expect(value).toBe("@c");
-      calls.push("type");
-    },
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => appResult }
+      ? { filter: () => ({ filter: () => appResult }) }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: { press: async () => { calls.push("escape"); } },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -328,9 +328,9 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   }, page);
 
   expect(calls).toEqual([
-    "clear",
-    "clear", "focus", "type", "menu:1",
-    "clear", "focus", "type", "menu:2",
+    "clear", "focus", "fill:@lca-token", "menu:1",
+    "escape", "clear",
+    "escape", "clear", "focus", "fill:@lca-token", "menu:2",
     "activate", "selected",
   ]);
 });
@@ -360,12 +360,11 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
-    pressSequentially: async (value: string) => { calls.push(["type", value]); },
   };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => appResult }
+      ? { filter: () => ({ filter: () => appResult }) }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
@@ -398,9 +397,8 @@ test("tool-capable prompts use the shared Playwright connector selection before 
 
   expect(calls).toEqual([
     ["fill", ""],
-    ["fill", ""],
     ["focus"],
-    ["type", "@c"],
+    ["fill", "@lca-token"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
@@ -474,12 +472,12 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     ["fileTile", "codex-input-image-1.png"],
     ["sendEnabled"],
   ]);
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).not.toContain('aria-label^="Remove file "');
 });
 
 test("effort selection uses structural menu indices instead of localized labels", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
@@ -498,7 +496,7 @@ test("effort selection uses structural menu indices instead of localized labels"
 });
 
 test("effort selection handles the known ChatGPT rate-limit dialog before trusted pointer activation", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
@@ -545,7 +543,7 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
 
   await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
+    name: "LcaTokenAdapterError",
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
@@ -567,7 +565,7 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   );
 
   await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
+    name: "LcaTokenAdapterError",
     status: 502,
     errorType: "server_error",
     code: "upstream_server_error",
@@ -582,7 +580,7 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
   );
 
   await expect(throwIfChatGptSessionFailureAlert(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
+    name: "LcaTokenAdapterError",
     status: 503,
     errorType: "server_error",
     code: "chatgpt_subscription_unavailable",
@@ -591,7 +589,7 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
 });
 
 test("terminal model errors are scoped to the new assistant turn instead of global page alerts", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn)");
   expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
 });
@@ -690,15 +688,15 @@ test("explicit connector auto-approval still selects Allow once", async () => {
 });
 
 test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertChatGptWebInputWithinContextWindow(150_000, "medium")).toThrow(
+  expect(() => assertLcaTokenInputWithinContextWindow(150_000, "medium")).toThrow(
     "150,000-token context window",
   );
   try {
-    assertChatGptWebInputWithinContextWindow(150_000, "medium");
+    assertLcaTokenInputWithinContextWindow(150_000, "medium");
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
-      name: "ChatGptWebAdapterError",
+      name: "LcaTokenAdapterError",
       status: 400,
       errorType: "invalid_request_error",
       code: "context_length_exceeded",
@@ -707,13 +705,13 @@ test("browser preflight fails closed with Codex's native context-window error co
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertChatGptWebInputWithinContextWindow(149_999, "medium")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(184_999, "high")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(185_000, "high")).toThrow(
+  expect(() => assertLcaTokenInputWithinContextWindow(149_999, "medium")).not.toThrow();
+  expect(() => assertLcaTokenInputWithinContextWindow(184_999, "high")).not.toThrow();
+  expect(() => assertLcaTokenInputWithinContextWindow(185_000, "high")).toThrow(
     "185,000-token context window",
   );
-  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
-  expect(() => assertChatGptWebInputWithinContextWindow(255_999, "max")).not.toThrow();
+  expect(() => assertLcaTokenInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
+  expect(() => assertLcaTokenInputWithinContextWindow(255_999, "max")).not.toThrow();
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {
@@ -732,7 +730,7 @@ test("browser stage diagnostics use safe bounded artifact names", () => {
 });
 
 test("browser stage diagnostics preserve every critical local checkpoint", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   for (const checkpoint of [
     "browser-page-acquired",
     "temporary-chat-navigation-complete",
@@ -761,6 +759,8 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain('page.screenshot({ animations: "disabled", caret: "hide"');
   expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
   expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
+  expect(workerSource).toContain('process.env.LCA_TOKEN_BROWSER_DIAGNOSTICS !== "1"');
+  expect(workerSource).toContain('checkpoint !== "response-stalled-30s"');
 });
 
 test("visible DOM trace interleaves statuses and explicit intermediate commentary", () => {
@@ -827,9 +827,9 @@ test("visible DOM trace emits a short-lived reasoning label on its first observa
 test("completed-turn evidence flushes a short-lived reasoning label immediately", () => {
   const tracker = new ChatGptVisibleTraceTracker(10_000);
   expect(tracker.observe([
-    { kind: "status", text: "Reviewing ChatGPT Web Prompt and State Handling" },
+    { kind: "status", text: "Reviewing Lca Token Prompt and State Handling" },
   ], true, 1_000)).toEqual([
-    { kind: "reasoning", text: "Reviewing ChatGPT Web Prompt and State Handling" },
+    { kind: "reasoning", text: "Reviewing Lca Token Prompt and State Handling" },
   ]);
 });
 
@@ -857,7 +857,7 @@ test("visible DOM trace emits one complete commentary paragraph before the next 
 });
 
 test("response DOM separates streaming commentary from the final Markdown answer", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
@@ -962,7 +962,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
 });
 
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async stalledTurnDiagnostic");
   const end = workerSource.indexOf("private async runExclusive", start);
   const diagnosticSource = workerSource.slice(start, end);
@@ -973,7 +973,7 @@ test("stalled-turn diagnostics record DOM metrics without response or overlay co
 });
 
 test("browser completion requires ChatGPT's response-scoped copy action", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(sessionSource).toContain('button[data-testid="copy-turn-action-button"]');
   expect(workerSource).toContain("CHATGPT_COMPLETION_ACTION_SELECTOR");
@@ -981,7 +981,7 @@ test("browser completion requires ChatGPT's response-scoped copy action", () => 
 });
 
 test("browser send accepts only conclusive ChatGPT submission evidence", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   const idle = {
     initialUserTurnCount: 1,
     userTurnCount: 1,

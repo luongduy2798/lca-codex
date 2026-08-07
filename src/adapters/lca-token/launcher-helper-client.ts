@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
-import { ChatGptWebAdapterError } from "./adapter-error";
-import type { CompiledChatGptWebPrompt } from "./prompt";
+import { LcaTokenAdapterError } from "./adapter-error";
+import type { CompiledLcaTokenPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 
 interface PendingTurn {
@@ -117,11 +117,11 @@ export class LauncherBrowserHelperClient {
   constructor(private readonly config: ResolvedBrowserConfig) {}
 
   async run(turn: BrowserTurn): Promise<string> {
-    if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (turn.abortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
     const prepared = await turn.prepare();
     try {
       await this.ensureChild();
-      if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (turn.abortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
       return await new Promise<string>((resolveResult, rejectResult) => {
         if (this.pending.has(turn.traceId)) {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
@@ -134,7 +134,7 @@ export class LauncherBrowserHelperClient {
             if (!pending.sent) {
               this.finishWithError(
                 turn.traceId,
-                new DOMException("ChatGPT web turn aborted", "AbortError"),
+                new DOMException("Lca Token turn aborted", "AbortError"),
               );
               return;
             }
@@ -175,7 +175,7 @@ export class LauncherBrowserHelperClient {
               transport: prepared.transport,
               ...(prepared.contextSnapshotId ? { contextSnapshotId: prepared.contextSnapshotId } : {}),
               ...(prepared.contextInputTokens !== undefined ? { contextInputTokens: prepared.contextInputTokens } : {}),
-            } satisfies CompiledChatGptWebPrompt,
+            } satisfies CompiledLcaTokenPrompt,
           },
         }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
@@ -224,14 +224,14 @@ export class LauncherBrowserHelperClient {
     const output = createInterface({ input: child.stdout });
     output.on("line", line => this.handleLine(child, line));
     const errors = createInterface({ input: child.stderr });
-    errors.on("line", line => console.info(`[chatgpt-web-helper] ${line}`));
+    errors.on("line", line => console.info(`[lca-token-helper] ${line}`));
     const failChild = (error: Error) => {
       const owned = this.child === child;
       this.handleExit(child, error);
       if (owned && Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
         void this.terminateChild(child, 0).catch(cleanupError => {
           console.error(
-            `[chatgpt-web-helper] process-error cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            `[lca-token-helper] process-error cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
           );
         });
       }
@@ -276,7 +276,7 @@ export class LauncherBrowserHelperClient {
       const detail = error instanceof Error ? error.message : String(error);
       this.handleExit(child, new Error(`Launcher browser helper emitted invalid protocol data: ${detail}`));
       void this.terminateChild(child, 0).catch(error => {
-        console.error(`[chatgpt-web-helper] invalid-protocol cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[lca-token-helper] invalid-protocol cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
       });
       return;
     }
@@ -302,7 +302,7 @@ export class LauncherBrowserHelperClient {
       pending.resolve(message.text);
     } else if (message.type === "error") {
       const error = message.status !== undefined
-        ? new ChatGptWebAdapterError(message.message, {
+        ? new LcaTokenAdapterError(message.message, {
           status: message.status,
           errorType: message.errorType!,
           code: message.code!,
@@ -348,7 +348,7 @@ export class LauncherBrowserHelperClient {
         message: "Launcher browser helper exited before completing the turn",
       }).catch(controlError => {
         console.error(
-          `[chatgpt-web-helper] failed to release launcher turn ${id}: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+          `[lca-token-helper] failed to release launcher turn ${id}: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
         );
       });
       this.finishWithError(id, error);

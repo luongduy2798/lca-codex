@@ -1,7 +1,7 @@
 <h1 align="center">lca-token</h1>
 
 <p align="center">
-  <strong>Use ChatGPT Web (including Pro) as native Codex models.</strong><br>
+  <strong>Use Lca Token (including Pro) as native Codex models.</strong><br>
   Change the model tier, save your workflow.
 </p>
 
@@ -18,14 +18,15 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
 </p>
 
-Pick **ChatGPT Web — Instant**, **Medium**, **High**, **Extra High**, or **Pro** in Codex's native
-model picker. Every turn still uses a fresh ChatGPT Temporary Chat. In full mode, tool-capable turns
-pull the complete immutable Codex context through the `lca-token` MCP connector instead of
-stuffing that history into the composer; images remain native attachments. Visible reasoning, tool
+Pick the single **Lca Token** model in Codex's native model picker, then choose its reasoning level
+to select Instant, Medium, High, Extra High, or Pro behavior. Every turn still uses a fresh ChatGPT
+Temporary Chat. In full mode, the composer receives only active instructions, the latest user
+request, and current-turn images. Older history/images stay in the immutable broker snapshot and are
+retrieved through the `lca-token` connector only when needed. Visible reasoning, native Codex tool
 activity, and Markdown stream back into the same Codex task.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="ChatGPT Web running inside the native Codex harness" width="960">
+  <img src="assets/demo.gif" alt="Lca Token running inside the native Codex harness" width="960">
 </p>
 
 ```text
@@ -91,7 +92,7 @@ Then complete the three checks in the app:
 
 1. Sign in to ChatGPT in the embedded browser.
 2. Run the browser smoke test.
-3. Press **Install models**, restart Codex once, and select a **ChatGPT Web — …** model.
+3. Press **Install models**, restart Codex once, and select a **Lca Token — …** model.
 
 Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
 guides the full-harness setup without terminal commands.
@@ -123,20 +124,25 @@ context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/to
 ## Full harness
 
 Full mode connects ChatGPT back to the current Codex task through the official
-[OpenAI tunnel-client](https://github.com/openai/tunnel-client). The same connector first pulls the
-turn's immutable Codex context snapshot (`codex_context_manifest` → ordered `codex_context_next`)
-and then carries normal lca-token tool calls. The tunnel is outbound: it does not expose a
-public IP, open an inbound port, or require router forwarding.
+[OpenAI tunnel-client](https://github.com/openai/tunnel-client). Each fresh Temporary Chat receives
+only a projected active bootstrap: active system/custom developer overrides, the AGENTS/project
+instructions already resolved by Codex, the latest user request, and current-turn images. Standard
+Codex model/skill/permission/app/plugin instruction scaffolding stays in the immutable broker and is
+retrieved with `codex_context action=instructions` only when needed; older conversation history and
+images are lazy too. Binding is also on demand: a trivial request can answer without any connector
+round trip, while native file/command/MCP work
+still executes through the exact active Codex harness tool registry. The tunnel is outbound: it does
+not expose a public IP, open an inbound port, or require router forwarding.
 
 1. Finish the required launcher setup.
 2. Open **MCP** in the launcher. Create the Tunnel and a regular API key on the same OpenAI account
    that will use the ChatGPT connector; creating the key is free and does not consume model API
    credits.
-3. Paste the Tunnel ID and API key, then press **Connect harness**.
+3. Enter the ChatGPT connector name you want, paste the Tunnel ID and API key, then press **Connect harness**.
 4. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
-   exact Tunnel, set **Authentication** to **None**, and name it exactly `lca-token`.
+   exact Tunnel, set **Authentication** to **None**, and give it exactly the connector name shown by the launcher.
 5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
-   types and accepts the full `@lca-token` mention, then confirms the connector pill.
+   selects the configured connector name exactly and confirms the connector pill.
 
 Write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
 currently documents those actions for Business and Enterprise/Edu workspaces; personal Pro is

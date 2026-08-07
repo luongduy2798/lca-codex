@@ -18,6 +18,7 @@ const DEFAULT_STATE = Object.freeze({
   sidebarOpen: true,
   sidebarWidth: 252,
   mcpGuideStep: 0,
+  connectorName: "",
   sessionRefreshReminderAt: null,
 });
 
@@ -57,6 +58,11 @@ function readState(filePath) {
     }
     if (!Number.isInteger(state.mcpGuideStep) || state.mcpGuideStep < 0 || state.mcpGuideStep > 2) {
       state.mcpGuideStep = DEFAULT_STATE.mcpGuideStep;
+    }
+    if (typeof state.connectorName !== "string" || state.connectorName.length > 80) {
+      state.connectorName = DEFAULT_STATE.connectorName;
+    } else {
+      state.connectorName = state.connectorName.trim();
     }
     if (state.sessionRefreshReminderAt !== null
       && (typeof state.sessionRefreshReminderAt !== "string"

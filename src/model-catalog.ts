@@ -1,16 +1,17 @@
 import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
-  availableChatGptWebModelRoutes,
-  CHATGPT_WEB_MODEL_PREFIX,
-  resolveChatGptWebContextLimits,
-  type ChatGptWebModelRoute,
-} from "./chatgpt-web-models";
+  availableLcaTokenReasoningModes,
+  LCA_TOKEN_MODEL,
+  LCA_TOKEN_MODEL_PREFIX,
+  LCA_TOKEN_MODEL_SLUG,
+  resolveLcaTokenContextLimits,
+} from "./lca-token-models";
 
 type JsonObject = Record<string, unknown>;
 
-/** Keep all five routed models inside Codex's five-entry spawn-agent override registry. */
-export const CHATGPT_WEB_MODEL_PRIORITY = 0;
+/** Keep the routed Lca Token model at the front of Codex's spawn-agent override registry. */
+export const LCA_TOKEN_MODEL_PRIORITY = 0;
 
 function object(value: unknown, label: string): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -33,11 +34,15 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
   return { ...(source ? structuredClone(source) : {}), effort, description };
 }
 
+function isOwnedLcaTokenSlug(modelSlug: string | undefined): boolean {
+  return modelSlug === LCA_TOKEN_MODEL_SLUG || modelSlug?.startsWith(LCA_TOKEN_MODEL_PREFIX) === true;
+}
+
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const model = value as JsonObject;
   const modelSlug = slug(model);
-  if (!modelSlug || modelSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return false;
+  if (!modelSlug || isOwnedLcaTokenSlug(modelSlug)) return false;
   if (model.visibility !== "list" || model.supported_in_api !== true) return false;
   if (!Array.isArray(model.supported_reasoning_levels)) return false;
   return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
@@ -55,50 +60,46 @@ function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject 
   );
 }
 
-export function buildChatGptWebModel(
+export function buildLcaTokenModel(
   templateValue: unknown,
-  route: ChatGptWebModelRoute,
   config: AppConfig,
 ): JsonObject {
   const template = object(templateValue, "native Codex model template");
   const templateSlug = slug(template);
-  if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
-    throw new Error("ChatGPT Web model template must be a native Codex model");
+  if (!templateSlug || isOwnedLcaTokenSlug(templateSlug)) {
+    throw new Error("Lca Token model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.adapterEffort);
+  const reasoningModes = availableLcaTokenReasoningModes(config.proAvailable);
+  // Codex exposes context size per model, not per reasoning level. Use the smallest supported
+  // window in the catalog so Instant/Medium never overrun; the browser runtime still enforces the
+  // exact 150k/185k/256k/272k limit for the reasoning mode selected on each turn.
+  const catalogLimits = resolveLcaTokenContextLimits("low");
   const model: JsonObject = {
     ...structuredClone(template),
-    slug: route.slug,
-    display_name: route.displayName,
-    description: route.description,
+    slug: LCA_TOKEN_MODEL.slug,
+    display_name: LCA_TOKEN_MODEL.displayName,
+    description: LCA_TOKEN_MODEL.description,
     input_modalities: ["text", "image"],
     visibility: "list",
-    // These slugs are implemented by this local Responses-compatible bridge. Marking them false
-    // makes Codex drop them from spawn_agent whenever openai_base_url points at the bridge.
     supported_in_api: true,
-    priority: CHATGPT_WEB_MODEL_PRIORITY,
-    // Codex MultiAgent V2 encrypts delegated task payloads for native OpenAI models. A browser
-    // provider cannot decrypt that cross-backend payload, so every routed Web model must stay on
-    // the native V1 surface where `message` and `fork_context` remain ordinary Codex context.
+    priority: LCA_TOKEN_MODEL_PRIORITY,
     multi_agent_version: "v1",
-    // Keep every routed Web model inside Codex's native code-mode and subagent model registry.
-    // Pro's lack of local computer tools is enforced by the adapter runtime; `requiresPro` is only
-    // an account-entitlement gate and must not make the model disappear from native orchestration.
+    // Pro's lack of local computer tools is enforced by the adapter runtime after reasoning is
+    // resolved; the shared model must remain tool-capable so other reasoning levels keep Codex tools.
     tool_mode: config.mode === "full" ? template.tool_mode : null,
     upgrade: null,
-    default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
-    context_window: limits.contextWindow,
-    max_context_window: limits.contextWindow,
-    auto_compact_token_limit: limits.autoCompactTokenLimit,
-    // ChatGPT Web has no Codex service tier. Never inherit the native template's Fast tiers.
+    default_reasoning_level: "high",
+    supported_reasoning_levels: reasoningModes.map(mode =>
+      reasoningLevel(template, mode.codexEffort, mode.displayLabel)
+    ),
+    context_window: catalogLimits.contextWindow,
+    max_context_window: catalogLimits.contextWindow,
+    auto_compact_token_limit: catalogLimits.autoCompactTokenLimit,
+    // Lca Token has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,
   };
-  // A native template's compaction hash describes OpenAI's native model contract, not this routed
-  // browser model. The explicit Web window above is owned by this adapter and never copied back to
-  // native models or the user's top-level model_context_window setting.
   delete model.comp_hash;
   delete model.availability_nux;
   return model;
@@ -114,13 +115,12 @@ export function augmentNativeModelCatalog(
     throw new Error("Native Codex models response is missing a models array");
   }
   const nativeModels = structuredClone(
-    catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
+    catalog.models.filter(model => !isOwnedLcaTokenSlug(slug(model))),
   );
   const template = selectNativeTemplate(nativeModels, config);
   if (contextOverride) {
-    // model_context_window is a single top-level Codex setting, not a per-model one. Binding it to
-    // the model named in the config makes it vanish the moment that line names a ChatGPT Web slug,
-    // leaving the model actually in use clamped to the catalog's smaller window.
+    // model_context_window is a single top-level Codex setting, not a per-model one. Apply it only
+    // to native models; the routed Lca Token model owns its conservative shared catalog window.
     for (const candidate of nativeModels) {
       const modelSlug = slug(candidate);
       if (!modelSlug) continue;
@@ -135,10 +135,8 @@ export function augmentNativeModelCatalog(
       }
     }
   }
-  const webModels = availableChatGptWebModelRoutes(config.proAvailable)
-    .map(route => buildChatGptWebModel(template, route, config));
   return {
     ...structuredClone(catalog),
-    models: [...nativeModels, ...webModels],
+    models: [...nativeModels, buildLcaTokenModel(template, config)],
   };
 }

@@ -111,12 +111,14 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
   });
   try {
     assert.equal(fixture.host.mcpCredentialsConfigured(), true);
-    await fixture.host.setupMcp({ replace: false });
+    await fixture.host.setupMcp({ replace: false, appName: "Duy Local Codex" });
     assert.deepEqual(fixture.invocation().args, [
       "setup",
       "--full",
       "--browser-host-descriptor",
       "/runtime/launcher-browser.json",
+      "--app-name",
+      "Duy Local Codex",
       "--acknowledge-unofficial",
       "--restart-service",
     ]);
@@ -125,15 +127,24 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
   }
 });
 
-test("MCP credential replacement remains explicit and requires a complete new pair", async () => {
+test("MCP setup requires an explicit per-user connector name", async () => {
   const fixture = hostFor(null);
   await assert.rejects(
     Promise.resolve().then(() => fixture.host.setupMcp({ replace: true })),
+    /Connector name must contain/,
+  );
+});
+
+test("MCP credential replacement remains explicit and requires a complete new pair", async () => {
+  const fixture = hostFor(null);
+  await assert.rejects(
+    Promise.resolve().then(() => fixture.host.setupMcp({ replace: true, appName: "Duy Local Codex" })),
     /Tunnel ID must be/,
   );
   await assert.rejects(
     Promise.resolve().then(() => fixture.host.setupMcp({
       replace: true,
+      appName: "Duy Local Codex",
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
     })),
     /runtime key is required/,

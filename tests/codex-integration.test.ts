@@ -418,7 +418,7 @@ describe("reversible native Codex route integration", () => {
     const managedCatalog = join(appHome, "codex", "model-catalog.json");
     mkdirSync(join(appHome, "codex"), { recursive: true });
     writeFileSync(managedCatalog, "managed\n");
-    const providerBlock = '# BEGIN lca-token provider\n[model_providers.lca-token]\nname = "Codex + ChatGPT Web"\n# END lca-token provider';
+    const providerBlock = '# BEGIN lca-token provider\n[model_providers.lca-token]\nname = "Codex + Lca Token"\n# END lca-token provider';
     writeFileSync(configPath, `model = "gpt-5.6-sol"\nmodel_catalog_json = ${JSON.stringify(managedCatalog)}\nmodel_provider = "lca-token"\n\n${providerBlock}\n`);
     writeFileSync(getCodexJournalPath(), JSON.stringify({
       version: 2,

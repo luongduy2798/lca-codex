@@ -28,7 +28,7 @@ export interface ChatGptTurnUserRevision {
 
 export class MissingTrustedCodexEnvironmentError extends Error {
   constructor(field: string) {
-    super(`ChatGPT web turn is missing ${field} in trusted Codex environment context`);
+    super(`Lca Token turn is missing ${field} in trusted Codex environment context`);
     this.name = "MissingTrustedCodexEnvironmentError";
   }
 }
@@ -74,6 +74,61 @@ function rawMessageText(value: Record<string, unknown>): string {
     .join("\n");
 }
 
+const CODEX_PROJECT_INSTRUCTIONS = /^# AGENTS\.md instructions(?: for [^\n]+)?\n<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/;
+
+function projectInstructionsText(value: Record<string, unknown>): string | undefined {
+  if (value.type !== "message" || value.role !== "user") return undefined;
+  const text = rawMessageText(value).trim();
+  return CODEX_PROJECT_INSTRUCTIONS.test(text) ? text : undefined;
+}
+
+/**
+ * Return only an AGENTS/project-instruction fragment that is structurally owned by the active native
+ * Codex turn. A human can type the same visible wrapper, so text shape alone is never authority.
+ */
+export function extractTrustedCodexProjectInstructions(parsed: CodexParsedRequest): string | undefined {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  let activeUserIndex = -1;
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const item = record(input[index]);
+    if (item?.type === "message" && item.role === "user") {
+      activeUserIndex = index;
+      break;
+    }
+  }
+  if (activeUserIndex <= 0) return undefined;
+
+  const activeUser = record(input[activeUserIndex]);
+  if (!activeUser) return undefined;
+  const activeTurnId = itemTurnId(activeUser);
+  const activeServerOwned = typeof activeUser.id === "string" && activeUser.id.length > 0;
+  const metadataTurnId = clientTurnMetadata(parsed)?.turn_id;
+  const canonicalTurnId = typeof metadataTurnId === "string" && metadataTurnId.length > 0
+    ? metadataTurnId
+    : undefined;
+
+  for (let index = activeUserIndex - 1; index >= 0; index -= 1) {
+    const candidate = record(input[index]);
+    if (!candidate) continue;
+    const text = projectInstructionsText(candidate);
+    if (!text) continue;
+    const candidateTurnId = itemTurnId(candidate);
+
+    // Older Codex/current CLI wires stamp both contextual and active user items with one turn id.
+    if (candidateTurnId && activeTurnId && candidateTurnId === activeTurnId
+      && (!canonicalTurnId || activeTurnId === canonicalTurnId)) return text;
+
+    // Current desktop wires may omit item turn ids but stamp server-owned ids and canonical turn
+    // metadata. Match the same authority model used for trusted environment_context extraction.
+    const candidateServerOwned = typeof candidate.id === "string" && candidate.id.length > 0;
+    if (canonicalTurnId && activeServerOwned && candidateServerOwned
+      && (candidateTurnId === undefined || candidateTurnId === canonicalTurnId)
+      && (activeTurnId === undefined || activeTurnId === canonicalTurnId)) return text;
+  }
+  return undefined;
+}
+
 function contextualUserMessage(value: Record<string, unknown>): boolean {
   const text = rawMessageText(value).trim();
   return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
@@ -91,12 +146,12 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
  */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
-  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  if (!turnId) throw new Error("Lca Token requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed);
-  if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
-  if (revision.turnId !== undefined && revision.turnId !== turnId) {
-    throw new Error("ChatGPT web current user message conflicts with native Codex turn_id metadata");
-  }
+  if (!revision) throw new Error("Lca Token requires a current-turn user message for browser-session replay");
+  // Native Codex client_metadata owns the provider-turn identity. A message's passthrough turn_id is
+  // message provenance and may refer to a replayed/history item under newer Codex wire shapes; it is
+  // intentionally not required to equal the current client_metadata turn_id.
   return revision.content;
 }
 
@@ -117,9 +172,9 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnU
 
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
 export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
-  if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
+  if (!parsed._compactionRequest) throw new Error("Lca Token compaction source requires a compaction request");
   const revision = latestChatGptTurnUserRevision(parsed);
-  if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
+  if (!revision) throw new Error("Lca Token compaction requires a source user message");
   return revision;
 }
 
@@ -323,7 +378,7 @@ function environmentCwdMatches(text: string): string[] {
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
-  if (decoded.some(path => !isAbsolute(path))) throw new Error(`ChatGPT web ${field} must contain absolute paths`);
+  if (decoded.some(path => !isAbsolute(path))) throw new Error(`Lca Token ${field} must contain absolute paths`);
   const unique = new Map<string, string>();
   for (const path of decoded.map(value => resolve(value))) {
     if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
@@ -340,14 +395,14 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
   const text = trustedEnvironmentText(parsed);
   const cwdMatches = environmentCwdMatches(text);
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
-  if (cwdCandidates.length !== 1) throw new Error("ChatGPT web turn has conflicting trusted Codex cwd values");
+  if (cwdCandidates.length !== 1) throw new Error("Lca Token turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;
 
   const rootMatches = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
     .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
   const roots = rootMatches.length > 0 ? uniqueAbsolutePaths(rootMatches, "workspace_roots") : [cwd];
   if (!roots.some(root => matchesPath(root, cwd))) {
-    throw new Error("ChatGPT web cwd is outside the trusted Codex workspace roots");
+    throw new Error("Lca Token cwd is outside the trusted Codex workspace roots");
   }
 
   const sandboxType = sandboxTypeFromEnvironment(text);
@@ -355,7 +410,7 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
     || /network access is enabled/i.test(text);
 
   if (!sandboxType) {
-    throw new Error("ChatGPT web turn requires one explicit trusted Codex sandbox mode");
+    throw new Error("Lca Token turn requires one explicit trusted Codex sandbox mode");
   }
   if (sandboxType === "dangerFullAccess") {
     return { cwd, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, tools: parsed.context.tools ?? [] };

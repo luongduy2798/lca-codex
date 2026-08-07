@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { availableLcaTokenReasoningModes } from "../src/lca-token-models";
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
@@ -38,16 +38,14 @@ writeFileSync(join(process.env.CODEX_HOME, "config.toml"), `model_catalog_json =
 try {
   const result = runCodex(["debug", "models"], { ...process.env, CODEX_HOME: process.env.CODEX_HOME });
   const catalog = JSON.parse(result.stdout) as { models?: Array<{ slug?: string; supported_reasoning_levels?: unknown[] }> };
-  const web = catalog.models?.filter(model => model.slug?.startsWith("chatgpt-web/")) ?? [];
-  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => ({ slug: route.slug, effort: route.codexEffort }));
-  const actual = web.map(model => ({
-    slug: model.slug,
-    effort: Array.isArray(model.supported_reasoning_levels)
-      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort).join(",")
-      : "",
-  }));
+  const model = catalog.models?.find(candidate => candidate.slug === "lca-token");
+  if (!model) throw new Error("Codex did not preserve the Lca Token model");
+  const expected = availableLcaTokenReasoningModes(true).map(mode => mode.codexEffort);
+  const actual = Array.isArray(model.supported_reasoning_levels)
+    ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
+    : [];
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
+    throw new Error(`Codex did not preserve the Lca Token reasoning contract: ${JSON.stringify(actual)}`);
   }
   process.stdout.write("NATIVE_CODEX_CATALOG_SMOKE_OK\n");
 } finally {

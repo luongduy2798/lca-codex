@@ -12,7 +12,7 @@ async function* completedEvents(chunks = 1): AsyncGenerator<AdapterEvent> {
 function responseStream(platform: NodeJS.Platform, chunks = 1): ReadableStream<Uint8Array> {
   return bridgeToResponsesSSE(
     completedEvents(chunks),
-    "chatgpt-web/test",
+    "lca-token/test",
     undefined,
     undefined,
     undefined,

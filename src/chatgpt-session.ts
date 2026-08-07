@@ -7,7 +7,11 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[aria-haspopup="menu"][data-tone="neutral"]';
+export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[role="slider"][aria-valuenow][aria-valuemax]';
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
+  `[data-testid="composer-intelligence-picker-content"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
+  `[role="menu"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
+  `[role="group"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
   '[role="menu"]:has([role="menuitemradio"])',
   '[role="group"]:has([role="menuitemradio"])',
@@ -61,8 +65,14 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
   if (!menuVisible && menuExpanded !== "true") await effortButton.click();
   try {
+    await menu.waitFor({ state: "visible", timeout: 70_000 });
+    const slider = menu.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
+    if (await slider.isVisible().catch(() => false)) {
+      const min = Number(await slider.getAttribute("aria-valuemin") ?? "0");
+      const max = Number(await slider.getAttribute("aria-valuemax"));
+      if (Number.isFinite(min) && Number.isFinite(max)) return max - min + 1 >= 5;
+    }
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    await efforts.first().waitFor({ state: "visible", timeout: 70_000 });
     return await efforts.count() >= 5;
   } finally {
     await page.keyboard.press("Escape").catch(() => {});

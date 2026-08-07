@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { estimateChatGptWebInputTokens } from "../src/adapters/chatgpt-web/usage";
+import { estimateLcaTokenInputTokens } from "../src/adapters/lca-token/usage";
 import type { CodexParsedRequest } from "../src/types";
 
 const capabilities = { localToolsEnabled: false, proAvailable: true };
@@ -14,13 +14,13 @@ function request(text: string): CodexParsedRequest {
 }
 
 test("large inline prompts use tokenizer-derived usage without invented composer pressure", () => {
-  const estimated = estimateChatGptWebInputTokens(request("a".repeat(480_000)), capabilities);
+  const estimated = estimateLcaTokenInputTokens(request("a".repeat(480_000)), capabilities);
 
   expect(estimated).toBeLessThan(100_000);
 });
 
 test("ordinary context below the transport threshold keeps its tokenizer-derived usage", () => {
-  const estimated = estimateChatGptWebInputTokens(
+  const estimated = estimateLcaTokenInputTokens(
     request(`${"word ".repeat(79_999)}word`),
     capabilities,
   );

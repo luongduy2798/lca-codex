@@ -459,6 +459,36 @@ function registerIpc({ logger, stateStore }) {
   });
 
   handle("launcher:doctor", () => runtimeHost.doctor());
+  handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
+  handle("launcher:codex-config-reset", async () => {
+    const language = stateStore.read().language;
+    const chinese = language === "zh-CN";
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: chinese ? ["取消", "重置配置"] : ["Cancel", "Reset config"],
+      defaultId: 0,
+      cancelId: 0,
+      title: chinese ? "重置 Codex 配置" : "Reset Codex configuration",
+      message: chinese
+        ? "恢复 lca-token 安装前的 Codex 配置？"
+        : "Restore the Codex configuration that existed before lca-token was installed?",
+      detail: chinese
+        ? "只恢复 lca-token 管理的路由和功能。其他 TOML、ChatGPT 登录、连接器名称和运行时凭据都会保留。"
+        : "Only lca-token-managed route and feature settings are restored. Unrelated TOML, ChatGPT login, connector name, and runtime credentials are preserved.",
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { cancelled: true };
+    await runtimeHost.resetCodexConfig();
+    const state = stateStore.update({
+      coreSetupComplete: false,
+      bridgeEnabled: false,
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    return { cancelled: false, state };
+  });
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
   handle("launcher:bridge-enabled", async (_event, enabled) => {
     const result = await runtimeHost.setBridgeEnabled(enabled === true);
@@ -481,8 +511,8 @@ function registerIpc({ logger, stateStore }) {
       cancelId: 0,
       title: chinese ? "移除 lca-token" : "Remove lca-token",
       message: chinese
-        ? "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？"
-        : "Remove the ChatGPT Web models from Codex and restore the previous model route?",
+        ? "从 Codex 中移除 Lca Token 模型并恢复此前的模型路由？"
+        : "Remove the Lca Token models from Codex and restore the previous model route?",
       detail: chinese
         ? "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。"
         : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
@@ -513,7 +543,34 @@ function registerIpc({ logger, stateStore }) {
     if (!(smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()))) {
       throw new Error("Run the browser smoke test before installing the Codex integration");
     }
-    const result = await runtimeHost.setupCore();
+    let result;
+    try {
+      result = await runtimeHost.setupCore();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const routeConflict = message.includes("Codex already configures model routing")
+        && message.includes("--replace-codex-route");
+      if (!routeConflict) throw error;
+
+      const language = stateStore.read().language;
+      const chinese = language === "zh-CN";
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: chinese ? ["取消", "替换现有路由"] : ["Cancel", "Replace existing route"],
+        defaultId: 0,
+        cancelId: 0,
+        title: chinese ? "Codex 已配置其他模型路由" : "Codex already has another model route",
+        message: chinese
+          ? "lca-token 需要暂时替换当前 Codex 模型路由才能安装。"
+          : "lca-token needs to replace the current Codex model route to install its models.",
+        detail: chinese
+          ? "当前路由会被保存到 lca-token 的集成日志中。之后断开或卸载 lca-token 时可以恢复。"
+          : "The current route will be saved in lca-token's integration journal and can be restored when you disconnect or uninstall lca-token.",
+        noLink: true,
+      });
+      if (confirmation.response !== 1) return { cancelled: true };
+      result = await runtimeHost.setupCore({ replaceCodexRoute: true });
+    }
     stateStore.update({
       bridgeEnabled: true,
       coreSetupComplete: true,
@@ -539,8 +596,15 @@ function registerIpc({ logger, stateStore }) {
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
+      appName: typeof input?.connectorName === "string" ? input.connectorName : "",
     });
-    stateStore.update({ mcpRuntimeInstalled: true, mcpGuideStep: 2, codexRestartRequired: true });
+    const state = stateStore.update({
+      connectorName: runtimeHost.mcpConnectorName(),
+      mcpRuntimeInstalled: true,
+      mcpGuideStep: 2,
+      codexRestartRequired: true,
+    });
+    send("launcher:state-changed", state);
     return { ok: true, stdout: result.stdout };
   });
   handle("launcher:set-mcp-step", (_event, step) => {
@@ -825,6 +889,7 @@ async function start() {
       const current = stateStore.read();
       const patch = {
         mcpRuntimeInstalled: config.mode === "full",
+        ...(config.mode === "full" ? { connectorName: config.appName.trim() } : {}),
         ...(config.mode === "browser-only" ? {
           mcpSetupComplete: false,
           mcpGuideStep: 0,

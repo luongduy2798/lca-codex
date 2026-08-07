@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
-  CHATGPT_WEB_MODEL_PRIORITY,
+  LCA_TOKEN_MODEL_PRIORITY,
 } from "../src/model-catalog";
-import { CHATGPT_WEB_MODEL_ROUTES, resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
+import { resolveLcaTokenContextLimits } from "../src/lca-token-models";
 import { modelsRequest } from "../src/server";
 
-test("proxies official /models auth and query, then appends the fixed ChatGPT Web models", async () => {
+test("proxies official /models auth and query, then appends one Lca Token model", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/models?client_version=1.2.3", {
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
   });
@@ -39,24 +39,27 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
       max_context_window?: number;
       auto_compact_token_limit?: number;
       supported_in_api?: boolean;
+      supported_reasoning_levels?: Array<{ effort?: string; description?: string }>;
       priority?: number;
     }>;
   };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
-    "chatgpt-web/light",
-    "chatgpt-web/medium",
-    "chatgpt-web/high",
-    "chatgpt-web/extra-high",
-    "chatgpt-web/pro",
+    "lca-token",
   ]);
   expect(body.models[0]!.max_context_window).toBe(371_851);
-  for (const [index, model] of body.models.slice(1).entries()) {
-    const limits = resolveChatGptWebContextLimits(CHATGPT_WEB_MODEL_ROUTES[index]!.adapterEffort);
-    expect(model.context_window).toBe(limits.contextWindow);
-    expect(model.max_context_window).toBe(limits.contextWindow);
-    expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
-    expect(model.supported_in_api).toBe(true);
-    expect(model.priority).toBe(CHATGPT_WEB_MODEL_PRIORITY);
-  }
+  const model = body.models[1]!;
+  const limits = resolveLcaTokenContextLimits("low");
+  expect(model.context_window).toBe(limits.contextWindow);
+  expect(model.max_context_window).toBe(limits.contextWindow);
+  expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
+  expect(model.supported_reasoning_levels?.map(level => level.effort)).toEqual([
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "ultra",
+  ]);
+  expect(model.supported_in_api).toBe(true);
+  expect(model.priority).toBe(LCA_TOKEN_MODEL_PRIORITY);
 });

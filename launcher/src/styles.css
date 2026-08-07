@@ -1089,6 +1089,125 @@ code {
   font-style: normal;
 }
 
+/* Codex config */
+
+.config-mode-tabs {
+  display: inline-flex;
+  gap: 3px;
+  margin-bottom: 18px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+}
+
+.config-mode-tabs button {
+  min-height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.config-mode-tabs button.is-active {
+  background: var(--color-background-button-secondary);
+  color: var(--color-text-primary);
+}
+
+.codex-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.config-status-card {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.config-status-card span,
+.config-detail-list span,
+.config-file-header {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.config-status-card strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.config-detail-list {
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.config-detail-list > div {
+  display: grid;
+  min-height: 46px;
+  grid-template-columns: 130px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.config-detail-list > div:last-child {
+  border-bottom: 0;
+}
+
+.config-detail-list code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-explainer {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+.config-actions {
+  margin-top: 2px;
+}
+
+.config-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.config-file-content {
+  min-height: 320px;
+  max-height: 56vh;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: rgb(10 10 10 / 52%);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 /* MCP guide */
 
 .wizard-stepper {

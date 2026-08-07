@@ -1,8 +1,8 @@
-import { createChatGptWebAdapter } from "./adapters/chatgpt-web";
-import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
-import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
+import { createLcaTokenAdapter } from "./adapters/lca-token";
+import { closeChatGptBrowserWorkers } from "./adapters/lca-token/browser-worker";
+import { closeTurnBrokers, TurnBroker } from "./adapters/lca-token/turn-broker";
 import { timingSafeEqual } from "node:crypto";
-import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
+import { chatGptTurnSessions } from "./adapters/lca-token/turn-execution";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -13,11 +13,12 @@ import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { readCodexModelContextOverride, type CodexModelContextOverride } from "./codex-integration";
 import {
-  CHATGPT_WEB_BACKEND_MODEL,
-  isChatGptWebModelSlug,
-  requireChatGptWebModelRoute,
-  type ChatGptWebModelRoute,
-} from "./chatgpt-web-models";
+  LCA_TOKEN_BACKEND_MODEL,
+  isLcaTokenModelSlug,
+  requireLcaTokenModel,
+  resolveLcaTokenReasoningMode,
+  type LcaTokenModelDescriptor,
+} from "./lca-token-models";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
@@ -143,13 +144,14 @@ export class HttpTurnCounter {
   }
 }
 
-type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
+type LcaTokenAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
 
-export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
-  const route = requireChatGptWebModelRoute(parsed.modelId, config.proAvailable);
-  parsed.modelId = CHATGPT_WEB_BACKEND_MODEL;
-  parsed.options.reasoning = route.adapterEffort;
-  return route;
+export function routeLcaTokenRequest(parsed: CodexParsedRequest, config: AppConfig): LcaTokenModelDescriptor {
+  const model = requireLcaTokenModel(parsed.modelId);
+  const mode = resolveLcaTokenReasoningMode(parsed.options.reasoning, config.proAvailable);
+  parsed.modelId = LCA_TOKEN_BACKEND_MODEL;
+  parsed.options.reasoning = mode.adapterEffort;
+  return model;
 }
 
 export async function modelsRequest(
@@ -210,7 +212,7 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
 export async function responseRequest(
   req: Request,
   config: AppConfig,
-  adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
+  adapterFactory: LcaTokenAdapterFactory = createLcaTokenAdapter,
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: unknown;
@@ -226,7 +228,7 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
-  if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+  if (typeof requestedModel === "string" && !isLcaTokenModelSlug(requestedModel)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -238,10 +240,10 @@ export async function responseRequest(
     : undefined;
   const expanded = expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
-  let route: ChatGptWebModelRoute;
+  let route: LcaTokenModelDescriptor;
   try {
     parsed = parseRequest(expanded);
-    route = routeChatGptWebRequest(parsed, config);
+    route = routeLcaTokenRequest(parsed, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -249,7 +251,7 @@ export async function responseRequest(
     return formatErrorResponse(
       409,
       "invalid_request_error",
-      "Local continuation state for previous_response_id is unavailable; refusing to run ChatGPT Web with partial Codex context. Compact the Codex task or start a new task before retrying.",
+      "Local continuation state for previous_response_id is unavailable; refusing to run Lca Token with partial Codex context. Compact the Codex task or start a new task before retrying.",
     );
   }
 
@@ -324,7 +326,7 @@ export async function responseRequest(
 export async function compactRequest(
   req: Request,
   config: AppConfig,
-  adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
+  adapterFactory: LcaTokenAdapterFactory = createLcaTokenAdapter,
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -358,7 +360,7 @@ export async function compactRequest(
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
-  if (!isChatGptWebModelSlug(raw.model)) {
+  if (!isLcaTokenModelSlug(raw.model)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -366,7 +368,7 @@ export async function compactRequest(
     }
   }
   try {
-    requireChatGptWebModelRoute(raw.model, config.proAvailable);
+    requireLcaTokenModel(raw.model);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -429,7 +431,7 @@ export function startServer(
   if (config.mode === "full") {
     void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
       console.error(
-        `[chatgpt-web] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        `[lca-token] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
   }

@@ -12,6 +12,7 @@ import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
   BrowserState,
+  CodexConfigSnapshot,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -467,11 +468,6 @@ function LauncherShell({
                   label="GitHub"
                   onClick={() => void api!.openExternal(snapshot.urls.github).catch((cause) => setError(messageOf(cause)))}
                 />
-                <IconButton
-                  icon="x"
-                  label="X"
-                  onClick={() => void api!.openExternal(snapshot.urls.x).catch((cause) => setError(messageOf(cause)))}
-                />
               </div>
             </div>
 
@@ -496,6 +492,13 @@ function LauncherShell({
                   icon="setup"
                   label={copy.setup}
                   onClick={() => navigateSurface("setup")}
+                />
+                <SidebarItem
+                  active={surface === "codex"}
+                  badge={snapshot.state.coreSetupComplete && !snapshot.state.bridgeEnabled ? <ActionDot tone="error" /> : null}
+                  icon="setup"
+                  label={copy.codexConfig}
+                  onClick={() => navigateSurface("codex")}
                 />
                 <SidebarItem
                   active={surface === "mcp"}
@@ -561,6 +564,15 @@ function LauncherShell({
                 operation={operation}
                 setError={setError}
                 showMcp={() => setSurface("mcp")}
+                snapshot={snapshot}
+                updateState={updateState}
+              />
+            ) : null}
+            {surface === "codex" ? (
+              <CodexConfigSurface
+                copy={copy}
+                operation={operation}
+                setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
               />
@@ -904,6 +916,132 @@ function SetupSurface({
   );
 }
 
+function CodexConfigSurface({
+  copy,
+  operation,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  copy: Copy;
+  operation: OperationState | null;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const [config, setConfig] = useState<CodexConfigSnapshot | null>(null);
+  const [mode, setMode] = useState<"automatic" | "manual">("automatic");
+  const [localBusy, setLocalBusy] = useState(false);
+  const busy = localBusy || operation?.status === "running";
+
+  const refresh = useCallback(async () => {
+    const next = await api!.codexConfig();
+    setConfig(next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    if (operation?.status === "running") return;
+    let cancelled = false;
+    void api!.codexConfig().then((next) => {
+      if (!cancelled) setConfig(next);
+    }).catch((cause) => {
+      if (!cancelled) setError(messageOf(cause));
+    });
+    return () => { cancelled = true; };
+  }, [operation?.status, setError]);
+
+  const run = async (action: () => Promise<void>) => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    try {
+      await action();
+      updateState((await api!.snapshot()).state);
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
+  const installOrRepair = () => run(async () => { await api!.setupCore(); });
+  const toggleRoute = () => run(async () => {
+    const current = config ?? await refresh();
+    updateState(await api!.setBridgeEnabled(!current.active));
+  });
+  const remove = () => run(async () => {
+    const result = await api!.uninstallIntegration();
+    if (!result.cancelled) updateState(result.state);
+  });
+  const resetConfig = () => run(async () => {
+    const result = await api!.resetCodexConfig();
+    if (!result.cancelled) updateState(result.state);
+  });
+  const statusLabel = config?.state === "configured"
+    ? copy.codexConfigured
+    : config?.state === "disconnected"
+      ? copy.codexDisconnected
+      : config?.state === "inconsistent"
+        ? copy.codexInconsistent
+        : copy.notConfigured;
+
+  return (
+    <ContentSurface narrow subtitle={copy.codexConfigSubtitle} title={copy.codexConfigTitle}>
+      <div className="config-mode-tabs" role="tablist" aria-label={copy.codexConfig}>
+        <button className={mode === "automatic" ? "is-active" : ""} onClick={() => setMode("automatic")} role="tab" type="button">
+          {copy.automatic}
+        </button>
+        <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")} role="tab" type="button">
+          {copy.manual}
+        </button>
+      </div>
+
+      {mode === "automatic" ? (
+        <div className="codex-config-panel">
+          <div className="config-status-card">
+            <div>
+              <span>{copy.status}</span>
+              <strong>{statusLabel}</strong>
+            </div>
+            <StateDot state={config?.state === "configured" ? "ready" : config?.state === "inconsistent" ? "error" : "busy"} />
+          </div>
+          <div className="config-detail-list">
+            <div><span>{copy.configPath}</span><code>{config?.configPath ?? "~/.codex/config.toml"}</code></div>
+            <div><span>{copy.route}</span><code>{config?.routeUrl ?? copy.previousRoute}</code></div>
+          </div>
+          {config?.errors.length ? (
+            <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow>
+          ) : null}
+          {snapshot.state.codexRestartRequired ? <NoticeRow icon="alert" tone="warning">{copy.restartCodex}</NoticeRow> : null}
+          <p className="config-explainer">{copy.codexAutomaticBody}</p>
+          <div className="inline-actions config-actions">
+            <SecondaryButton disabled={busy} onClick={() => void installOrRepair()}>{config?.installed ? copy.repair : copy.install}</SecondaryButton>
+            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void toggleRoute()}>
+              {config?.active ? copy.disconnect : copy.connect}
+            </SecondaryButton>
+            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void remove()}>{copy.restorePreviousRoute}</SecondaryButton>
+            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void resetConfig()}>{copy.resetConfig}</SecondaryButton>
+            <button className="text-button" disabled={busy} onClick={() => void refresh().catch((cause) => setError(messageOf(cause)))} type="button">
+              {copy.refresh}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="codex-config-panel">
+          <p className="config-explainer">{copy.codexManualBody}</p>
+          <div className="config-file-header">
+            <span>{config?.configPath ?? "~/.codex/config.toml"}</span>
+            <button className="text-button" disabled={busy} onClick={() => void refresh().catch((cause) => setError(messageOf(cause)))} type="button">{copy.refresh}</button>
+          </div>
+          <pre className="config-file-content">{config?.exists ? config.content : copy.emptyConfig}</pre>
+        </div>
+      )}
+    </ContentSurface>
+  );
+}
+
 function McpSurface({
   copy,
   onDone,
@@ -922,6 +1060,7 @@ function McpSurface({
   const [step, setStep] = useState(Math.min(2, Math.max(0, snapshot.state.mcpGuideStep || 0)));
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
+  const [connectorName, setConnectorName] = useState(snapshot.state.connectorName);
   const [credentialsConfigured, setCredentialsConfigured] = useState(snapshot.mcpCredentialsConfigured);
   const [replacingCredentials, setReplacingCredentials] = useState(false);
   const [localBusy, setLocalBusy] = useState(false);
@@ -960,6 +1099,7 @@ function McpSurface({
     setError(null);
     try {
       await api!.setupMcp({
+        connectorName: connectorName.trim(),
         ...(credentialsConfigured && !replacingCredentials
           ? { replace: false }
           : { tunnelId, runtimeKey, replace: true }),
@@ -1045,7 +1185,21 @@ function McpSurface({
               </div>
             ) : null}
             {step === 1 ? (
-              credentialsConfigured && !replacingCredentials ? (
+              <div className="mcp-config-fields">
+                <div className="field-list">
+                  <FieldRow label={copy.connectorName}>
+                    <input
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      maxLength={80}
+                      onChange={(event) => setConnectorName(event.target.value)}
+                      placeholder={copy.connectorNamePlaceholder}
+                      spellCheck={false}
+                      value={connectorName}
+                    />
+                  </FieldRow>
+                </div>
+                {credentialsConfigured && !replacingCredentials ? (
                 <div className="saved-credentials">
                   <NoticeRow icon="check" tone="success">
                     <span>
@@ -1100,14 +1254,15 @@ function McpSurface({
                     </button>
                   ) : null}
                 </div>
-              )
+              )}
+              </div>
             ) : null}
             {step === 1 ? <p className="mcp-step-two-hint">{copy.mcpStepTwoHint}</p> : null}
             {step === 2 ? (
               <div className="connector-actions">
                 <div className="connector-name">
                   <span>{copy.connectorName}</span>
-                  <code>lca-token</code>
+                  <code>{snapshot.state.connectorName || connectorName.trim()}</code>
                 </div>
                 <div className="inline-actions">
                   <SecondaryButton
@@ -1141,6 +1296,8 @@ function McpSurface({
             disabled={
               busy
               || !snapshot.state.codexCatalogVerified
+              || !connectorName.trim()
+              || connectorName.trim().length > 80
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}

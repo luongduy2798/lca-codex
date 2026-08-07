@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
-import { CHATGPT_WEB_MODEL_ROUTES, resolveChatGptWebContextLimits } from "../src/chatgpt-web-models";
+import { resolveLcaTokenContextLimits } from "../src/lca-token-models";
 import {
   augmentNativeModelCatalog,
-  CHATGPT_WEB_MODEL_PRIORITY,
+  LCA_TOKEN_MODEL_PRIORITY,
 } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
@@ -41,7 +41,7 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
-  test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
+  test("preserves every native model in order and appends one Lca Token model with reasoning choices", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
@@ -51,83 +51,80 @@ describe("native /models augmentation", () => {
 
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual(nativeSnapshot.models as Array<Record<string, unknown>>);
-    const web = models.slice(3);
-    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
-    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
-    for (const [index, model] of web.entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-      const limits = resolveChatGptWebContextLimits(route.adapterEffort);
-      expect(model).toMatchObject({
-        slug: route.slug,
-        display_name: route.displayName,
-        tool_mode: "code_mode_only",
-        default_reasoning_level: route.codexEffort,
-        supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
-        multi_agent_version: "v1",
-        supported_in_api: true,
-        priority: CHATGPT_WEB_MODEL_PRIORITY,
-        context_window: limits.contextWindow,
-        max_context_window: limits.contextWindow,
-        auto_compact_token_limit: limits.autoCompactTokenLimit,
-        additional_speed_tiers: [],
-        service_tiers: [],
-        default_service_tier: null,
-      });
-      expect(model).not.toHaveProperty("comp_hash");
-    }
+    expect(models).toHaveLength(4);
+    const routed = models[3]!;
+    const limits = resolveLcaTokenContextLimits("low");
+    expect(routed).toMatchObject({
+      slug: "lca-token",
+      display_name: "Lca Token",
+      tool_mode: "code_mode_only",
+      default_reasoning_level: "high",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Instant" },
+        { effort: "medium", description: "Medium" },
+        { effort: "high", description: "High" },
+        { effort: "xhigh", description: "Extra High" },
+        { effort: "ultra", description: "Pro" },
+      ],
+      multi_agent_version: "v1",
+      supported_in_api: true,
+      priority: LCA_TOKEN_MODEL_PRIORITY,
+      context_window: limits.contextWindow,
+      max_context_window: limits.contextWindow,
+      auto_compact_token_limit: limits.autoCompactTokenLimit,
+      additional_speed_tiers: [],
+      service_tiers: [],
+      default_service_tier: null,
+    });
+    expect(routed).not.toHaveProperty("comp_hash");
   });
 
-  test("keeps every routed Web model in Codex's V1 spawn-agent model registry", () => {
+  test("keeps the shared Lca Token model in Codex's V1 spawn-agent model registry", () => {
     const config = defaultConfig("full");
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
-
-    // Codex treats a custom openai_base_url as an API-compatible provider, filters out models
-    // unsupported by that API, sorts by priority, and exposes at most five spawn overrides.
     const spawnOverrides = models
       .filter(model => model.supported_in_api === true && model.visibility === "list")
       .toSorted((left, right) => Number(left.priority) - Number(right.priority))
       .slice(0, 5)
       .map(model => model.slug);
 
-    expect(spawnOverrides).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
+    expect(spawnOverrides).toEqual(["lca-token", "gpt-5.6-sol"]);
   });
 
-  test("owns only its namespace, is idempotent, and omits Pro-only modes when unavailable", () => {
+  test("is idempotent, removes stale routed slugs, and hides Pro-only reasoning when unavailable", () => {
     const config = defaultConfig("browser-only");
     config.proAvailable = false;
     const polluted = source();
     (polluted.models as unknown[]).push(
-      { slug: "chatgpt-web/gpt-5.6-sol", display_name: "legacy generic route" },
-      { slug: "chatgpt-web/pro", display_name: "stale Pro route" },
+      { slug: "foreign/gpt-5.6-sol", display_name: "foreign generic route" },
+      { slug: "lca-token/pro", display_name: "stale Pro route" },
+      { slug: "lca-token", display_name: "stale shared route" },
     );
     const first = augmentNativeModelCatalog(polluted, config);
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
-    const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.map(model => model.slug)).toEqual(
-      CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro).map(route => route.slug),
-    );
-    expect(web.every(model => model.tool_mode === null)).toBe(true);
-    expect(web.every(model => model.multi_agent_version === "v1")).toBe(true);
-    expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
-    expect(web.map(model => ({
-      contextWindow: model.context_window,
-      autoCompactTokenLimit: model.auto_compact_token_limit,
-    }))).toEqual([
-      { contextWindow: 150_000, autoCompactTokenLimit: 135_000 },
-      { contextWindow: 150_000, autoCompactTokenLimit: 135_000 },
-      { contextWindow: 185_000, autoCompactTokenLimit: 166_500 },
+    const routed = models.filter(model => model.slug === "lca-token");
+    expect(routed).toHaveLength(1);
+    expect(routed[0]!.tool_mode).toBeNull();
+    expect(routed[0]!.multi_agent_version).toBe("v1");
+    expect(routed[0]!.supported_reasoning_levels).toEqual([
+      { effort: "low", description: "Instant" },
+      { effort: "medium", description: "Medium" },
+      { effort: "high", description: "High" },
     ]);
+    expect(routed[0]).toMatchObject({
+      context_window: 150_000,
+      auto_compact_token_limit: 135_000,
+    });
+    expect(models.some(model => model.slug === "lca-token/pro")).toBe(false);
   });
 
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
-    // model_context_window is one top-level Codex setting, so it must not depend on which model
-    // the config's `model` line happens to name - that line can hold a ChatGPT Web slug.
     const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
-      model: "chatgpt-web/medium",
+      model: "lca-token",
       contextWindow: 371_851,
     });
     const models = result.models as Array<Record<string, unknown>>;
@@ -140,13 +137,12 @@ describe("native /models augmentation", () => {
       { ...originalModels[2], max_context_window: 371_851 },
     ]);
     expect(models[1]!.context_window).toBe(300_000);
-    for (const [index, model] of models.slice(3).entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-      const limits = resolveChatGptWebContextLimits(route.adapterEffort);
-      expect(model.context_window).toBe(limits.contextWindow);
-      expect(model.max_context_window).toBe(limits.contextWindow);
-      expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
-    }
+    expect(models[3]).toMatchObject({
+      slug: "lca-token",
+      context_window: 150_000,
+      max_context_window: 150_000,
+      auto_compact_token_limit: 135_000,
+    });
   });
 
   test("never lowers a native window that already exceeds the Codex context override", () => {
@@ -174,11 +170,10 @@ describe("native /models augmentation", () => {
     });
 
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
-    const web = (result.models as Array<Record<string, unknown>>)
-      .filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.length).toBe(3);
-    expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
-    expect(web.every(model => model.tool_mode === "code_mode_only")).toBe(true);
+    const routed = (result.models as Array<Record<string, unknown>>)
+      .find(model => model.slug === "lca-token");
+    expect(routed?.shell_type).toBe("shell_command");
+    expect(routed?.tool_mode).toBe("code_mode_only");
   });
 
   test("follows official catalog order instead of preferring a named paid-tier model", () => {
@@ -194,9 +189,9 @@ describe("native /models augmentation", () => {
     native.models = [sourceModels[0], terra, sol];
 
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
-    const web = (result.models as Array<Record<string, unknown>>)
-      .filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.every(model => model.shell_type === "terra-shell")).toBe(true);
+    const routed = (result.models as Array<Record<string, unknown>>)
+      .find(model => model.slug === "lca-token");
+    expect(routed?.shell_type).toBe("terra-shell");
   });
 
   test("fails closed when no official model satisfies the harness contract", () => {

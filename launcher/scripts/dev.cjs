@@ -1,4 +1,5 @@
 const { spawn, spawnSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
@@ -23,12 +24,62 @@ const vite = spawn(process.execPath, [viteBin], {
 
 let electron;
 let stopped = false;
+let restartRequested = false;
+let restartTimer = null;
+let electronWatcher = null;
 
 const stop = () => {
   if (stopped) return;
   stopped = true;
+  if (restartTimer) clearTimeout(restartTimer);
+  electronWatcher?.close();
   electron?.kill("SIGTERM");
   vite.kill("SIGTERM");
+};
+
+const spawnElectron = () => {
+  if (stopped) return;
+  restartRequested = false;
+  electron = spawn(electronBin, [root], {
+    cwd: root,
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      VITE_DEV_SERVER_URL: "http://127.0.0.1:4178",
+      LCA_TOKEN_BUN: bun,
+    },
+  });
+  electron.once("exit", (code) => {
+    electron = undefined;
+    if (stopped) return;
+    if (restartRequested) {
+      spawnElectron();
+      return;
+    }
+    stop();
+    process.exitCode = code ?? 0;
+  });
+  electron.once("error", (error) => {
+    console.error(`Electron failed to start: ${error.message}`);
+    electron = undefined;
+    stop();
+    process.exitCode = 1;
+  });
+};
+
+const scheduleElectronRestart = (filename) => {
+  if (stopped || !filename?.endsWith(".cjs")) return;
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (stopped) return;
+    if (!electron) {
+      spawnElectron();
+      return;
+    }
+    restartRequested = true;
+    electron.kill("SIGTERM");
+  }, 120);
 };
 
 const waitForVite = async () => {
@@ -44,24 +95,10 @@ const waitForVite = async () => {
 };
 
 void waitForVite().then(() => {
-  electron = spawn(electronBin, [root], {
-    cwd: root,
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      VITE_DEV_SERVER_URL: "http://127.0.0.1:4178",
-      LCA_TOKEN_BUN: bun,
-    },
+  electronWatcher = fs.watch(path.join(root, "electron"), (_eventType, filename) => {
+    scheduleElectronRestart(filename?.toString());
   });
-  electron.once("exit", (code) => {
-    stop();
-    process.exitCode = code ?? 0;
-  });
-  electron.once("error", (error) => {
-    console.error(`Electron failed to start: ${error.message}`);
-    stop();
-    process.exitCode = 1;
-  });
+  spawnElectron();
 }).catch((error) => {
   console.error(error);
   stop();
