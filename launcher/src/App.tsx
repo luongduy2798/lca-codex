@@ -1460,9 +1460,11 @@ function RuntimeServiceSurface({
         {runtime.mode === "full" ? (
           <RuntimeDetail
             label={copy.runtimeTunnel}
-            value={runtime.tunnel?.pid
-              ? `PID ${runtime.tunnel.pid} · ${runtime.tunnel.ready ? copy.runtimeReady : runtime.tunnel.state || copy.needsAttention}`
-              : copy.runtimeStopped}
+            value={runtime.tunnel?.ready
+              ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${copy.runtimeReady}`
+              : runtime.tunnel?.state && runtime.tunnel.state !== "stopped"
+                ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${runtime.tunnel.state}`
+                : copy.runtimeStopped}
           />
         ) : null}
         <RuntimeDetail label={copy.runtimeOwner} value={runtime.owner} />

@@ -123,6 +123,9 @@ test("runtime details explain the active role and ChatGPT mode offers a Codex-mo
   assert.match(i18nSource, /mcpBody: "Configure MCP to enable Codex mode/);
   assert.doesNotMatch(i18nSource, /Pro remains read-only|tool-capable ChatGPT tiers/);
   assert.match(styles, /\.runtime-detail-row\.has-description\s*\{/);
+  assert.match(appSource, /runtime\.tunnel\?\.ready[\s\S]*?runtime\.tunnel\.pid \? `PID \$\{runtime\.tunnel\.pid\} · ` : ""[\s\S]*?copy\.runtimeReady/);
+  assert.match(appSource, /runtime\.tunnel\?\.state && runtime\.tunnel\.state !== "stopped"/);
+  assert.doesNotMatch(appSource, /value=\{runtime\.tunnel\?\.pid[\s\S]*?: copy\.runtimeStopped\}/);
 });
 
 test("manual-first runtime controls are global and startup stays observe-only by default", () => {
