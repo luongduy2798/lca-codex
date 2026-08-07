@@ -1036,6 +1036,22 @@ export class ChatGptBrowserWorker {
     return matches;
   }
 
+  private async compatibleLcaTokenMenuRows(
+    menuRows: Locator,
+    composer: Locator,
+  ): Promise<Array<{ row: Locator; title: string }>> {
+    const configuredName = this.config.appName.replace(/\s+/g, " ").trim();
+    if (!/\blca token$/i.test(configuredName)) return [];
+    const nearby = await this.connectorMenuRowsNearComposer(menuRows, composer);
+    const matches: Array<{ row: Locator; title: string }> = [];
+    for (const candidate of nearby) {
+      const fullText = (await candidate.row.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+      if (!/\blca token\b/i.test(fullText)) continue;
+      matches.push({ row: candidate.row, title: fullText || candidate.title });
+    }
+    return matches;
+  }
+
   private async connectorMentionFailure(
     menuRows: Locator,
     composer: Locator,
@@ -1120,6 +1136,18 @@ export class ChatGptBrowserWorker {
         if (matches.length === 1) {
           appResult = matches[0];
           await captureDiagnostic?.("connector-menu-visible");
+          break;
+        }
+        const compatible = await this.compatibleLcaTokenMenuRows(menuRows, composer);
+        if (compatible.length > 1) {
+          throw new Error(
+            `ChatGPT connector popover exposed multiple Lca Token rows while looking for ${JSON.stringify(this.config.appName)}`
+            + `: ${compatible.map(candidate => JSON.stringify(candidate.title)).join(", ")}`,
+          );
+        }
+        if (compatible.length === 1) {
+          appResult = compatible[0].row;
+          await captureDiagnostic?.("connector-menu-compatible");
           break;
         }
         await throwIfChatGptRateLimitDialog(page);

@@ -132,6 +132,36 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
 });
 
+test("connector selection can recover a renamed host prefix only for one unambiguous Lca Token row", async () => {
+  const compatibleLcaTokenMenuRows = (ChatGptBrowserWorker.prototype as unknown as {
+    compatibleLcaTokenMenuRows(menuRows: unknown, composer: unknown): Promise<Array<{ row: unknown; title: string }>>;
+  }).compatibleLcaTokenMenuRows;
+  const row = {
+    innerText: async () => "M\nMacmini Lca Token\nMacmini Lca Token",
+  };
+  const result = await compatibleLcaTokenMenuRows.call({
+    config: { appName: "IMac Lca Token" },
+    connectorMenuRowsNearComposer: async () => [{ row, title: "M" }],
+  }, {}, {});
+
+  expect(result).toHaveLength(1);
+  expect(result[0]?.row).toBe(row);
+  expect(result[0]?.title).toContain("Macmini Lca Token");
+
+  const unrelated = await compatibleLcaTokenMenuRows.call({
+    config: { appName: "My private connector" },
+    connectorMenuRowsNearComposer: async () => [{ row, title: "M" }],
+  }, {}, {});
+  expect(unrelated).toEqual([]);
+});
+
+test("connector selection fails closed when multiple renamed Lca Token rows are visible", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("compatible.length > 1");
+  expect(workerSource).toContain("multiple Lca Token rows while looking for");
+  expect(workerSource).toContain('captureDiagnostic?.("connector-menu-compatible")');
+});
+
 test("active composer resolution waits for exactly one visible editor", async () => {
   const composer = { id: "active" };
   const counts = [2, 1];

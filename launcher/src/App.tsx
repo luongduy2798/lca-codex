@@ -151,11 +151,6 @@ function LauncherShell({
     : snapshot.runtime.mode === "browser-only"
       ? copy.chatgptMode
       : copy.modeNotConfigured;
-  const runtimeModeSummary = snapshot.runtime.mode === "full"
-    ? copy.codexModeSummary
-    : snapshot.runtime.mode === "browser-only"
-      ? copy.chatgptModeSummary
-      : copy.modeNotConfiguredSummary;
   const runtimeModeDescription = snapshot.runtime.mode === "full"
     ? copy.codexModeBody
     : snapshot.runtime.mode === "browser-only"
@@ -296,9 +291,6 @@ function LauncherShell({
     >
       <TitleBar
         copy={copy}
-        onOpenRuntime={() => navigateSurface("runtime")}
-        runtime={snapshot.runtime}
-        setError={setError}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
       />
@@ -327,17 +319,25 @@ function LauncherShell({
               </div>
             </div>
 
-            <button
-              className={`sidebar-mode-card${snapshot.runtime.mode === "full" ? " is-codex" : ""}`}
-              onClick={() => navigateSurface("mcp")}
-              title={runtimeModeDescription}
-              type="button"
-            >
-              <span>{copy.runtimeMode}</span>
-              <strong>{runtimeModeLabel}</strong>
-              <small>{runtimeModeSummary}</small>
-              <Icon name="chevron" />
-            </button>
+            <div className={`sidebar-runtime-card is-${snapshot.runtime.lifecycle}${snapshot.runtime.mode === "full" ? " is-codex" : ""}`}>
+              <button
+                className="sidebar-runtime-overview"
+                onClick={() => navigateSurface("runtime")}
+                title={runtimeModeDescription}
+                type="button"
+              >
+                <span className="sidebar-runtime-mode-line">
+                  <span>{copy.runtimeMode}</span>
+                  <strong>{runtimeModeLabel}</strong>
+                </span>
+                <strong className="sidebar-runtime-lifecycle">
+                  <StateDot state={runtimeDotState(snapshot.runtime)} />
+                  {runtimeLifecycleLabel(copy, snapshot.runtime)}
+                </strong>
+                <Icon name="chevron" />
+              </button>
+              <RuntimeActionButtons compact copy={copy} runtime={snapshot.runtime} setError={setError} />
+            </div>
 
             <nav className="sidebar-nav" aria-label={copy.workspace}>
               <SidebarGroup label={copy.workspace}>
@@ -470,6 +470,7 @@ function LauncherShell({
               <RuntimeServiceSurface
                 copy={copy}
                 setError={setError}
+                showMcp={() => setSurface("mcp")}
                 snapshot={snapshot}
                 updateState={updateState}
               />
@@ -503,16 +504,10 @@ function LauncherShell({
 
 function TitleBar({
   copy,
-  onOpenRuntime,
-  runtime,
-  setError,
   sidebarOpen,
   toggleSidebar,
 }: {
   copy: Copy;
-  onOpenRuntime: () => void;
-  runtime: RuntimeStatus;
-  setError: (error: string | null) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
 }) {
@@ -524,14 +519,6 @@ function TitleBar({
           label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
           onClick={toggleSidebar}
         />
-      </div>
-      <div className="titlebar-runtime no-drag">
-        <button className={`runtime-status-chip is-${runtime.lifecycle}`} onClick={onOpenRuntime} type="button">
-          <StateDot state={runtimeDotState(runtime)} />
-          <span>{copy.runtime}</span>
-          <strong>{runtimeLifecycleLabel(copy, runtime)}</strong>
-        </button>
-        <RuntimeActionButtons compact copy={copy} runtime={runtime} setError={setError} />
       </div>
     </header>
   );
@@ -1423,11 +1410,13 @@ function McpSurface({
 function RuntimeServiceSurface({
   copy,
   setError,
+  showMcp,
   snapshot,
   updateState,
 }: {
   copy: Copy;
   setError: (error: string | null) => void;
+  showMcp: () => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
@@ -1452,7 +1441,20 @@ function RuntimeServiceSurface({
 
       <SectionHeading label={copy.runtimeDetails} spaced />
       <div className="runtime-detail-list">
-        <RuntimeDetail label={copy.runtimeMode} value={runtime.mode === "full" ? copy.codexMode : runtime.mode === "browser-only" ? copy.chatgptMode : copy.modeNotConfigured} />
+        <RuntimeDetail
+          description={runtime.mode === "full" ? copy.codexModeBody : runtime.mode === "browser-only" ? copy.chatgptModeBody : copy.modeNotConfiguredBody}
+          label={copy.runtimeMode}
+          value={runtime.mode === "full" ? copy.codexMode : runtime.mode === "browser-only" ? copy.chatgptMode : copy.modeNotConfigured}
+        />
+        {runtime.mode === "browser-only" ? (
+          <div className="runtime-mode-suggestion">
+            <div>
+              <strong>{copy.switchToCodexMode}</strong>
+              <small>{copy.switchToCodexModeBody}</small>
+            </div>
+            <SecondaryButton icon="chevron" onClick={showMcp}>{copy.configureMcp}</SecondaryButton>
+          </div>
+        ) : null}
         <RuntimeDetail label={copy.runtimeEndpoint} value={endpoint} />
         <RuntimeDetail label={copy.runtimeResponses} value={runtime.daemon.pid ? `PID ${runtime.daemon.pid} · ${runtime.daemon.healthy ? copy.healthy : copy.needsAttention}` : copy.runtimeStopped} />
         {runtime.mode === "full" ? (
@@ -1481,11 +1483,14 @@ function RuntimeServiceSurface({
   );
 }
 
-function RuntimeDetail({ label, value }: { label: string; value: string }) {
+function RuntimeDetail({ description, label, value }: { description?: string; label: string; value: string }) {
   return (
-    <div className="runtime-detail-row">
+    <div className={`runtime-detail-row${description ? " has-description" : ""}`}>
       <span>{label}</span>
-      <strong>{value}</strong>
+      <div className="runtime-detail-value">
+        <strong>{value}</strong>
+        {description ? <small>{description}</small> : null}
+      </div>
     </div>
   );
 }

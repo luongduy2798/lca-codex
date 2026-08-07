@@ -92,25 +92,44 @@ test("closing the launcher follows the persisted background-launcher preference"
   assert.match(i18nSource, /keepRunningOnClose: "Keep launcher running when window closes"/);
 });
 
-test("sidebar exposes ChatGPT and Codex modes without consuming browser header space", () => {
-  assert.match(appSource, /className=\{`sidebar-mode-card/);
+test("sidebar shows runtime mode first, lifecycle second, and keeps actions at the bottom", () => {
+  assert.match(appSource, /className=\{`sidebar-runtime-card is-\$\{snapshot\.runtime\.lifecycle\}/);
+  assert.match(appSource, /className="sidebar-runtime-overview"[\s\S]*?navigateSurface\("runtime"\)/);
+  assert.match(appSource, /sidebar-runtime-mode-line[\s\S]*?runtimeModeLabel[\s\S]*?sidebar-runtime-lifecycle[\s\S]*?runtimeLifecycleLabel\(copy, snapshot\.runtime\)/);
   assert.match(appSource, /snapshot\.runtime\.mode === "full"[\s\S]*?copy\.codexMode/);
   assert.match(appSource, /snapshot\.runtime\.mode === "browser-only"[\s\S]*?copy\.chatgptMode/);
-  assert.match(appSource, /onClick=\{\(\) => navigateSurface\("mcp"\)\}/);
-  assert.match(appSource, /RuntimeDetail label=\{copy\.runtimeMode\}[\s\S]*?copy\.codexMode[\s\S]*?copy\.chatgptMode/);
+  assert.match(appSource, /sidebar-runtime-overview[\s\S]*?<RuntimeActionButtons compact copy=\{copy\} runtime=\{snapshot\.runtime\} setError=\{setError\} \/>/);
+  assert.doesNotMatch(appSource, /className="sidebar-runtime-mode"[\s\S]*?navigateSurface\("mcp"\)/);
+  assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*17px/s);
+  assert.match(styles, /\.sidebar-runtime-card\.is-ready\s*\{[^}]*border-color:/s);
+  assert.match(styles, /\.sidebar-runtime-card\.is-error,[\s\S]*?background:\s*linear-gradient/s);
+  assert.doesNotMatch(appSource, /chatgptModeSummary|codexModeSummary|modeNotConfiguredSummary/);
+  assert.doesNotMatch(appSource, /className="titlebar-runtime no-drag"/);
+  assert.doesNotMatch(styles, /\.titlebar-runtime\s*\{|\.runtime-status-chip\s*\{/);
+  assert.doesNotMatch(styles, /\.browser-tab-strip\s*\{\s*padding-right:\s*150px/s);
+});
+
+test("runtime details explain the active role and ChatGPT mode offers a Codex-mode MCP CTA", () => {
+  assert.match(appSource, /description=\{runtime\.mode === "full" \? copy\.codexModeBody : runtime\.mode === "browser-only" \? copy\.chatgptModeBody/);
+  assert.match(appSource, /runtime\.mode === "browser-only"[\s\S]*?runtime-mode-suggestion[\s\S]*?copy\.switchToCodexMode[\s\S]*?onClick=\{showMcp\}[\s\S]*?copy\.configureMcp/);
+  assert.match(appSource, /showMcp=\{\(\) => setSurface\("mcp"\)\}/);
   assert.match(i18nSource, /chatgptMode: "ChatGPT"/);
-  assert.match(i18nSource, /General-purpose AI assistant/);
+  assert.match(i18nSource, /General-purpose AI assistant\. Can reason over context supplied by Codex/);
   assert.match(i18nSource, /codexMode: "Codex"/);
   assert.match(i18nSource, /Coding agent\. Can actively inspect and modify the workspace/);
-  assert.match(styles, /\.sidebar-mode-card\s*\{/);
-  assert.doesNotMatch(appSource, /titlebar-mode|header-mode/);
+  assert.match(i18nSource, /switchToCodexMode: "Need coding-agent workspace access\?"/);
+  assert.match(i18nSource, /switchToCodexModeBody: "Configure MCP to switch from ChatGPT mode to Codex mode/);
+  assert.match(i18nSource, /mcpTitle: "Enable Codex mode with MCP"/);
+  assert.match(i18nSource, /mcpBody: "Configure MCP to enable Codex mode/);
+  assert.doesNotMatch(i18nSource, /Pro remains read-only|tool-capable ChatGPT tiers/);
+  assert.match(styles, /\.runtime-detail-row\.has-description\s*\{/);
 });
 
 test("manual-first runtime controls are global and startup stays observe-only by default", () => {
   for (const apiCall of ["runtimeStatus", "startRuntime", "stopRuntime", "restartRuntime", "onRuntimeState"]) {
     assert.match(preloadSource, new RegExp(`${apiCall}:`));
   }
-  assert.match(appSource, /className="titlebar-runtime no-drag"/);
+  assert.match(appSource, /className=\{`sidebar-runtime-card/);
   assert.match(appSource, /activeAction === "start" \? <ButtonSpinner \/> : null/);
   assert.match(appSource, /activeAction === "restart" \? <ButtonSpinner \/> : null/);
   assert.match(appSource, /activeAction === "stop" \? <ButtonSpinner \/> : null/);
