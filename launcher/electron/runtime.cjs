@@ -766,7 +766,7 @@ class RuntimeHost {
           embedded: true,
           env: this.launcherControlEnvironment(),
           message: "Restoring the previous Codex route",
-          successMessage: "lca-token integration removed",
+          successMessage: "Lca Token integration removed",
           timeoutMs: UNINSTALL_TIMEOUT_MS,
         });
       } catch (error) {

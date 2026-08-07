@@ -28,8 +28,8 @@ function linuxDesktopEntry(app, executable = linuxExecutable(app)) {
   return `[Desktop Entry]
 Type=Application
 Version=1.0
-Name=lca-token
-Comment=Start the lca-token launcher in the background
+Name=Lca Token
+Comment=Start the Lca Token launcher in the background
 Exec=/usr/bin/env APPIMAGE_EXTRACT_AND_RUN=1 LCA_TOKEN_APPIMAGE=${desktopExecArgument(executable)} ${desktopExecArgument(executable)} --hidden
 Terminal=false
 X-GNOME-Autostart-enabled=true

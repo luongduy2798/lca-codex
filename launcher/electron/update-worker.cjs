@@ -38,7 +38,7 @@ function requireFile(filePath, label) {
 }
 
 function updateMac(job) {
-  const sourceExecutable = path.join(job.source, "Contents", "MacOS", "lca-token");
+  const sourceExecutable = path.join(job.source, "Contents", "MacOS", "Lca Token");
   requireFile(sourceExecutable, "Staged macOS launcher");
   const next = `${job.target}.updating-${process.pid}`;
   const previous = `${job.target}.swap-${process.pid}`;
@@ -47,7 +47,7 @@ function updateMac(job) {
   const copied = spawnSync("/usr/bin/ditto", [job.source, next], { encoding: "utf8", timeout: 180_000 });
   if (copied.error) throw copied.error;
   if (copied.status !== 0) throw new Error(`Could not stage the macOS application: ${copied.stderr.trim()}`);
-  requireFile(path.join(next, "Contents", "MacOS", "lca-token"), "Copied macOS launcher");
+  requireFile(path.join(next, "Contents", "MacOS", "Lca Token"), "Copied macOS launcher");
 
   fs.renameSync(job.target, previous);
   try {

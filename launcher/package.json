@@ -2,7 +2,7 @@
   "name": "lca-token-launcher",
   "version": "2.0.0",
   "private": true,
-  "description": "Desktop control center for lca-token",
+  "description": "Desktop control center for Lca Token",
   "author": "thayduytrutri",
   "type": "module",
   "main": "electron/main.cjs",
@@ -40,7 +40,7 @@
   },
   "build": {
     "appId": "dev.lcatoken.launcher",
-    "productName": "lca-token",
+    "productName": "Lca Token",
     "artifactName": "lca-token-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "directories": {

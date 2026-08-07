@@ -76,8 +76,8 @@ if [ "$OS" = "Darwin" ]; then
   STAGE_DIR="$TEMP_DIR/stage"
   mkdir "$STAGE_DIR"
   ditto -x -k "$TEMP_DIR/$ASSET" "$STAGE_DIR"
-  SOURCE_APP="$STAGE_DIR/lca-token.app"
-  if [ ! -d "$SOURCE_APP" ] || [ ! -x "$SOURCE_APP/Contents/MacOS/lca-token" ]; then
+  SOURCE_APP="$STAGE_DIR/Lca Token.app"
+  if [ ! -d "$SOURCE_APP" ] || [ ! -x "$SOURCE_APP/Contents/MacOS/Lca Token" ]; then
     echo "Launcher archive is incomplete" >&2
     exit 1
   fi
@@ -85,9 +85,9 @@ if [ "$OS" = "Darwin" ]; then
     INSTALL_DIR="$HOME/Applications"
     mkdir -p "$INSTALL_DIR"
   fi
-  TARGET_APP="$INSTALL_DIR/lca-token.app"
-  if pgrep -x "lca-token" >/dev/null 2>&1; then
-    echo "Quit lca-token before updating it" >&2
+  TARGET_APP="$INSTALL_DIR/Lca Token.app"
+  if pgrep -x "Lca Token" >/dev/null 2>&1; then
+    echo "Quit Lca Token before updating it" >&2
     exit 1
   fi
   BACKUP_APP="$TEMP_DIR/lca-token.previous.app"

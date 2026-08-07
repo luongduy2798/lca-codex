@@ -64,7 +64,7 @@ const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, CONNECTORS_URL, TUNNELS_URL, 
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
-app.setName("lca-token");
+app.setName("Lca Token");
 if (process.platform === "win32") app.setAppUserModelId("dev.lcatoken.launcher");
 const configuredUserData = process.env.LCA_TOKEN_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
@@ -195,9 +195,9 @@ function trayImage() {
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
-    tray.setToolTip("lca-token");
+    tray.setToolTip("Lca Token");
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open lca-token", click: () => showMainWindow() },
+      { label: "Open Lca Token", click: () => showMainWindow() },
       { type: "separator" },
       { label: "Quit", click: () => { void requestQuit(); } },
     ]));
@@ -263,7 +263,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       : {}),
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
-    title: "lca-token",
+    title: "Lca Token",
     icon: APP_ICON_PATH,
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
@@ -383,7 +383,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language) => {
     const current = stateStore.read();
-    if (!current.githubOpened) throw new Error("Open the lca-token repository before continuing");
+    if (!current.githubOpened) throw new Error("Open the Lca Token repository before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({ language: validateLanguage(language), onboardingComplete: true });
     logger.info("launcher.onboarding_completed", { language: next.language });
@@ -470,11 +470,11 @@ function registerIpc({ logger, stateStore }) {
       cancelId: 0,
       title: chinese ? "重置 Codex 配置" : "Reset Codex configuration",
       message: chinese
-        ? "恢复 lca-token 安装前的 Codex 配置？"
-        : "Restore the Codex configuration that existed before lca-token was installed?",
+        ? "恢复 Lca Token 安装前的 Codex 配置？"
+        : "Restore the Codex configuration that existed before Lca Token was installed?",
       detail: chinese
-        ? "只恢复 lca-token 管理的路由和功能。其他 TOML、ChatGPT 登录、连接器名称和运行时凭据都会保留。"
-        : "Only lca-token-managed route and feature settings are restored. Unrelated TOML, ChatGPT login, connector name, and runtime credentials are preserved.",
+        ? "只恢复 Lca Token 管理的路由和功能。其他 TOML、ChatGPT 登录、连接器名称和运行时凭据都会保留。"
+        : "Only Lca Token-managed route and feature settings are restored. Unrelated TOML, ChatGPT login, connector name, and runtime credentials are preserved.",
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
@@ -509,7 +509,7 @@ function registerIpc({ logger, stateStore }) {
       buttons: chinese ? ["取消", "移除"] : ["Cancel", "Remove"],
       defaultId: 0,
       cancelId: 0,
-      title: chinese ? "移除 lca-token" : "Remove lca-token",
+      title: chinese ? "移除 Lca Token" : "Remove Lca Token",
       message: chinese
         ? "从 Codex 中移除 Lca Token 模型并恢复此前的模型路由？"
         : "Remove the Lca Token models from Codex and restore the previous model route?",
@@ -561,11 +561,11 @@ function registerIpc({ logger, stateStore }) {
         cancelId: 0,
         title: chinese ? "Codex 已配置其他模型路由" : "Codex already has another model route",
         message: chinese
-          ? "lca-token 需要暂时替换当前 Codex 模型路由才能安装。"
-          : "lca-token needs to replace the current Codex model route to install its models.",
+          ? "Lca Token 需要暂时替换当前 Codex 模型路由才能安装。"
+          : "Lca Token needs to replace the current Codex model route to install its models.",
         detail: chinese
-          ? "当前路由会被保存到 lca-token 的集成日志中。之后断开或卸载 lca-token 时可以恢复。"
-          : "The current route will be saved in lca-token's integration journal and can be restored when you disconnect or uninstall lca-token.",
+          ? "当前路由会被保存到 Lca Token 的集成日志中。之后断开或卸载 Lca Token 时可以恢复。"
+          : "The current route will be saved in Lca Token's integration journal and can be restored when you disconnect or uninstall Lca Token.",
         noLink: true,
       });
       if (confirmation.response !== 1) return { cancelled: true };
@@ -664,7 +664,7 @@ async function requestQuit() {
   try {
     const activeOperation = runtimeHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting lca-token`);
+      throw new Error(`Wait for ${activeOperation} to finish before quitting Lca Token`);
     }
     await runtimeSupervisor?.shutdown();
     stopCatalogVerificationMonitor();
@@ -930,7 +930,7 @@ async function start() {
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
-          ? "Another process owns the configured lca-token runtime"
+          ? "Another process owns the configured Lca Token runtime"
           : "The installed runtime configuration must be repaired from Setup"
       );
       publishOperation({
@@ -973,7 +973,7 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("lca-token could not start", message);
+    dialog.showErrorBox("Lca Token could not start", message);
   } catch {}
   app.exit(1);
 });

@@ -60,7 +60,7 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    executable = path.join(stage, "lca-token.app", "Contents", "MacOS", "lca-token");
+    executable = path.join(stage, "Lca Token.app", "Contents", "MacOS", "Lca Token");
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {

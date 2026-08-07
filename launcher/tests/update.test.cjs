@@ -45,8 +45,8 @@ test("checksums and release URLs bind the exact expected asset", () => {
 
 test("macOS bundle resolution never guesses outside Contents/MacOS", () => {
   assert.equal(
-    macApplicationPath("/Applications/lca-token.app/Contents/MacOS/lca-token"),
-    "/Applications/lca-token.app",
+    macApplicationPath("/Applications/Lca Token.app/Contents/MacOS/Lca Token"),
+    "/Applications/Lca Token.app",
   );
   assert.throws(() => macApplicationPath("/tmp/lca-token"), /Could not resolve/);
 });

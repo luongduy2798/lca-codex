@@ -160,7 +160,7 @@ function Onboarding({
     }
   };
 
-  const openSocial = async (target: "github" | "x") => {
+  const openSocial = async (target: "github") => {
     setBusy(true);
     setError(null);
     try {
@@ -1931,7 +1931,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>lca-token</h1>
+      <h1>Lca Token</h1>
       <p>{message}</p>
     </main>
   );

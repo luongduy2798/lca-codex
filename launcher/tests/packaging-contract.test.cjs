@@ -15,6 +15,7 @@ test("the public launcher command uses the Electron bootstrap", () => {
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.lcatoken.launcher");
+  assert.equal(manifest.build.productName, "Lca Token");
   assert.equal(manifest.build.artifactName, "lca-token-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
@@ -89,7 +90,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /launcher\/build\/runtime/);
   assert.match(release, /bun run app:smoke/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
-  assert.match(release, /lca-token\.app/);
+  assert.match(release, /Lca Token\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
 });
 
