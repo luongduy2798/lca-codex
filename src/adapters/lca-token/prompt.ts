@@ -331,10 +331,13 @@ export function chatGptReadOnlyContextWarning(
     message.role === "toolResult"
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
   );
-  if (hasLocalEvidence) {
-    return `⚠️ ${label} cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.`;
-  }
-  return `⚠️ ${label} cannot access the local Codex computer in this turn. The accumulated context does not contain local tool results yet: it will see instructions and attachments, but not workspace contents. ChatGPT-native capabilities such as web search remain available when the product provides them. Prepare the local context with a tool-capable Lca Token model first, then switch back.`;
+  const contextNote = hasLocalEvidence
+    ? "Workspace information already supplied by Codex remains available for this assistant to reason over."
+    : "Codex has not supplied workspace contents to this conversation yet.";
+  const nextStep = capabilities.localToolsEnabled
+    ? "Codex mode is configured, but this Lca Token mode is intentionally read-only for workspace access. Switch to a tool-capable Lca Token mode when you need the coding agent."
+    : "To enable Codex mode—the coding agent for files, terminal, code search and patches—configure MCP in the Lca Token launcher.";
+  return `⚠️ ${label} is running in ChatGPT mode for this turn. ChatGPT mode is a general-purpose AI assistant: it can reason over conversation context, instructions and attachments, but it cannot independently inspect or modify your workspace with coding tools. ${contextNote} ChatGPT-native capabilities such as web search remain available when the product provides them. ${nextStep}`;
 }
 
 export function compileLcaTokenPrompt(

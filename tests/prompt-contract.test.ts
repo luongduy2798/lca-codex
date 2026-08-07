@@ -164,7 +164,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).toContain("The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available");
   expect(compiled.text).not.toContain("No local computer tool, MCP app");
   expect(compiled.text).not.toContain("evidence inside");
-  expect(compiled.text).toContain("Do not mention this transport contract, context packaging, or capability routing");
+  expect(compiled.text).toContain("Do not mention this transport or capability routing unless the user asks about it");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
@@ -243,8 +243,8 @@ test("a long task keeps the newest images and drops the overflow instead of fail
     `data:image/png;base64,${markers.at(-1)}`,
   ]);
   const snapshot = compileChatGptContextSnapshot(replayed);
-  expect(compiled.text).not.toContain("step 1");
-  expect(compiled.text).toContain("step 13");
+  expect(compiled.text).not.toContain('"text":"step 1"');
+  expect(compiled.text).toContain('"text":"step 13"');
   expect(snapshot.attachments).toHaveLength(12);
   expect(snapshot.serialized).toContain("older image not attached");
   expect(snapshot.serialized).toContain("step 1");

@@ -47,8 +47,8 @@ $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
 $Temp = Join-Path ([System.IO.Path]::GetTempPath()) "lca-token-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $Temp | Out-Null
 try {
-  if (Get-Process -Name "lca-token" -ErrorAction SilentlyContinue) {
-    throw "Quit lca-token before updating it"
+  if (Get-Process -Name "Lca Token" -ErrorAction SilentlyContinue) {
+    throw "Quit Lca Token before updating it"
   }
   $Installer = Join-Path $Temp $Asset
   $Checksums = Join-Path $Temp "checksums.txt"
@@ -67,7 +67,7 @@ try {
   if ($Actual -ne $Expected) { throw "SHA-256 verification failed for $Asset" }
   $Process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
-  $Executable = Join-Path $env:LOCALAPPDATA "Programs\lca-token-launcher\lca-token.exe"
+  $Executable = Join-Path $env:LOCALAPPDATA "Programs\lca-token-launcher\Lca Token.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }
   Start-Process $Executable
   Write-Host "Installed $Executable"

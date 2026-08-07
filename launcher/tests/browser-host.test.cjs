@@ -591,6 +591,44 @@ test("effort selection waits for an already-open menu to hydrate instead of clos
   ]);
 });
 
+test("session inspection keeps optional Pro capability probing on a short bounded budget", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/browser-host.cjs"), "utf8");
+  assert.match(source, /PRO_CAPABILITY_CONTROL_TIMEOUT_MS = 5_000/);
+  assert.match(source, /PRO_CAPABILITY_MENU_TIMEOUT_MS = 4_000/);
+  assert.match(source, /PRO_CAPABILITY_RESET_TIMEOUT_MS = 2_000/);
+  assert.doesNotMatch(source, /waitForEffortControl\(30_000, 200\)/);
+});
+
+test("session inspection degrades to non-Pro when the effort picker cannot be hydrated", async () => {
+  const warnings = [];
+  const keys = [];
+  const fixture = {
+    logger: { warn: (event, detail) => warnings.push([event, detail]) },
+    view: {
+      webContents: {
+        getURL: () => "https://chatgpt.com/?temporary-chat=true",
+      },
+    },
+    probeAuthentication: async () => ({ authenticated: true }),
+    waitForEffortControl: async () => ({ found: true, expanded: "true" }),
+    readEffortMenu: async () => ({ open: false, count: 0, target: null }),
+    openEffortMenu: async () => { throw new Error("ChatGPT effort menu did not expose item index 0 (open=false; itemCount=0)"); },
+    pressBrowserKey: key => keys.push(key),
+  };
+
+  const inspected = await BrowserHost.prototype.runSessionInspection.call(fixture, true);
+
+  assert.deepEqual(inspected, {
+    authenticated: true,
+    temporary: true,
+    url: "https://chatgpt.com/?temporary-chat=true",
+    proAvailable: false,
+  });
+  assert.equal(warnings.at(-1)?.[0], "browser.pro_capability_probe_unavailable");
+  assert.match(warnings.at(-1)?.[1]?.message || "", /effort menu did not expose item index 0/);
+  assert.ok(keys.includes("Escape"));
+});
+
 test("smoke submission focuses the send button before trusted Enter and waits for an accepted user turn", async () => {
   const keys = [];
   let sendReads = 0;

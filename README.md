@@ -6,11 +6,6 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/luongduy2798/lca-token/actions/workflows/ci.yml"><img src="https://github.com/luongduy2798/lca-token/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black?logo=apple" alt="macOS arm64 and x64">
   <img src="https://img.shields.io/badge/Windows-x64-0078d4?logo=windows11" alt="Windows x64">
@@ -72,21 +67,8 @@ policies.
 
 ## Quick start
 
-Install or update the desktop launcher. To update or repair an existing installation, quit the
-launcher and run the same command again; it replaces the application and embedded runtime while
-preserving the ChatGPT profile and launcher configuration.
-
-**macOS or Linux**
-
-```bash
-curl -fsSL https://github.com/luongduy2798/lca-token/releases/latest/download/install-launcher.sh | sh
-```
-
-**Windows PowerShell**
-
-```powershell
-irm https://github.com/luongduy2798/lca-token/releases/latest/download/install-launcher.ps1 | iex
-```
+Install or update the desktop launcher using the distributed build for your platform. Updating or
+repairing the application preserves the ChatGPT profile and launcher configuration.
 
 Then complete the three checks in the app:
 
@@ -102,9 +84,9 @@ browser download.
 
 **Run from source**
 
+From an existing source checkout:
+
 ```bash
-git clone https://github.com/luongduy2798/lca-token.git && \
-cd lca-token && \
 bun run app
 ```
 

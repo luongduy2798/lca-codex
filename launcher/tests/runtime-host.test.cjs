@@ -27,6 +27,34 @@ function hostFor(existingConfig) {
   return { host, invocation: () => invocation };
 }
 
+test("manual Codex config save stays editable when route status is invalid", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-manual-codex-config-"));
+  const codexHome = path.join(root, ".codex");
+  const configPath = path.join(codexHome, "config.toml");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.writeFileSync(configPath, "model = \"old\"\n");
+  const host = new RuntimeHost({
+    app: { getPath: () => root },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome,
+    supervisor: { readConfig: () => null, readSetupConfig: () => null },
+  });
+  host.run = async () => { throw new Error("Codex config contains invalid TOML"); };
+  try {
+    const content = "model = \"manual\"\nmodel_reasoning_effort = \"high\"\n";
+    const snapshot = await host.saveCodexConfig(content);
+    assert.equal(fs.readFileSync(configPath, "utf8"), content);
+    assert.equal(snapshot.content, content);
+    assert.equal(snapshot.exists, true);
+    assert.equal(snapshot.state, "inconsistent");
+    assert.match(snapshot.errors.join("; "), /invalid TOML/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("core setup preserves an existing full-harness installation", async () => {
   const fixture = hostFor({ mode: "full" });
   const result = await fixture.host.setupCore();
@@ -163,14 +191,6 @@ function bridgeFixture({ active }) {
   const supervisor = {
     readConfig: () => ({ mode: "browser-only" }),
     readSetupConfig: () => ({ mode: "browser-only" }),
-    startIfConfigured: async () => {
-      calls.push("runtime:start");
-      return { status: "ready" };
-    },
-    stopForSetup: async () => {
-      calls.push("runtime:stop");
-      return { status: "stopped" };
-    },
   };
   const host = new RuntimeHost({
     app: { getPath: () => path.join(os.tmpdir(), "lca-token-bridge-test") },
@@ -192,18 +212,18 @@ function bridgeFixture({ active }) {
   return { calls, host, supervisor };
 }
 
-test("bridge connection starts a healthy runtime before routing Codex to it", async () => {
+test("bridge connection changes only the Codex route and leaves runtime lifecycle untouched", async () => {
   const fixture = bridgeFixture({ active: false });
   const result = await fixture.host.setBridgeEnabled(true);
   assert.equal(result.active, true);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect"]);
+  assert.deepEqual(fixture.calls, ["route status", "route connect"]);
 });
 
-test("bridge disconnection proves idleness and stops the runtime before restoring the prior route", async () => {
+test("bridge disconnection restores only the prior Codex route", async () => {
   const fixture = bridgeFixture({ active: true });
   const result = await fixture.host.setBridgeEnabled(false);
   assert.equal(result.active, false);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect"]);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect"]);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
@@ -217,10 +237,10 @@ test("bridge connection rejects a route command that did not reach the requested
     return { stdout: JSON.stringify({ changed: false, active: false }) };
   };
   await assert.rejects(fixture.host.setBridgeEnabled(true), /remained disconnected/);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:start", "route connect", "runtime:stop"]);
+  assert.deepEqual(fixture.calls, ["route status", "route connect"]);
 });
 
-test("bridge disconnection restarts the existing runtime if restoring the prior route fails", async () => {
+test("bridge disconnection failure does not mutate runtime lifecycle", async () => {
   const fixture = bridgeFixture({ active: true });
   fixture.host.run = async (_name, args) => {
     const action = args.join(" ");
@@ -231,7 +251,7 @@ test("bridge disconnection restarts the existing runtime if restoring the prior 
     throw new Error("synthetic route restore failure");
   };
   await assert.rejects(fixture.host.setBridgeEnabled(false), /synthetic route restore failure/);
-  assert.deepEqual(fixture.calls, ["route status", "runtime:stop", "route disconnect", "runtime:start"]);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect"]);
 });
 
 test("startup recovery can restore the Codex route without requiring a healthy local runtime", async () => {
@@ -333,12 +353,14 @@ test("failed first-time setup removes its route before restoring the unconfigure
     startIfConfigured: async () => ({ status: fs.existsSync(configPath) ? "ready" : "not-configured" }),
     clearState: () => { cleared += 1; },
   };
+  const operations = [];
   const host = new RuntimeHost({
     app: { getPath: () => root },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: path.join(root, "launcher-browser.json"),
     codexHome,
+    publishOperation: operation => operations.push(operation),
     supervisor,
   });
   host.run = async (_name, args) => {
@@ -360,8 +382,11 @@ test("failed first-time setup removes its route before restoring the unconfigure
     assert.equal(fs.existsSync(journalPath), false);
     assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "original codex config\n");
     assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "original codex models cache\n");
-    assert.equal(stops, 2);
+    assert.equal(stops, 3);
     assert.equal(cleared, 1);
+    assert.equal(host.currentOperation(), null);
+    assert.equal(operations.at(-1)?.status, "failed");
+    assert.match(operations.at(-1)?.message || "", /synthetic setup failure/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -400,7 +425,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
 
   await host.runSetup("core-setup", ["setup", "--full"], {});
   assert.equal(prepared, 1);
-  assert.equal(launcherStops, 0);
+  assert.equal(launcherStops, 1);
 });
 
 test("failed terminal migration verifies the unchanged previous runtime instead of claiming recovery", async () => {
@@ -473,6 +498,7 @@ test("failed launcher update restores every mutable setup file before restarting
     configPath,
     readSetupConfig: readConfig,
     readConfig,
+    observeRuntime: async () => ({ lifecycle: "ready", owner: "current-launcher" }),
     stopForSetup: async () => ({ status: "stopped" }),
     startIfConfigured: async () => {
       startAttempts += 1;
@@ -537,7 +563,6 @@ test("failed terminal migration restores removed launchd ownership before verify
   fs.writeFileSync(daemonPlist, "old daemon plist\n", { mode: 0o600 });
   fs.writeFileSync(tunnelPlist, "old tunnel plist\n", { mode: 0o600 });
 
-  let startAttempts = 0;
   const calls = [];
   const readConfig = () => JSON.parse(fs.readFileSync(configPath, "utf8"));
   const supervisor = {
@@ -550,9 +575,8 @@ test("failed terminal migration restores removed launchd ownership before verify
       return config;
     },
     prepareExternalMigration() {},
-    startIfConfigured: async () => {
-      startAttempts += 1;
-      throw new Error("synthetic launcher startup failure");
+    stopForSetup: async () => {
+      throw new Error("synthetic launcher cleanup failure");
     },
   };
   const host = new RuntimeHost({
@@ -578,9 +602,8 @@ test("failed terminal migration restores removed launchd ownership before verify
   try {
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--full"], {}),
-      /synthetic launcher startup failure$/,
+      /synthetic launcher cleanup failure$/,
     );
-    assert.equal(startAttempts, 1);
     assert.deepEqual(readConfig(), oldConfig);
     assert.equal(fs.readFileSync(daemonPlist, "utf8"), "old daemon plist\n");
     assert.equal(fs.readFileSync(tunnelPlist, "utf8"), "old tunnel plist\n");

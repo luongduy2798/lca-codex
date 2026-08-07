@@ -56,11 +56,10 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
-const GITHUB_URL = "https://github.com/luongduy2798/lca-token";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Connectors";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
-const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
+const ALLOWED_EXTERNAL_URLS = new Set([CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
@@ -91,6 +90,8 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let runtimeStatusTimer = null;
+let runtimeStatusInFlight = false;
 let updateController = null;
 
 function findFreePort() {
@@ -115,6 +116,109 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+async function publishRuntimeStatus() {
+  if (!runtimeSupervisor) {
+    return {
+      configured: false,
+      lifecycle: "stopped",
+      owner: "none",
+      mode: null,
+      detail: null,
+      daemon: { pid: null, healthy: false, acceptingTurns: null },
+      tunnel: null,
+      port: { host: "127.0.0.1", port: null, occupied: false, identity: "none" },
+    };
+  }
+  const status = await runtimeSupervisor.observeRuntime();
+  send("launcher:runtime-state", status);
+  return status;
+}
+
+function stopRuntimeStatusMonitor() {
+  if (runtimeStatusTimer) clearInterval(runtimeStatusTimer);
+  runtimeStatusTimer = null;
+}
+
+function startRuntimeStatusMonitor() {
+  stopRuntimeStatusMonitor();
+  const tick = async () => {
+    if (runtimeStatusInFlight || !runtimeSupervisor) return;
+    runtimeStatusInFlight = true;
+    try {
+      await publishRuntimeStatus();
+    } catch (error) {
+      // Runtime observation is diagnostic and must never make the launcher unusable.
+    } finally {
+      runtimeStatusInFlight = false;
+    }
+  };
+  runtimeStatusTimer = setInterval(() => { void tick(); }, 3_000);
+  runtimeStatusTimer.unref?.();
+  void tick();
+}
+
+function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
+  if (!upgrade?.updated) return;
+  const state = stateStore.update({
+    bridgeEnabled: upgrade.bridgeEnabled,
+    coreSetupComplete: true,
+    codexCatalogVerified: false,
+    codexRestartRequired: true,
+    ...(upgrade.mode === "browser-only" ? {
+      mcpRuntimeInstalled: false,
+      mcpSetupComplete: false,
+      mcpGuideStep: 0,
+    } : {}),
+  });
+  send("launcher:state-changed", state);
+  logger.info("runtime.release_upgraded", {
+    fromVersion: upgrade.fromVersion,
+    toVersion: upgrade.toVersion,
+    mode: upgrade.mode,
+    bridgeEnabled: upgrade.bridgeEnabled,
+  });
+}
+
+async function startManagedRuntime({ logger, stateStore }) {
+  const before = await runtimeSupervisor.observeRuntime();
+  if (before.lifecycle === "foreign") {
+    throw new Error(before.detail || "The configured Responses port is owned by another process");
+  }
+  if (before.lifecycle === "stale" || before.owner === "compatible-runtime") {
+    await runtimeSupervisor.stopRuntime();
+    const cleaned = await runtimeSupervisor.observeRuntime();
+    if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
+      throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
+    }
+  }
+  const upgrade = await runtimeHost.upgradeManagedRuntime();
+  applyRuntimeUpgradeState(upgrade, { logger, stateStore });
+  const status = await runtimeSupervisor.startRuntime();
+  send("launcher:runtime-state", status);
+  if (status.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
+  return status;
+}
+
+async function stopManagedRuntime({ logger } = {}) {
+  browserHost?.abortAllTurns();
+  stopCatalogVerificationMonitor();
+  try {
+    await runtimeHost?.cancelActiveOperation();
+  } catch (error) {
+    logger?.warn?.("runtime.operation_cancel_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const status = await runtimeSupervisor.stopRuntime();
+  send("launcher:runtime-state", status);
+  return status;
+}
+
+async function restartManagedRuntime({ logger, stateStore }) {
+  await stopManagedRuntime({ logger });
+  return startManagedRuntime({ logger, stateStore });
 }
 
 function stopCatalogVerificationMonitor() {
@@ -320,7 +424,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     window.on(event, () => send("launcher:window-state-changed", windowStateSnapshot(window)));
   }
   window.once("ready-to-show", () => {
-    if (!state.onboardingComplete && !Number.isFinite(windowState.bounds.x)) window.center();
+    if (!Number.isFinite(windowState.bounds.x)) window.center();
     if (windowState.maximized) window.maximize();
     if (windowState.fullscreen) window.setFullScreen(true);
     if (!startHidden) window.show();
@@ -342,11 +446,6 @@ async function loadRenderer(window) {
   await window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
 }
 
-function validateLanguage(value) {
-  if (value !== "en" && value !== "zh-CN") throw new Error("Language must be en or zh-CN");
-  return value;
-}
-
 function validateBounds(value) {
   if (!value || typeof value !== "object") throw new Error("Browser bounds are required");
   for (const key of ["x", "y", "width", "height"]) {
@@ -363,10 +462,11 @@ function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("launcher:snapshot", async () => ({
     state: stateStore.read(),
+    runtime: await runtimeSupervisor.observeRuntime(),
     browser: browserHost?.snapshot() ?? null,
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
-    urls: { github: GITHUB_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
+    urls: { connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
     packaged: app.isPackaged,
     version: app.getVersion(),
@@ -375,20 +475,10 @@ function registerIpc({ logger, stateStore }) {
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
-  handle("launcher:set-language", (_event, language) => stateStore.update({ language: validateLanguage(language) }));
-  handle("launcher:open-social", async (_event, target) => {
-    if (target !== "github") throw new Error("Unknown repository target");
-    await openWebUrl(GITHUB_URL);
-    return stateStore.update({ githubOpened: true });
-  });
-  handle("launcher:complete-onboarding", (_event, language) => {
-    const current = stateStore.read();
-    if (!current.githubOpened) throw new Error("Open the Lca Token repository before continuing");
-    if (current.autoStart) setAutostart(app, true);
-    const next = stateStore.update({ language: validateLanguage(language), onboardingComplete: true });
-    logger.info("launcher.onboarding_completed", { language: next.language });
-    return next;
-  });
+  handle("launcher:runtime-status", () => publishRuntimeStatus());
+  handle("launcher:runtime-start", () => startManagedRuntime({ logger, stateStore }));
+  handle("launcher:runtime-stop", () => stopManagedRuntime({ logger }));
+  handle("launcher:runtime-restart", () => restartManagedRuntime({ logger, stateStore }));
 
   handle("launcher:open-external", async (_event, url) => {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
@@ -460,34 +550,11 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:doctor", () => runtimeHost.doctor());
   handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
-  handle("launcher:codex-config-reset", async () => {
-    const language = stateStore.read().language;
-    const chinese = language === "zh-CN";
-    const confirmation = await dialog.showMessageBox(mainWindow, {
-      type: "warning",
-      buttons: chinese ? ["取消", "重置配置"] : ["Cancel", "Reset config"],
-      defaultId: 0,
-      cancelId: 0,
-      title: chinese ? "重置 Codex 配置" : "Reset Codex configuration",
-      message: chinese
-        ? "恢复 Lca Token 安装前的 Codex 配置？"
-        : "Restore the Codex configuration that existed before Lca Token was installed?",
-      detail: chinese
-        ? "只恢复 Lca Token 管理的路由和功能。其他 TOML、ChatGPT 登录、连接器名称和运行时凭据都会保留。"
-        : "Only Lca Token-managed route and feature settings are restored. Unrelated TOML, ChatGPT login, connector name, and runtime credentials are preserved.",
-      noLink: true,
-    });
-    if (confirmation.response !== 1) return { cancelled: true };
-    await runtimeHost.resetCodexConfig();
-    const state = stateStore.update({
-      coreSetupComplete: false,
-      bridgeEnabled: false,
-      codexCatalogVerified: false,
-      codexRestartRequired: true,
-    });
+  handle("launcher:codex-config-save", async (_event, content) => {
+    const config = await runtimeHost.saveCodexConfig(content);
+    const state = stateStore.update({ codexRestartRequired: true });
     send("launcher:state-changed", state);
-    stopCatalogVerificationMonitor();
-    return { cancelled: false, state };
+    return { config, state };
   });
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
   handle("launcher:bridge-enabled", async (_event, enabled) => {
@@ -502,20 +569,14 @@ function registerIpc({ logger, stateStore }) {
     return state;
   });
   handle("launcher:uninstall-integration", async () => {
-    const language = stateStore.read().language;
-    const chinese = language === "zh-CN";
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: "warning",
-      buttons: chinese ? ["取消", "移除"] : ["Cancel", "Remove"],
+      buttons: ["Cancel", "Restore native Codex"],
       defaultId: 0,
       cancelId: 0,
-      title: chinese ? "移除 Lca Token" : "Remove Lca Token",
-      message: chinese
-        ? "从 Codex 中移除 Lca Token 模型并恢复此前的模型路由？"
-        : "Remove the Lca Token models from Codex and restore the previous model route?",
-      detail: chinese
-        ? "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。"
-        : "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+      title: "Restore native Codex",
+      message: "Remove the Lca Token-managed models and restore Codex's previous native route?",
+      detail: "Unrelated Codex settings and the launcher's ChatGPT login profile are preserved. Restart Codex once after restoring.",
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
@@ -538,57 +599,52 @@ function registerIpc({ logger, stateStore }) {
     return { cancelled: false, state };
   });
   handle("launcher:setup-core", async () => {
-    const browser = await browserHost.probeAuthentication();
-    if (!browser.authenticated) throw new Error("Sign in to ChatGPT before installing the Codex integration");
-    if (!(smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()))) {
-      throw new Error("Run the browser smoke test before installing the Codex integration");
-    }
-    let result;
+    const beforeState = stateStore.read();
     try {
-      result = await runtimeHost.setupCore();
+      const browser = await browserHost.probeAuthentication();
+      if (!browser.authenticated) throw new Error("Sign in to ChatGPT before installing the Codex integration");
+      if (!(smokePassedThisSession || smokePassedForCurrentVersion(beforeState))) {
+        throw new Error("Run the browser smoke test before installing the Codex integration");
+      }
+      const result = await runtimeHost.setupCore({ replaceCodexRoute: true });
+      const state = stateStore.update({
+        bridgeEnabled: true,
+        coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
+        ...(result.mode === "browser-only" ? {
+          mcpSetupComplete: false,
+          mcpRuntimeInstalled: false,
+          mcpGuideStep: 0,
+        } : {}),
+      });
+      send("launcher:state-changed", state);
+      await browserHost.returnToIdle().catch((error) => {
+        logger.warn("browser.idle_cleanup_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+      const runtime = await publishRuntimeStatus();
+      if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
+      else stopCatalogVerificationMonitor();
+      return { ok: true, stdout: result.stdout, restartRequired: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const routeConflict = message.includes("Codex already configures model routing")
-        && message.includes("--replace-codex-route");
-      if (!routeConflict) throw error;
-
-      const language = stateStore.read().language;
-      const chinese = language === "zh-CN";
-      const confirmation = await dialog.showMessageBox(mainWindow, {
-        type: "warning",
-        buttons: chinese ? ["取消", "替换现有路由"] : ["Cancel", "Replace existing route"],
-        defaultId: 0,
-        cancelId: 0,
-        title: chinese ? "Codex 已配置其他模型路由" : "Codex already has another model route",
-        message: chinese
-          ? "Lca Token 需要暂时替换当前 Codex 模型路由才能安装。"
-          : "Lca Token needs to replace the current Codex model route to install its models.",
-        detail: chinese
-          ? "当前路由会被保存到 Lca Token 的集成日志中。之后断开或卸载 Lca Token 时可以恢复。"
-          : "The current route will be saved in Lca Token's integration journal and can be restored when you disconnect or uninstall Lca Token.",
-        noLink: true,
+      stopCatalogVerificationMonitor();
+      send("launcher:state-changed", beforeState);
+      await publishRuntimeStatus().catch((statusError) => {
+        logger.warn("runtime.status_after_setup_failure_failed", {
+          message: statusError instanceof Error ? statusError.message : String(statusError),
+        });
       });
-      if (confirmation.response !== 1) return { cancelled: true };
-      result = await runtimeHost.setupCore({ replaceCodexRoute: true });
+      await browserHost.returnToIdle().catch((idleError) => {
+        logger.warn("browser.idle_cleanup_failed", {
+          message: idleError instanceof Error ? idleError.message : String(idleError),
+        });
+      });
+      publishOperation({ name: "core-setup", status: "failed", message });
+      throw error;
     }
-    stateStore.update({
-      bridgeEnabled: true,
-      coreSetupComplete: true,
-      codexCatalogVerified: false,
-      codexRestartRequired: true,
-      ...(result.mode === "browser-only" ? {
-        mcpSetupComplete: false,
-        mcpRuntimeInstalled: false,
-        mcpGuideStep: 0,
-      } : {}),
-    });
-    await browserHost.returnToIdle().catch((error) => {
-      logger.warn("browser.idle_cleanup_failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    });
-    startCatalogVerificationMonitor({ logger, stateStore });
-    return { ok: true, stdout: result.stdout, restartRequired: true };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
     await browserHost.reveal();
@@ -620,11 +676,21 @@ function registerIpc({ logger, stateStore }) {
       ...autostart,
     };
   });
-  handle("launcher:set-preference", (_event, key, value) => {
-    if (key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
+  handle("launcher:set-preference", async (_event, key, value) => {
+    if (key !== "runtimeAutoStart" && key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
       throw new Error("Unknown preference");
     }
-    return stateStore.update({ [key]: value === true });
+    const desired = value === true;
+    const state = stateStore.update({ [key]: desired });
+    if (key !== "runtimeAutoStart" || !desired) return state;
+    try {
+      await startManagedRuntime({ logger, stateStore });
+      return stateStore.read();
+    } catch (error) {
+      const rolledBack = stateStore.update({ runtimeAutoStart: false });
+      send("launcher:state-changed", rolledBack);
+      throw error;
+    }
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -661,16 +727,31 @@ async function requestQuit() {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
+  stopCatalogVerificationMonitor();
+  stopRuntimeStatusMonitor();
+  browserHost?.abortAllTurns();
   try {
     const activeOperation = runtimeHost?.currentOperation();
     if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Lca Token`);
+      loggerForQuit()?.warn?.("launcher.quit_during_operation", { operation: activeOperation });
+      try {
+        await runtimeHost?.cancelActiveOperation();
+      } catch (error) {
+        loggerForQuit()?.warn?.("launcher.quit_operation_cancel_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-    await runtimeSupervisor?.shutdown();
-    stopCatalogVerificationMonitor();
+    try {
+      await runtimeSupervisor?.shutdown();
+    } catch (error) {
+      loggerForQuit()?.error?.("runtime.shutdown_failed_on_quit", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     quitting = true;
     browserHost?.destroy();
-    await browserControl?.close();
+    await browserControl?.close().catch(() => {});
     exitCommitted = true;
     app.quit();
     return { ok: true };
@@ -683,6 +764,10 @@ async function requestQuit() {
   } finally {
     shutdownInProgress = false;
   }
+}
+
+function loggerForQuit() {
+  return runtimeSupervisor?.logger || runtimeHost?.logger || null;
 }
 
 async function start() {
@@ -727,14 +812,14 @@ async function start() {
     });
   }
   const autostart = getAutostart(app);
-  if (stateStore.read().onboardingComplete && autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
+  if (autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
     setAutostart(app, stateStore.read().autoStart);
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  const startHidden = process.argv.includes("--hidden");
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
     logger,
@@ -765,6 +850,7 @@ async function start() {
     coreHome: CORE_HOME,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     publishOperation,
+    publishRuntimeState: (state) => send("launcher:runtime-state", state),
   });
   runtimeHost = new RuntimeHost({
     app,
@@ -842,27 +928,6 @@ async function start() {
     return;
   }
   void (async () => {
-    const upgrade = await runtimeHost.upgradeManagedRuntime();
-    if (upgrade.updated) {
-      const state = stateStore.update({
-        bridgeEnabled: upgrade.bridgeEnabled,
-        coreSetupComplete: true,
-        codexCatalogVerified: false,
-        codexRestartRequired: true,
-        ...(upgrade.mode === "browser-only" ? {
-          mcpRuntimeInstalled: false,
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
-        } : {}),
-      });
-      send("launcher:state-changed", state);
-      logger.info("runtime.release_upgraded", {
-        fromVersion: upgrade.fromVersion,
-        toVersion: upgrade.toVersion,
-        mode: upgrade.mode,
-        bridgeEnabled: upgrade.bridgeEnabled,
-      });
-    }
     try {
       const route = await runtimeHost.bridgeStatus();
       if (route.installed) {
@@ -871,90 +936,33 @@ async function start() {
           const state = stateStore.update({ bridgeEnabled: route.active });
           send("launcher:state-changed", state);
         }
-        if (!route.active) return { status: "bridge-disabled" };
       }
     } catch (error) {
       logger.warn("bridge.route_status_failed", {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    return runtimeSupervisor.startIfConfigured();
-  })().then(async (runtime) => {
-    if (runtime.status === "bridge-disabled") {
-      stopCatalogVerificationMonitor();
-      return;
-    }
-    if (runtime.status === "ready") {
-      const config = runtimeSupervisor.readConfig();
-      const current = stateStore.read();
-      const patch = {
-        mcpRuntimeInstalled: config.mode === "full",
-        ...(config.mode === "full" ? { connectorName: config.appName.trim() } : {}),
-        ...(config.mode === "browser-only" ? {
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
-        } : {}),
-      };
-      if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
-        const state = stateStore.update(patch);
-        send("launcher:state-changed", state);
-      }
-      startCatalogVerificationMonitor({ logger, stateStore });
-      return;
-    }
-    if (runtime.status === "not-configured") {
-      const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-      const current = stateStore.read();
-      if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
-        const state = stateStore.update({
-          coreSetupComplete: false,
-          codexCatalogVerified: false,
-          mcpRuntimeInstalled: false,
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
+
+    await publishRuntimeStatus();
+    startRuntimeStatusMonitor();
+    if (stateStore.read().runtimeAutoStart === true) {
+      try {
+        await startManagedRuntime({ logger, stateStore });
+      } catch (error) {
+        logger.error("runtime.auto_start_failed", {
+          message: error instanceof Error ? error.message : String(error),
         });
-        send("launcher:state-changed", state);
-      }
-      if (routeRecovery.error) {
         publishOperation({
           name: "runtime-start",
           status: "failed",
-          message: `Local runtime is not configured; restoring the previous Codex route also failed: ${routeRecovery.error}`,
+          message: error instanceof Error ? error.message : String(error),
         });
       }
-      return;
     }
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
-    send("launcher:state-changed", state);
-    if (runtime.status === "external" || runtime.status === "needs-setup") {
-      const detail = runtime.detail || (
-        runtime.status === "external"
-          ? "Another process owns the configured Lca Token runtime"
-          : "The installed runtime configuration must be repaired from Setup"
-      );
-      publishOperation({
-        name: "runtime-start",
-        status: "failed",
-        message: routeRecovery.error
-          ? `${detail}; restoring the previous Codex route also failed: ${routeRecovery.error}`
-          : routeRecovery.restored
-            ? `${detail}; the previous Codex route was restored, restart Codex once`
-            : detail,
-      });
-    }
-  }).catch(async (error) => {
-    const primary = error instanceof Error ? error.message : String(error);
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const message = routeRecovery.error
-      ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
-      : routeRecovery.restored
-        ? `${primary}; the previous Codex route was restored, restart Codex once`
-        : primary;
-    logger.error("runtime.startup_failed", { message });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
-    send("launcher:state-changed", state);
-    publishOperation({ name: "runtime-start", status: "failed", message });
+  })().catch((error) => {
+    logger.error("runtime.initial_observation_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
   });
 
   app.on("activate", () => showMainWindow());

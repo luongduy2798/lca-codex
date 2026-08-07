@@ -198,6 +198,31 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toBe(original);
   });
 
+  test("purges legacy lca-codex routing while preserving unrelated project settings", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = `# Managed by LCA Codex Electron; restore with the dashboard.\nopenai_base_url = \"http://127.0.0.1:17842/v1\"\nmodel_provider = \"lca_codex_proxy\"\nmodel = \"lca-codex\"\nmodel_reasoning_effort = \"medium\"\nmodel_catalog_json = \"/Users/test/.lca-codex/codex-model-catalog.json\"\n\n[projects.\"/Users/test/project\"]\ntrust_level = \"trusted\"\n\n[model_providers.lca_codex_proxy]\nname = \"LCA Codex\"\nbase_url = \"http://127.0.0.1:17842/v1\"\n`;
+    writeFileSync(configPath, original);
+
+    installCodexIntegration(defaultConfig("browser-only"), { replaceExistingRoute: true });
+    const installed = readFileSync(configPath, "utf8");
+    expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+    expect(installed).toContain('[projects."/Users/test/project"]');
+    expect(installed).toContain('trust_level = "trusted"');
+    expect(installed).toContain('model_reasoning_effort = "medium"');
+    expect(installed).not.toContain("Managed by LCA Codex Electron");
+    expect(installed).not.toContain('model = "lca-codex"');
+    expect(installed).not.toContain("lca_codex_proxy");
+    expect(installed).not.toContain(".lca-codex/codex-model-catalog.json");
+
+    uninstallCodexIntegration();
+    const restored = readFileSync(configPath, "utf8");
+    expect(restored).toContain('[projects."/Users/test/project"]');
+    expect(restored).toContain('trust_level = "trusted"');
+    expect(restored).not.toContain("lca_codex_proxy");
+    expect(restored).not.toContain("127.0.0.1:17842");
+  });
+
   test("preflight detects route conflicts without changing Codex or creating a journal", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

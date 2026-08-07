@@ -8,9 +8,21 @@ const repositoryRoot = path.resolve(launcherRoot, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
 const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 
-test("the public launcher command uses the Electron bootstrap", () => {
-  assert.equal(repositoryManifest.scripts.launcher, "bun run scripts/start-launcher.ts");
-  assert.equal(repositoryManifest.scripts.launcher, repositoryManifest.scripts.app);
+test("the public source workflow is Electron-first without terminal lifecycle aliases", () => {
+  assert.equal(repositoryManifest.scripts.app, "bun run scripts/start-launcher.ts");
+  for (const removed of [
+    "start",
+    "setup",
+    "doctor",
+    "clean",
+    "build",
+    "smoke",
+    "smoke:codex",
+    "launcher",
+    "launcher:dev",
+  ]) {
+    assert.equal(repositoryManifest.scripts[removed], undefined, `${removed} must not reintroduce a terminal-first workflow`);
+  }
 });
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {

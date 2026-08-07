@@ -12,15 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            runtime_asset: lca-token-darwin-arm64.tar.gz
-          - runner: macos-15-intel
-            runtime_asset: lca-token-darwin-amd64.tar.gz
-          - runner: ubuntu-latest
-            runtime_asset: lca-token-linux-amd64.tar.gz
-          - runner: windows-latest
-            runtime_asset: lca-token-windows-amd64.zip
+        runner: [macos-15, macos-15-intel, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -47,18 +39,10 @@ jobs:
           stage="$(mktemp -d)"
           ditto -x -k "$archive" "$stage"
           codesign --verify --deep --strict --verbose=2 "$stage/Lca Token.app"
-      - name: Archive runtime
-        if: runner.os != 'Windows'
-        run: tar -czf "${{ matrix.runtime_asset }}" -C launcher/build/runtime .
-      - name: Archive Windows runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path launcher/build/runtime/* -DestinationPath "${{ matrix.runtime_asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.runner }}
           path: |
-            ${{ matrix.runtime_asset }}
             launcher/artifacts/*.dmg
             launcher/artifacts/*.zip
             launcher/artifacts/*.exe
@@ -92,7 +76,6 @@ jobs:
           cp LICENSES/OpenCodex-MIT.txt release-assets/OpenCodex-MIT.txt
           cp LICENSES/Bun-1.3.14.md release-assets/Bun-1.3.14.md
           cp dist/THIRD_PARTY_NOTICES.txt release-assets/THIRD_PARTY_NOTICES.txt
-          cp scripts/install.sh release-assets/install.sh
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1
       - name: Flatten release assets

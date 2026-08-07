@@ -382,6 +382,8 @@ function removeManagedComment(document: CodexConfigDocument): void {
   }
 }
 
+const LEGACY_LCA_CODEX_COMMENT = "# Managed by LCA Codex Electron; restore with the dashboard.";
+
 interface TomlTableRange {
   headerIndex: number;
   endIndex: number;
@@ -403,6 +405,32 @@ function findTomlTable(lines: string[], tableName: string): TomlTableRange | und
     headerIndex,
     endIndex: relativeEnd < 0 ? lines.length : headerIndex + 1 + relativeEnd,
   };
+}
+
+function removeTomlTable(document: CodexConfigDocument, tableName: string): void {
+  const table = findTomlTable(document.lines, tableName);
+  if (!table) return;
+  for (let index = table.endIndex - 1; index >= table.headerIndex; index -= 1) {
+    removeDocumentLine(document, index);
+  }
+}
+
+function findLegacyLcaCodexRoute(document: CodexConfigDocument, previous: Record<ManagedAssignmentKey, PreviousAssignment>): boolean {
+  return document.lines.includes(LEGACY_LCA_CODEX_COMMENT)
+    || previous.model_provider.value === "lca_codex_proxy"
+    || previous.model_catalog_json.value?.includes(".lca-codex/") === true
+    || previous.model_catalog_json.value?.includes(".lca-codex\\\\") === true;
+}
+
+function purgeLegacyLcaCodexRoute(document: CodexConfigDocument): void {
+  for (let index = document.lines.length - 1; index >= 0; index -= 1) {
+    if (document.lines[index] === LEGACY_LCA_CODEX_COMMENT) removeDocumentLine(document, index);
+  }
+  const model = findTopLevelAssignment(document.lines, "model");
+  if (model.index !== undefined && (model.value === "lca-codex" || model.value?.startsWith("lca-codex/") === true)) {
+    removeDocumentLine(document, model.index);
+  }
+  removeTomlTable(document, "model_providers.lca_codex_proxy");
 }
 
 function findBooleanAssignmentInTable(
@@ -693,7 +721,16 @@ function installRoute(
   replaceExistingRoute: boolean,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
   const document = parseDocument(text);
-  const previous = assignments(document.lines);
+  let previous = assignments(document.lines);
+  const legacyLcaCodexRoute = replaceExistingRoute && findLegacyLcaCodexRoute(document, previous);
+  if (legacyLcaCodexRoute) {
+    purgeLegacyLcaCodexRoute(document);
+    previous = {
+      openai_base_url: { present: false },
+      model_provider: { present: false },
+      model_catalog_json: { present: false },
+    };
+  }
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([key, assignment]) => assignment.present
       && !(key === "model_provider" && assignment.value === "openai"))

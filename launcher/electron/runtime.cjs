@@ -160,6 +160,41 @@ class RuntimeHost {
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
   }
 
+  async cancelActiveOperation() {
+    const child = this.activeChild;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return false;
+    const waitForExit = (timeoutMs) => new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.off("exit", finish);
+        child.off("close", finish);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.off("exit", finish);
+        child.off("close", finish);
+        resolve(false);
+      }, timeoutMs);
+      child.once("exit", finish);
+      child.once("close", finish);
+    });
+    this.logger.warn("runtime.operation_cancel_requested", {
+      operation: this.active || this.lifecycleOperation || "unknown",
+      pid: child.pid,
+    });
+    terminateOwnedProcessTree(child);
+    if (!await waitForExit(2_000)) {
+      terminateOwnedProcessTree(child, "SIGKILL");
+      await waitForExit(2_000);
+    }
+    return true;
+  }
+
   cleanupEphemeralSecrets() {
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
     try {
@@ -290,7 +325,7 @@ class RuntimeHost {
     }
   }
 
-  async restorePreviousRuntime(snapshot, operationName, { repairExternal = false } = {}) {
+  async restorePreviousRuntime(snapshot, operationName, { repairExternal = false, wasRunning = false } = {}) {
     const current = this.runtimeConfigSnapshot();
     if (current.owner !== snapshot.owner || current.serialized !== snapshot.serialized) {
       throw new Error(
@@ -324,11 +359,14 @@ class RuntimeHost {
       });
       return;
     }
+    if (!wasRunning) {
+      await this.supervisor.stopForSetup();
+      return;
+    }
     const runtime = await this.supervisor.startIfConfigured();
-    const expected = snapshot.configured ? "ready" : "not-configured";
-    if (runtime.status !== expected) {
+    if (runtime.status !== "ready") {
       throw new Error(
-        `Previous runtime recovery returned ${runtime.status}; expected ${expected}${runtime.detail ? `: ${runtime.detail}` : ""}`,
+        `Previous runtime recovery returned ${runtime.status}; expected ready${runtime.detail ? `: ${runtime.detail}` : ""}`,
       );
     }
   }
@@ -534,23 +572,6 @@ class RuntimeHost {
     if (this.codexConfigSnapshotInFlight) return this.codexConfigSnapshotInFlight;
 
     const snapshot = (async () => {
-      const result = await this.run("codex-config-status", ["route", "status"], {
-        embedded: true,
-        publishOperation: false,
-        timeoutMs: 15_000,
-      });
-      let route;
-      try {
-        route = JSON.parse(result.stdout);
-      } catch {
-        throw new Error("Codex route status returned invalid JSON");
-      }
-      if (typeof route?.installed !== "boolean" || typeof route?.active !== "boolean") {
-        throw new Error("Codex route status is incomplete");
-      }
-      const errors = Array.isArray(route.errors)
-        ? route.errors.filter(value => typeof value === "string" && value.trim()).map(value => value.trim())
-        : [];
       const configPath = path.join(this.codexHome, "config.toml");
       let content = "";
       let exists = false;
@@ -565,20 +586,45 @@ class RuntimeHost {
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
       }
+
+      let route = null;
+      const errors = [];
+      try {
+        const result = await this.run("codex-config-status", ["route", "status"], {
+          embedded: true,
+          publishOperation: false,
+          timeoutMs: 15_000,
+        });
+        route = JSON.parse(result.stdout);
+        if (typeof route?.installed !== "boolean" || typeof route?.active !== "boolean") {
+          throw new Error("Codex route status is incomplete");
+        }
+        if (Array.isArray(route.errors)) {
+          errors.push(...route.errors
+            .filter(value => typeof value === "string" && value.trim())
+            .map(value => value.trim()));
+        }
+      } catch (error) {
+        route = null;
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+
+      const installed = route?.installed === true;
+      const active = route?.active === true;
       return {
-        state: !route.installed
-          ? "not-configured"
-          : errors.length > 0
-            ? "inconsistent"
-            : route.active
+        state: errors.length > 0
+          ? "inconsistent"
+          : !installed
+            ? "not-configured"
+            : active
               ? "configured"
               : "disconnected",
-        installed: route.installed,
-        active: route.active,
+        installed,
+        active,
         configPath,
         exists,
         content,
-        ...(typeof route.routeUrl === "string" && route.routeUrl ? { routeUrl: route.routeUrl } : {}),
+        ...(typeof route?.routeUrl === "string" && route.routeUrl ? { routeUrl: route.routeUrl } : {}),
         errors,
       };
     })();
@@ -589,6 +635,18 @@ class RuntimeHost {
     } finally {
       if (this.codexConfigSnapshotInFlight === snapshot) this.codexConfigSnapshotInFlight = null;
     }
+  }
+
+  async saveCodexConfig(content) {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    if (typeof content !== "string") throw new Error("Codex config content must be text");
+    if (Buffer.byteLength(content, "utf8") > MAX_CHECKPOINT_FILE_BYTES) {
+      throw new Error(`Codex config exceeds ${MAX_CHECKPOINT_FILE_BYTES} bytes`);
+    }
+    const configPath = path.join(this.codexHome, "config.toml");
+    captureRegularFile(configPath);
+    writePrivateFileAtomic(configPath, content);
+    return await this.codexConfigSnapshot();
   }
 
   async restoreBridgeRouteWithinOperation(operationName) {
@@ -616,45 +674,6 @@ class RuntimeHost {
     }
   }
 
-  async resetCodexConfig() {
-    const name = "codex-config-reset";
-    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    const previousRuntime = this.runtimeConfigSnapshot();
-    this.lifecycleOperation = name;
-    try {
-      if (previousRuntime.owner === "external") {
-        throw new Error("Reset Codex config is only available for a launcher-owned runtime");
-      }
-      await this.supervisor.stopForSetup();
-      const result = await this.run(name, ["route", "reset"], {
-        embedded: true,
-        message: "Resetting Codex configuration",
-        successMessage: "Codex configuration reset",
-        timeoutMs: 15_000,
-      });
-      return JSON.parse(result.stdout);
-    } catch (error) {
-      let recoveryError;
-      if (previousRuntime.owner === "launcher") {
-        try {
-          const runtime = await this.supervisor.startIfConfigured();
-          if (runtime.status !== "ready") {
-            throw new Error(`runtime recovery returned ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
-          }
-        } catch (caught) {
-          recoveryError = caught;
-        }
-      }
-      if (!recoveryError) throw error;
-      throw new Error(
-        `${error instanceof Error ? error.message : String(error)}; restoring the previous runtime also failed:`
-        + ` ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-      );
-    } finally {
-      this.lifecycleOperation = null;
-    }
-  }
-
   async setBridgeEnabled(enabled) {
     const desired = enabled === true;
     const name = desired ? "bridge-connect" : "bridge-disconnect";
@@ -664,56 +683,23 @@ class RuntimeHost {
       const current = await this.bridgeStatus(name);
       if (!current.installed) throw new Error("Install the Codex integration before changing the bridge route");
       if (desired) {
-        const runtime = await this.supervisor.startIfConfigured();
-        if (runtime.status !== "ready") {
-          throw new Error(`Local runtime is ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
-        }
         if (current.active) return current;
-        try {
-          const connected = await this.run(name, ["route", "connect"], {
-            embedded: true,
-            message: "Connecting Codex to the launcher",
-            successMessage: "Codex bridge connected",
-            timeoutMs: 15_000,
-          });
-          return parseBridgeRouteResult(connected.stdout, { expectedActive: true });
-        } catch (error) {
-          let cleanupError;
-          try { await this.supervisor.stopForSetup(); } catch (caught) { cleanupError = caught; }
-          if (!cleanupError) throw error;
-          throw new Error(
-            `${error instanceof Error ? error.message : String(error)}; stopping the unused runtime also failed:`
-            + ` ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          );
-        }
-      }
-
-      await this.supervisor.stopForSetup();
-      if (!current.active) return current;
-      try {
-        const disconnected = await this.run(name, ["route", "disconnect"], {
+        const connected = await this.run(name, ["route", "connect"], {
           embedded: true,
-          message: "Restoring the previous Codex route",
-          successMessage: "Codex bridge disconnected",
+          message: "Connecting Codex to the launcher",
+          successMessage: "Codex bridge connected",
           timeoutMs: 15_000,
         });
-        return parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
-      } catch (error) {
-        let recoveryError;
-        try {
-          const runtime = await this.supervisor.startIfConfigured();
-          if (runtime.status !== "ready") {
-            throw new Error(`runtime recovery returned ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
-          }
-        } catch (caught) {
-          recoveryError = caught;
-        }
-        if (!recoveryError) throw error;
-        throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; restoring the previous runtime also failed:`
-          + ` ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-        );
+        return parseBridgeRouteResult(connected.stdout, { expectedActive: true });
       }
+      if (!current.active) return current;
+      const disconnected = await this.run(name, ["route", "disconnect"], {
+        embedded: true,
+        message: "Restoring the previous Codex route",
+        successMessage: "Codex bridge disconnected",
+        timeoutMs: 15_000,
+      });
+      return parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
     } finally {
       this.lifecycleOperation = null;
     }
@@ -890,6 +876,10 @@ class RuntimeHost {
   async runSetup(name, args, options) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const previousRuntime = this.runtimeConfigSnapshot();
+    const previousLive = previousRuntime.owner === "launcher"
+      ? await this.supervisor.observeRuntime()
+      : null;
+    const wasRunning = previousLive?.lifecycle === "ready" && previousLive.owner === "current-launcher";
     const checkpoint = this.captureSetupCheckpoint(previousRuntime);
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
@@ -898,9 +888,13 @@ class RuntimeHost {
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
       const result = await this.run(name, args, options);
-      const runtime = await this.supervisor.startIfConfigured();
-      if (runtime.status !== "ready") {
-        throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
+      if (wasRunning) {
+        const runtime = await this.supervisor.startIfConfigured();
+        if (runtime.status !== "ready") {
+          throw new Error(`Setup completed, but the previously running runtime could not be restored: ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+        }
+      } else {
+        await this.supervisor.stopForSetup();
       }
       return result;
     } catch (error) {
@@ -936,6 +930,7 @@ class RuntimeHost {
       try {
         await this.restorePreviousRuntime(previousRuntime, name, {
           repairExternal: previousRuntime.owner === "external" && checkpointChanged,
+          wasRunning,
         });
       } catch (caught) {
         recoveryError = caught;

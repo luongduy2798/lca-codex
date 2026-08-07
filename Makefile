@@ -1,4 +1,6 @@
-.PHONY: check-bun install setup setup-browser dev start app launcher serve doctor package smoke
+.DEFAULT_GOAL := dev
+
+.PHONY: check-bun install dev app test typecheck verify package smoke help
 
 BUN ?= bun
 BUN_VERSION ?= 1.3.14
@@ -23,31 +25,34 @@ install: check-bun
 	$(BUN) install
 	$(BUN) install --cwd launcher
 
-setup:
-	$(BUN) run setup --full
-
-setup-browser:
-	$(BUN) run setup --browser-only
-
-dev:
-	$(BUN) run launcher:dev
-
-start: app
-
-app:
+dev: check-bun
 	$(BUN) run app
 
-launcher:
-	$(BUN) run launcher
+app: dev
 
-serve:
-	$(BUN) run start
+test: check-bun
+	$(BUN) run test
+	$(BUN) run launcher:test
 
-doctor:
-	$(BUN) run doctor
+typecheck: check-bun
+	$(BUN) run typecheck
+	$(BUN) run launcher:typecheck
 
-package:
+verify: check-bun
+	$(BUN) run verify
+
+package: check-bun
 	$(BUN) run app:package
 
-smoke:
+smoke: check-bun
 	$(BUN) run app:smoke
+
+help:
+	@printf '%s\n' \
+		'make dev       Run the Electron app in development mode' \
+		'make install   Install root and launcher dependencies' \
+		'make test      Run core and launcher tests' \
+		'make typecheck Run core and launcher typechecks' \
+		'make verify    Run the full repository verification' \
+		'make package   Build the packaged Electron app' \
+		'make smoke     Smoke-test the packaged Electron app'

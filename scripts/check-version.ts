@@ -20,10 +20,7 @@ if (packageJson.devDependencies?.["@types/bun"] !== bunVersion) {
 if (packageJson.engines?.bun !== bunVersion) throw new Error(`engines.bun is not synchronized to ${bunVersion}`);
 const expected = [
   ["src/version.ts", `export const VERSION = ${JSON.stringify(packageVersion)};`],
-  ["scripts/install.sh", `VERSION=\"\${LCA_TOKEN_VERSION:-${packageVersion}}\"`],
   ["README.md", `requires Bun ${bunVersion}.`],
-  ["README.zh-CN.md", `Bun ${bunVersion}`],
-  ["scripts/install.sh", `Bun-${bunVersion}.md`],
   ["scripts/generate-third-party-notices.ts", `Bun ${bunVersion}`],
   [".github/workflows/ci.yml", `bun-version: ${bunVersion}`],
   [".github/workflows/release.yml", `Bun-${bunVersion}.md`],

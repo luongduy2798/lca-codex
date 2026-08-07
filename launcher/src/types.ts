@@ -1,12 +1,9 @@
-export type Language = "en" | "zh-CN";
-export type Surface = "browser" | "setup" | "codex" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "codex" | "mcp" | "runtime" | "activity" | "settings";
 
 export interface LauncherState {
   version: 1;
-  language: Language | null;
-  onboardingComplete: boolean;
-  githubOpened: boolean;
   autoStart: boolean;
+  runtimeAutoStart: boolean;
   bridgeEnabled: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
@@ -76,6 +73,30 @@ export interface OperationState {
   message: string;
 }
 
+export interface RuntimeStatus {
+  configured: boolean;
+  lifecycle: "stopped" | "starting" | "ready" | "stopping" | "degraded" | "error" | "stale" | "foreign";
+  owner: "current-launcher" | "stale-launcher" | "compatible-runtime" | "foreign" | "none";
+  mode: "browser-only" | "full" | null;
+  detail: string | null;
+  daemon: {
+    pid: number | null;
+    healthy: boolean;
+    acceptingTurns: boolean | null;
+  };
+  tunnel: {
+    pid: number | null;
+    state: string | null;
+    ready: boolean;
+  } | null;
+  port: {
+    host: string;
+    port: number | null;
+    occupied: boolean;
+    identity: "lca-token" | "foreign" | "none";
+  };
+}
+
 export interface CodexConfigSnapshot {
   state: "configured" | "disconnected" | "inconsistent" | "not-configured";
   installed: boolean;
@@ -94,11 +115,11 @@ export type UpdateState =
 
 export interface LauncherSnapshot {
   state: LauncherState;
+  runtime: RuntimeStatus;
   browser: BrowserState | null;
   mcpCredentialsConfigured: boolean;
   logs: LogRecord[];
   urls: {
-    github: string;
     connectors: string;
     tunnels: string;
     keys: string;
@@ -113,9 +134,10 @@ export interface LauncherSnapshot {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
-  setLanguage(language: Language): Promise<LauncherState>;
-  openSocial(target: "github"): Promise<LauncherState>;
-  completeOnboarding(language: Language): Promise<LauncherState>;
+  runtimeStatus(): Promise<RuntimeStatus>;
+  startRuntime(): Promise<RuntimeStatus>;
+  stopRuntime(): Promise<RuntimeStatus>;
+  restartRuntime(): Promise<RuntimeStatus>;
   openExternal(url: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
@@ -131,7 +153,7 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   codexConfig(): Promise<CodexConfigSnapshot>;
-  resetCodexConfig(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
+  saveCodexConfig(content: string): Promise<{ config: CodexConfigSnapshot; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   setBridgeEnabled(enabled: boolean): Promise<LauncherState>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
@@ -144,7 +166,7 @@ export interface LauncherApi {
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
-  setPreference(key: "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
+  setPreference(key: "runtimeAutoStart" | "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
@@ -153,6 +175,7 @@ export interface LauncherApi {
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
+  onRuntimeState(listener: (state: RuntimeStatus) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;

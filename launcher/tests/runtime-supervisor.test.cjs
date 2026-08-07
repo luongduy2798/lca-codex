@@ -9,7 +9,6 @@ const { spawn } = require("node:child_process");
 const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
 const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
 const {
-  MAX_RESTARTS_PER_WINDOW,
   TUNNEL_HEALTH_POLL_INTERVAL_MS,
   TUNNEL_MONITOR_FAILURE_THRESHOLD,
   TUNNEL_MONITOR_INTERVAL_MS,
@@ -894,28 +893,99 @@ test("launcher shutdown reacquires a managed tunnel that was between monitor and
   }
 });
 
-test("crash-loop diagnostics include the last redacted child failure", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-crash-loop-diagnostic-"));
-  const operations = [];
+test("runtime observation reports a foreign port without claiming launcher ownership", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-foreign-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: root,
     coreHome: root,
-    browserDescriptorPath: path.join(root, "launcher.json"),
-    publishOperation: operation => operations.push(operation),
+    browserDescriptorPath: descriptorPath,
   });
-  supervisor.restartHistory.tunnel = Array.from(
-    { length: MAX_RESTARTS_PER_WINDOW },
-    () => Date.now(),
-  );
-  supervisor.lastChildFailure.tunnel = "tunnel exited (1): invalid profile for [tunnel-id]";
+  supervisor.readConfig = () => config;
+  supervisor.readState = () => null;
+  supervisor.proxyHealthPayload = async () => null;
+  supervisor.portOccupied = async () => true;
   try {
-    supervisor.scheduleRecovery("tunnel");
-    const failure = operations.at(-1);
-    assert.equal(failure.status, "failed");
-    assert.match(failure.message, /automatic restart is disabled/);
-    assert.match(failure.message, /last failure: tunnel exited \(1\): invalid profile for \[tunnel-id\]/);
+    const status = await supervisor.observeRuntime();
+    assert.equal(status.lifecycle, "foreign");
+    assert.equal(status.owner, "foreign");
+    assert.equal(status.port.occupied, true);
+    assert.equal(status.port.identity, "foreign");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual start cleans a stale runtime before starting a fresh owned runtime", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const calls = [];
+  const observations = [
+    { configured: true, lifecycle: "stale", owner: "stale-launcher" },
+    { configured: true, lifecycle: "stopped", owner: "none" },
+    { configured: true, lifecycle: "ready", owner: "current-launcher" },
+  ];
+  supervisor.observeRuntime = async () => observations.shift();
+  supervisor.stopRuntime = async () => { calls.push("stop"); };
+  supervisor.startIfConfigured = async () => { calls.push("start"); return { status: "ready" }; };
+
+  const status = await supervisor.startRuntime();
+  assert.deepEqual(calls, ["stop", "start"]);
+  assert.equal(status.lifecycle, "ready");
+  assert.equal(status.owner, "current-launcher");
+});
+
+test("manual restart is a full stop followed by a fresh start", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const calls = [];
+  supervisor.stopRuntime = async () => { calls.push("stop"); return { lifecycle: "stopped" }; };
+  supervisor.startRuntime = async () => { calls.push("start"); return { lifecycle: "ready" }; };
+
+  assert.deepEqual(await supervisor.restart(), { lifecycle: "ready" });
+  assert.deepEqual(calls, ["stop", "start"]);
+});
+
+test("manual stop never kills an unverified stale PID", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-unverified-stop-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const warnings = [];
+  let forced = 0;
+  let cleared = 0;
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn(event, detail) { warnings.push([event, detail]); }, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.readConfig = () => config;
+  supervisor.readState = () => ({ daemonPid: process.pid, tunnelPid: null });
+  supervisor.proxyHealthPayload = async () => null;
+  supervisor.daemonPidMatchesRuntimeCommand = () => false;
+  supervisor.forceStopVerifiedPid = async () => { forced += 1; };
+  supervisor.clearState = () => { cleared += 1; };
+  supervisor.observeRuntime = async () => ({ configured: true, lifecycle: "stopped", owner: "none" });
+  try {
+    const status = await supervisor.performUserStop();
+    assert.equal(status.lifecycle, "stopped");
+    assert.equal(forced, 0);
+    assert.equal(cleared, 1);
+    assert.equal(warnings.some(([event]) => event === "runtime.stale_daemon_marker_discarded"), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

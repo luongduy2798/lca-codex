@@ -6,12 +6,10 @@ const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
 
 const DEFAULT_STATE = Object.freeze({
   version: 1,
-  language: null,
-  onboardingComplete: false,
-  githubOpened: false,
-  autoStart: true,
+  autoStart: false,
+  runtimeAutoStart: false,
   bridgeEnabled: true,
-  keepRunningOnClose: true,
+  keepRunningOnClose: false,
   showBrowserDuringTurns: true,
   browserSmokePassed: false,
   browserSmokeVersion: null,
@@ -31,14 +29,20 @@ function readState(filePath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
+    const legacyRuntimeLifecycle = !Object.prototype.hasOwnProperty.call(parsed, "runtimeAutoStart");
     const state = { ...DEFAULT_STATE, ...parsed };
-    if (state.language !== null && state.language !== "en" && state.language !== "zh-CN") {
-      state.language = DEFAULT_STATE.language;
+    delete state.language;
+    delete state.onboardingComplete;
+    delete state.githubOpened;
+    if (legacyRuntimeLifecycle) {
+      // Older releases defaulted to a background-service UX. Migrate once to the new
+      // manual-first lifecycle so closing an upgraded launcher does not silently keep it alive.
+      state.runtimeAutoStart = false;
+      state.keepRunningOnClose = false;
     }
     for (const key of [
-      "onboardingComplete",
-      "githubOpened",
       "autoStart",
+      "runtimeAutoStart",
       "bridgeEnabled",
       "keepRunningOnClose",
       "showBrowserDuringTurns",

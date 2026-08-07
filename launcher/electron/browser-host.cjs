@@ -38,6 +38,9 @@ const COMPOSER_SELECTOR = [
   '[contenteditable="true"][role="textbox"]',
   "textarea",
 ].join(", ");
+const PRO_CAPABILITY_CONTROL_TIMEOUT_MS = 5_000;
+const PRO_CAPABILITY_MENU_TIMEOUT_MS = 4_000;
+const PRO_CAPABILITY_RESET_TIMEOUT_MS = 2_000;
 const EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
   '[data-testid="composer-intelligence-picker-content"]:has([role="slider"])',
@@ -606,6 +609,15 @@ class BrowserHost {
     if (!tab) throw new Error("Browser tab does not exist");
     this.removeTurnTab(tab, true);
     this.logger.info("browser.tab_closed", { tabId, traceId: tab.traceId, status: tab.status });
+    return this.snapshot();
+  }
+
+  abortAllTurns() {
+    const tabs = [...this.turnTabs.values()];
+    for (const tab of tabs) this.removeTurnTab(tab, true);
+    if (tabs.length > 0) {
+      this.logger.warn("browser.turns_aborted_for_runtime_stop", { count: tabs.length });
+    }
     return this.snapshot();
   }
 
@@ -1511,15 +1523,36 @@ class BrowserHost {
     }
     let proAvailable;
     if (detectPro) {
-      const control = await this.waitForEffortControl(30_000, 200);
-      let menu = await this.readEffortMenu(0);
-      if (!menu.target) {
-        menu = menu.open || control.expanded === "true"
-          ? await this.waitForEffortMenu(0, 70_000, 200)
-          : await this.openEffortMenu(0, 70_000, 200, control);
+      try {
+        const control = await this.waitForEffortControl(PRO_CAPABILITY_CONTROL_TIMEOUT_MS, 100);
+        let menu = await this.readEffortMenu(0);
+        if (!menu.target) {
+          if (!menu.open && control.expanded === "true") {
+            // aria-expanded can remain stale after ChatGPT re-renders the popover. Reset
+            // the semantic control once before reopening instead of waiting on a menu
+            // that no longer exists in the DOM.
+            this.pressBrowserKey("Escape");
+            await sleep(100);
+            const resetControl = await this.waitForEffortControl(PRO_CAPABILITY_RESET_TIMEOUT_MS, 100);
+            menu = await this.openEffortMenu(0, PRO_CAPABILITY_MENU_TIMEOUT_MS, 100, resetControl);
+          } else {
+            menu = menu.open
+              ? await this.waitForEffortMenu(0, PRO_CAPABILITY_MENU_TIMEOUT_MS, 100)
+              : await this.openEffortMenu(0, PRO_CAPABILITY_MENU_TIMEOUT_MS, 100, control);
+          }
+        }
+        proAvailable = menu.count >= 5;
+      } catch (error) {
+        // Pro capability is optional metadata. An authenticated Temporary Chat session
+        // remains valid even if ChatGPT temporarily changes or fails to hydrate the
+        // effort picker. Fail closed to non-Pro instead of failing the entire setup.
+        proAvailable = false;
+        this.logger?.warn?.("browser.pro_capability_probe_unavailable", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        this.pressBrowserKey("Escape");
       }
-      proAvailable = menu.count >= 5;
-      this.pressBrowserKey("Escape");
     }
     if (startedIdle) await this.returnToIdle();
     return { authenticated: true, temporary: true, url, ...(detectPro ? { proAvailable } : {}) };

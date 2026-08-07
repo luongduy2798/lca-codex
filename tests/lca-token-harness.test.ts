@@ -622,17 +622,22 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.text).not.toContain("Use the attached lca-token plugin");
     expect(() => compileLcaTokenPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("complete accumulated task context");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("running in ChatGPT mode");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("configure MCP in the Lca Token launcher");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("web search remain available");
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).not.toContain("tools/MCP");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).not.toContain("local tool results");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("does not contain local tool results yet");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Codex has not supplied workspace contents");
     request.context.messages = [{
       role: "user",
       content: `${SUMMARY_PREFIX}\n\nWorkspace files and tests were inspected before compaction.`,
       timestamp: 4,
     }];
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("compaction summary");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
+    const configuredReadOnlyWarning = chatGptReadOnlyContextWarning(proRequest(), toolCapabilities);
+    expect(configuredReadOnlyWarning).toContain("Codex mode is configured");
+    expect(configuredReadOnlyWarning).not.toContain("configure MCP in the Lca Token launcher");
     expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
     expect(() => compileLcaTokenPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
   });
@@ -1241,7 +1246,7 @@ describe("ChatGPT outer-native harness v3", () => {
       );
       expect(commentary).toEqual([
         expect.objectContaining({
-          text: expect.stringContaining("cannot access the local Codex computer"),
+          text: expect.stringContaining("running in ChatGPT mode"),
           phase: "commentary",
         }),
         {
@@ -1264,9 +1269,9 @@ describe("ChatGPT outer-native harness v3", () => {
         output: Array<{ type: string; phase?: string; content?: Array<{ text?: string }> }>;
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
-      expect(warning?.content?.[0]?.text).toContain("cannot access the local Codex computer");
+      expect(warning?.content?.[0]?.text).toContain("running in ChatGPT mode");
       expect(warning?.content?.[0]?.text).toContain("web search remain available");
-      expect(warning?.content?.[0]?.text).not.toContain("tools/MCP");
+      expect(warning?.content?.[0]?.text).toContain("configure MCP in the Lca Token launcher");
       expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
       expect(response.output.filter(item => item.type === "reasoning")).toHaveLength(2);
 
@@ -1303,6 +1308,7 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
         "codex_bind_turn",
+        "codex_context",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
@@ -1387,7 +1393,9 @@ describe("ChatGPT outer-native harness v3", () => {
       expect(binding.binding_status).toBe("active");
       expect(binding.valid_until).toBe("outer_turn_end");
       expect(binding.expires_at).toBeNull();
-      expect(binding.next_action).toContain("Never put turn_token in binding_id");
+      expect(binding.next_action).toContain("Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool");
+      expect(binding.next_action).toContain("Call codex_context selectively");
+      expect(binding.next_action).not.toContain("turn_token");
 
       const confused = await call("codex_exec", { binding_id: token, cmd: "pwd" });
       expect(confused.isError).toBe(true);

@@ -85,6 +85,44 @@ test("trusted Enter is dispatched through the owned Electron WebContents target"
   assert.equal(detached(), true);
 });
 
+test("trusted ArrowRight is dispatched without text through the owned Electron WebContents target", async () => {
+  const { client, commands, detached } = createDebugger();
+  await dispatchTrustedKey({
+    debuggerClient: client,
+    key: "ArrowRight",
+  });
+  assert.deepEqual(commands, [
+    {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyDown",
+        key: "ArrowRight",
+        code: "ArrowRight",
+        windowsVirtualKeyCode: 39,
+        nativeVirtualKeyCode: 39,
+      },
+    },
+    {
+      method: "Input.dispatchKeyEvent",
+      params: {
+        type: "keyUp",
+        key: "ArrowRight",
+        code: "ArrowRight",
+        windowsVirtualKeyCode: 39,
+        nativeVirtualKeyCode: 39,
+      },
+    },
+  ]);
+  assert.equal(detached(), true);
+});
+
+test("unsupported trusted keys still fail closed", async () => {
+  await assert.rejects(
+    dispatchTrustedKey({ debuggerClient: createDebugger().client, key: "Tab" }),
+    /Unsupported CDP key: Tab/,
+  );
+});
+
 test("trusted pointer activation is dispatched at the resolved DOM point", async () => {
   const { client, commands, detached } = createDebugger();
   await dispatchTrustedClick({

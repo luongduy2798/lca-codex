@@ -8,17 +8,17 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { copyFor, type Copy } from "./i18n";
+import { copy, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
   BrowserState,
   CodexConfigSnapshot,
   DoctorReport,
-  Language,
   LauncherSnapshot,
   LauncherState,
   LogRecord,
   OperationState,
+  RuntimeStatus,
   Surface,
 } from "./types";
 
@@ -59,6 +59,9 @@ export function App() {
           }
         : current);
     });
+    const unsubscribeRuntime = api.onRuntimeState((runtime) => {
+      setSnapshot((current) => current ? { ...current, runtime } : current);
+    });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
@@ -71,6 +74,7 @@ export function App() {
     return () => {
       cancelled = true;
       unsubscribeState();
+      unsubscribeRuntime();
       unsubscribeBrowser();
       unsubscribeOperation();
       unsubscribeLog();
@@ -92,35 +96,17 @@ export function App() {
   if (!api) return <FatalMessage message="Launcher IPC is unavailable." />;
   if (!snapshot) return <LaunchLoading />;
 
-  const language = snapshot.state.language ?? "en";
-  const copy = copyFor(language);
-
   return (
-    <div className="app-root" data-language={language} data-platform={snapshot.platform} data-theme="dark">
-      <AnimatePresence mode="wait">
-        {!snapshot.state.onboardingComplete ? (
-          <Onboarding
-            copy={copy}
-            key="onboarding"
-            language={language}
-            setError={setError}
-            snapshot={snapshot}
-            updateState={updateState}
-          />
-        ) : (
-          <LauncherShell
-            browser={browser}
-            copy={copy}
-            key="launcher"
-            language={language}
-            logs={logs}
-            operation={operation}
-            setError={setError}
-            snapshot={snapshot}
-            updateState={updateState}
-          />
-        )}
-      </AnimatePresence>
+    <div className="app-root" data-platform={snapshot.platform} data-theme="dark">
+      <LauncherShell
+        browser={browser}
+        copy={copy}
+        logs={logs}
+        operation={operation}
+        setError={setError}
+        snapshot={snapshot}
+        updateState={updateState}
+      />
       <AnimatePresence>
         {error ? <ErrorToast copy={copy} message={error} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
@@ -128,149 +114,9 @@ export function App() {
   );
 }
 
-function Onboarding({
-  copy,
-  language,
-  setError,
-  snapshot,
-  updateState,
-}: {
-  copy: Copy;
-  language: Language;
-  setError: (error: string | null) => void;
-  snapshot: LauncherSnapshot;
-  updateState: (state: LauncherState) => void;
-}) {
-  const [stage, setStage] = useState<"language" | "support">(snapshot.state.language ? "support" : "language");
-  const [selectedLanguage, setSelectedLanguage] = useState<Language>(language);
-  const [busy, setBusy] = useState(false);
-  const localized = copyFor(selectedLanguage);
-  const isLanguage = stage === "language";
-
-  const chooseLanguage = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.setLanguage(selectedLanguage));
-      setStage("support");
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const openSocial = async (target: "github") => {
-    setBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.openSocial(target));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const finish = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.completeOnboarding(selectedLanguage));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <motion.main
-      animate={{ opacity: 1 }}
-      className="welcome"
-      exit={{ opacity: 0 }}
-      initial={{ opacity: 0 }}
-      transition={{ duration: 0.22 }}
-    >
-      <header className="welcome-top draggable">
-        <div className="welcome-brand no-drag">
-          <BrandMark small />
-          <span>{localized.product}</span>
-        </div>
-        <span className="welcome-version no-drag">v{snapshot.version}</span>
-      </header>
-
-      <AnimatePresence mode="wait">
-        <motion.section
-          animate={{ opacity: 1, y: 0 }}
-          className="welcome-stage"
-          exit={{ opacity: 0, y: -8 }}
-          initial={{ opacity: 0, y: 8 }}
-          key={stage}
-          transition={PANEL_TRANSITION}
-        >
-          <span className="welcome-kicker">{isLanguage ? "01" : "02"}</span>
-          <h1>{isLanguage ? localized.chooseLanguage : localized.supportTitle}</h1>
-          <p>{isLanguage ? localized.chooseLanguageHint : localized.supportBody}</p>
-
-          {isLanguage ? (
-            <div className="welcome-options" role="radiogroup" aria-label={localized.chooseLanguage}>
-              <WelcomeOption
-                active={selectedLanguage === "en"}
-                detail="English"
-                label="English"
-                marker="EN"
-                onClick={() => setSelectedLanguage("en")}
-              />
-              <WelcomeOption
-                active={selectedLanguage === "zh-CN"}
-                detail="简体中文"
-                label="简体中文"
-                marker="简"
-                onClick={() => setSelectedLanguage("zh-CN")}
-              />
-            </div>
-          ) : (
-            <div className="welcome-options">
-              <WelcomeAction
-                complete={snapshot.state.githubOpened}
-                disabled={busy}
-                icon="github"
-                label={snapshot.state.githubOpened ? localized.starred : localized.star}
-                onClick={() => openSocial("github")}
-              />
-            </div>
-          )}
-        </motion.section>
-      </AnimatePresence>
-
-      <footer className="welcome-footer">
-        <div>
-          {!isLanguage ? (
-            <button className="text-button" onClick={() => setStage("language")} type="button">
-              {localized.previous}
-            </button>
-          ) : null}
-        </div>
-        <div className="welcome-progress" aria-label={`${isLanguage ? 1 : 2} / 2`}>
-          <span className={!isLanguage ? "is-complete" : "is-active"} />
-          <span className={!isLanguage ? "is-active" : ""} />
-        </div>
-        <PrimaryButton
-          disabled={busy || (!isLanguage && !snapshot.state.githubOpened)}
-          onClick={isLanguage ? chooseLanguage : finish}
-        >
-          {isLanguage ? localized.continue : localized.finishWelcome}
-        </PrimaryButton>
-      </footer>
-    </motion.main>
-  );
-}
-
 function LauncherShell({
   browser,
   copy,
-  language,
   logs,
   operation,
   setError,
@@ -279,7 +125,6 @@ function LauncherShell({
 }: {
   browser: BrowserState | null;
   copy: Copy;
-  language: Language;
   logs: LogRecord[];
   operation: OperationState | null;
   setError: (error: string | null) => void;
@@ -301,6 +146,21 @@ function LauncherShell({
   const needsSetup = !needsBrowser
     && (snapshot.state.coreSetupComplete !== true || snapshot.state.codexCatalogVerified !== true);
   const mcpOptional = snapshot.state.codexCatalogVerified === true && snapshot.state.mcpSetupComplete !== true;
+  const runtimeModeLabel = snapshot.runtime.mode === "full"
+    ? copy.codexMode
+    : snapshot.runtime.mode === "browser-only"
+      ? copy.chatgptMode
+      : copy.modeNotConfigured;
+  const runtimeModeSummary = snapshot.runtime.mode === "full"
+    ? copy.codexModeSummary
+    : snapshot.runtime.mode === "browser-only"
+      ? copy.chatgptModeSummary
+      : copy.modeNotConfiguredSummary;
+  const runtimeModeDescription = snapshot.runtime.mode === "full"
+    ? copy.codexModeBody
+    : snapshot.runtime.mode === "browser-only"
+      ? copy.chatgptModeBody
+      : copy.modeNotConfiguredBody;
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
@@ -436,6 +296,9 @@ function LauncherShell({
     >
       <TitleBar
         copy={copy}
+        onOpenRuntime={() => navigateSurface("runtime")}
+        runtime={snapshot.runtime}
+        setError={setError}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
       />
@@ -462,14 +325,19 @@ function LauncherShell({
                 <BrandMark small />
                 <strong>{copy.product}</strong>
               </div>
-              <div className="sidebar-brand-actions">
-                <IconButton
-                  icon="github"
-                  label="GitHub"
-                  onClick={() => void api!.openExternal(snapshot.urls.github).catch((cause) => setError(messageOf(cause)))}
-                />
-              </div>
             </div>
+
+            <button
+              className={`sidebar-mode-card${snapshot.runtime.mode === "full" ? " is-codex" : ""}`}
+              onClick={() => navigateSurface("mcp")}
+              title={runtimeModeDescription}
+              type="button"
+            >
+              <span>{copy.runtimeMode}</span>
+              <strong>{runtimeModeLabel}</strong>
+              <small>{runtimeModeSummary}</small>
+              <Icon name="chevron" />
+            </button>
 
             <nav className="sidebar-nav" aria-label={copy.workspace}>
               <SidebarGroup label={copy.workspace}>
@@ -509,6 +377,17 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem
+                  active={surface === "runtime"}
+                  badge={snapshot.runtime.lifecycle === "ready"
+                    ? <ActionDot tone="success" />
+                    : snapshot.runtime.lifecycle === "stopped"
+                      ? null
+                      : <ActionDot tone="error" />}
+                  icon="activity"
+                  label={copy.runtimeService}
+                  onClick={() => navigateSurface("runtime")}
+                />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
               </SidebarGroup>
             </nav>
@@ -587,11 +466,18 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
+            {surface === "runtime" ? (
+              <RuntimeServiceSurface
+                copy={copy}
+                setError={setError}
+                snapshot={snapshot}
+                updateState={updateState}
+              />
+            ) : null}
             {surface === "activity" ? <ActivitySurface copy={copy} logs={logs} setError={setError} /> : null}
             {surface === "settings" ? (
               <SettingsSurface
                 copy={copy}
-                language={language}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -617,10 +503,16 @@ function LauncherShell({
 
 function TitleBar({
   copy,
+  onOpenRuntime,
+  runtime,
+  setError,
   sidebarOpen,
   toggleSidebar,
 }: {
   copy: Copy;
+  onOpenRuntime: () => void;
+  runtime: RuntimeStatus;
+  setError: (error: string | null) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
 }) {
@@ -633,7 +525,93 @@ function TitleBar({
           onClick={toggleSidebar}
         />
       </div>
+      <div className="titlebar-runtime no-drag">
+        <button className={`runtime-status-chip is-${runtime.lifecycle}`} onClick={onOpenRuntime} type="button">
+          <StateDot state={runtimeDotState(runtime)} />
+          <span>{copy.runtime}</span>
+          <strong>{runtimeLifecycleLabel(copy, runtime)}</strong>
+        </button>
+        <RuntimeActionButtons compact copy={copy} runtime={runtime} setError={setError} />
+      </div>
     </header>
+  );
+}
+
+function runtimeLifecycleLabel(copy: Copy, runtime: RuntimeStatus) {
+  if (!runtime.configured) return copy.runtimeNotConfigured;
+  const labels: Record<RuntimeStatus["lifecycle"], string> = {
+    stopped: copy.runtimeStopped,
+    starting: copy.runtimeStarting,
+    ready: copy.runtimeReady,
+    stopping: copy.runtimeStopping,
+    degraded: copy.runtimeDegraded,
+    error: copy.runtimeError,
+    stale: copy.runtimeStale,
+    foreign: copy.runtimeForeign,
+  };
+  return labels[runtime.lifecycle];
+}
+
+function runtimeDotState(runtime: RuntimeStatus): "idle" | "ready" | "busy" | "error" {
+  if (runtime.lifecycle === "ready") return "ready";
+  if (runtime.lifecycle === "starting" || runtime.lifecycle === "stopping") return "busy";
+  if (runtime.lifecycle === "stopped") return "idle";
+  return "error";
+}
+
+function RuntimeActionButtons({
+  compact = false,
+  copy,
+  runtime,
+  setError,
+}: {
+  compact?: boolean;
+  copy: Copy;
+  runtime: RuntimeStatus;
+  setError: (error: string | null) => void;
+}) {
+  const [activeAction, setActiveAction] = useState<"start" | "stop" | "restart" | null>(null);
+  const busy = activeAction !== null;
+  const run = async (action: "start" | "stop" | "restart") => {
+    if (busy) return;
+    setActiveAction(action);
+    setError(null);
+    try {
+      if (action === "start") await api!.startRuntime();
+      else if (action === "stop") await api!.stopRuntime();
+      else await api!.restartRuntime();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const unavailable = !runtime.configured || runtime.lifecycle === "foreign";
+  const stopping = runtime.lifecycle === "stopping";
+  const showStart = runtime.lifecycle === "stopped" || runtime.lifecycle === "stale";
+  const showRestart = ["ready", "degraded", "error"].includes(runtime.lifecycle);
+  const showStop = !["stopped", "foreign"].includes(runtime.lifecycle);
+  return (
+    <div className={`runtime-actions${compact ? " is-compact" : ""}`}>
+      {showStart ? (
+        <button className="runtime-inline-button is-primary" disabled={busy || unavailable || stopping} onClick={() => void run("start")} type="button">
+          {activeAction === "start" ? <ButtonSpinner /> : null}
+          {activeAction === "start" ? copy.startingRuntime : copy.startRuntime}
+        </button>
+      ) : null}
+      {showRestart ? (
+        <button className="runtime-inline-button" disabled={busy || unavailable || stopping} onClick={() => void run("restart")} type="button">
+          {activeAction === "restart" ? <ButtonSpinner /> : null}
+          {activeAction === "restart" ? copy.restartingRuntime : copy.restartRuntime}
+        </button>
+      ) : null}
+      {showStop ? (
+        <button className="runtime-inline-button" disabled={busy || stopping || runtime.lifecycle === "foreign"} onClick={() => void run("stop")} type="button">
+          {activeAction === "stop" ? <ButtonSpinner /> : null}
+          {activeAction === "stop" ? copy.stoppingRuntime : copy.stopRuntime}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -818,35 +796,35 @@ function SetupSurface({
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
-  const [localBusy, setLocalBusy] = useState(false);
-  const busy = localBusy
+  const [activeAction, setActiveAction] = useState<"login" | "smoke" | "install" | null>(null);
+  const busy = activeAction !== null
     || operation?.status === "running"
     || browser?.status === "loading"
     || browser?.status === "testing"
     || browser?.status === "running";
-  const run = async (action: () => Promise<void>) => {
+  const run = async (name: "login" | "smoke" | "install", action: () => Promise<void>) => {
     if (busy) return;
-    setLocalBusy(true);
+    setActiveAction(name);
     setError(null);
     try {
       await action();
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setLocalBusy(false);
+      setActiveAction(null);
     }
   };
 
-  const openLogin = () => run(async () => {
+  const openLogin = () => run("login", async () => {
     await activateBrowser();
     await api!.openLogin();
   });
-  const smoke = () => run(async () => {
+  const smoke = () => run("smoke", async () => {
     await activateBrowser();
     await api!.smokeTest();
     updateState((await api!.snapshot()).state);
   });
-  const install = () => run(async () => {
+  const install = () => run("install", async () => {
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
   });
@@ -867,15 +845,17 @@ function SetupSurface({
           description={copy.stepAccountBody}
           disabled={busy}
           index={1}
+          loading={activeAction === "login"}
           onAction={openLogin}
           title={copy.stepAccount}
         />
         <SetupRow
-          action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
+          action={snapshot.smokePassed ? copy.smokePassed : activeAction === "smoke" ? copy.runningSmoke : copy.runSmoke}
           complete={snapshot.smokePassed}
           description={copy.stepSmokeBody}
           disabled={busy || !browser?.authenticated}
           index={2}
+          loading={activeAction === "smoke"}
           onAction={smoke}
           title={copy.stepSmoke}
         />
@@ -884,13 +864,14 @@ function SetupSurface({
             ? copy.installed
             : snapshot.state.coreSetupComplete
               ? copy.awaitingCodex
-              : copy.install}
+              : activeAction === "install" ? copy.installingModels : copy.install}
           complete={snapshot.state.codexCatalogVerified === true}
           description={copy.stepInstallBody}
           disabled={busy
             || !snapshot.smokePassed
             || (snapshot.state.coreSetupComplete === true && snapshot.state.codexCatalogVerified !== true)}
           index={3}
+          loading={activeAction === "install"}
           onAction={install}
           title={copy.stepInstall}
         />
@@ -930,9 +911,14 @@ function CodexConfigSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [config, setConfig] = useState<CodexConfigSnapshot | null>(null);
+  const [manualContent, setManualContent] = useState("");
+  const [manualDirty, setManualDirty] = useState(false);
   const [mode, setMode] = useState<"automatic" | "manual">("automatic");
-  const [localBusy, setLocalBusy] = useState(false);
-  const busy = localBusy || operation?.status === "running";
+  const [activeAction, setActiveAction] = useState<"install" | "restore" | "refresh" | "save" | "start-runtime" | null>(null);
+  const busy = activeAction !== null || operation?.status === "running";
+  const runtimeReady = snapshot.runtime.lifecycle === "ready";
+  const runtimeCanStart = snapshot.runtime.configured
+    && ["stopped", "stale"].includes(snapshot.runtime.lifecycle);
 
   const refresh = useCallback(async () => {
     const next = await api!.codexConfig();
@@ -940,45 +926,95 @@ function CodexConfigSurface({
     return next;
   }, []);
 
+  const reloadManual = useCallback(async () => {
+    const next = await api!.codexConfig();
+    setConfig(next);
+    setManualContent(next.content);
+    setManualDirty(false);
+    return next;
+  }, []);
+
   useEffect(() => {
     if (operation?.status === "running") return;
     let cancelled = false;
     void api!.codexConfig().then((next) => {
-      if (!cancelled) setConfig(next);
+      if (!cancelled) {
+        setConfig(next);
+        setManualContent(next.content);
+        setManualDirty(false);
+      }
     }).catch((cause) => {
       if (!cancelled) setError(messageOf(cause));
     });
     return () => { cancelled = true; };
   }, [operation?.status, setError]);
 
-  const run = async (action: () => Promise<void>) => {
+  const run = async (name: "install" | "restore", action: () => Promise<void>) => {
     if (busy) return;
-    setLocalBusy(true);
+    const beforeConfig = config;
+    const beforeManualContent = manualContent;
+    const beforeManualDirty = manualDirty;
+    setActiveAction(name);
     setError(null);
     try {
       await action();
       updateState((await api!.snapshot()).state);
       await refresh();
     } catch (cause) {
+      setConfig(beforeConfig);
+      setManualContent(beforeManualContent);
+      setManualDirty(beforeManualDirty);
       setError(messageOf(cause));
     } finally {
-      setLocalBusy(false);
+      setActiveAction(null);
     }
   };
 
-  const installOrRepair = () => run(async () => { await api!.setupCore(); });
-  const toggleRoute = () => run(async () => {
-    const current = config ?? await refresh();
-    updateState(await api!.setBridgeEnabled(!current.active));
-  });
-  const remove = () => run(async () => {
+  const installModels = () => run("install", async () => { await api!.setupCore(); });
+  const refreshFromToolbar = async () => {
+    if (busy) return;
+    setActiveAction("refresh");
+    setError(null);
+    try {
+      await reloadManual();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const restoreNative = () => run("restore", async () => {
     const result = await api!.uninstallIntegration();
     if (!result.cancelled) updateState(result.state);
   });
-  const resetConfig = () => run(async () => {
-    const result = await api!.resetCodexConfig();
-    if (!result.cancelled) updateState(result.state);
-  });
+  const startRuntimeFromGuide = async () => {
+    if (busy || !runtimeCanStart) return;
+    setActiveAction("start-runtime");
+    setError(null);
+    try {
+      await api!.startRuntime();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const saveManual = async () => {
+    if (busy || !manualDirty) return;
+    setActiveAction("save");
+    setError(null);
+    try {
+      const result = await api!.saveCodexConfig(manualContent);
+      setConfig(result.config);
+      updateState(result.state);
+      setManualDirty(false);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const modelsInstalled = config?.installed === true;
   const statusLabel = config?.state === "configured"
     ? copy.codexConfigured
     : config?.state === "disconnected"
@@ -989,12 +1025,18 @@ function CodexConfigSurface({
 
   return (
     <ContentSurface narrow subtitle={copy.codexConfigSubtitle} title={copy.codexConfigTitle}>
-      <div className="config-mode-tabs" role="tablist" aria-label={copy.codexConfig}>
-        <button className={mode === "automatic" ? "is-active" : ""} onClick={() => setMode("automatic")} role="tab" type="button">
-          {copy.automatic}
-        </button>
-        <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")} role="tab" type="button">
-          {copy.manual}
+      <div className="config-mode-toolbar">
+        <div className="config-mode-tabs" role="tablist" aria-label={copy.codexConfig}>
+          <button className={mode === "automatic" ? "is-active" : ""} onClick={() => setMode("automatic")} role="tab" type="button">
+            {copy.automatic}
+          </button>
+          <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")} role="tab" type="button">
+            {copy.manual}
+          </button>
+        </div>
+        <button className="text-button config-refresh-button" disabled={busy} onClick={() => void refreshFromToolbar()} type="button">
+          {activeAction === "refresh" ? <ButtonSpinner /> : null}
+          {activeAction === "refresh" ? copy.refreshing : copy.refresh}
         </button>
       </div>
 
@@ -1014,18 +1056,57 @@ function CodexConfigSurface({
           {config?.errors.length ? (
             <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow>
           ) : null}
-          {snapshot.state.codexRestartRequired ? <NoticeRow icon="alert" tone="warning">{copy.restartCodex}</NoticeRow> : null}
+          {config?.state === "configured" && snapshot.state.codexRestartRequired ? (
+            <div className="codex-next-steps">
+              <header>
+                <strong>{copy.codexNextSteps}</strong>
+                <span>{copy.codexNextStepsBody}</span>
+              </header>
+              <div className={`codex-next-step${runtimeReady ? " is-complete" : ""}`}>
+                <span className="codex-step-index">{runtimeReady ? <Icon name="check" /> : "1"}</span>
+                <div>
+                  <strong>{runtimeReady ? copy.lcaServiceReady : copy.startLcaService}</strong>
+                  <p>{runtimeReady ? copy.lcaServiceReadyBody : copy.startLcaServiceBody}</p>
+                </div>
+                {!runtimeReady && runtimeCanStart ? (
+                  <SecondaryButton
+                    disabled={busy}
+                    loading={activeAction === "start-runtime"}
+                    onClick={() => void startRuntimeFromGuide()}
+                  >
+                    {activeAction === "start-runtime" ? copy.startingRuntime : copy.startLcaServiceAction}
+                  </SecondaryButton>
+                ) : null}
+              </div>
+              <div className={`codex-next-step${runtimeReady ? "" : " is-pending"}`}>
+                <span className="codex-step-index">2</span>
+                <div>
+                  <strong>{copy.restartCodexStep}</strong>
+                  <p>{copy.restartCodexStepBody}</p>
+                  <div className="codex-restart-options">
+                    <div>
+                      <b>{copy.codexCli}</b>
+                      <span>{copy.codexCliRestart}</span>
+                    </div>
+                    <div>
+                      <b>{copy.vscode}</b>
+                      <span>{copy.vscodeRestart}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <p className="config-explainer">{copy.codexAutomaticBody}</p>
           <div className="inline-actions config-actions">
-            <SecondaryButton disabled={busy} onClick={() => void installOrRepair()}>{config?.installed ? copy.repair : copy.install}</SecondaryButton>
-            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void toggleRoute()}>
-              {config?.active ? copy.disconnect : copy.connect}
+            <SecondaryButton disabled={busy} loading={activeAction === "install"} onClick={() => void installModels()}>
+              {activeAction === "install"
+                ? modelsInstalled ? copy.reinstallingModels : copy.installingModels
+                : modelsInstalled ? copy.reinstallModels : copy.install}
             </SecondaryButton>
-            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void remove()}>{copy.restorePreviousRoute}</SecondaryButton>
-            <SecondaryButton disabled={busy || !config?.installed} onClick={() => void resetConfig()}>{copy.resetConfig}</SecondaryButton>
-            <button className="text-button" disabled={busy} onClick={() => void refresh().catch((cause) => setError(messageOf(cause)))} type="button">
-              {copy.refresh}
-            </button>
+            <SecondaryButton disabled={busy || !config?.installed} loading={activeAction === "restore"} onClick={() => void restoreNative()}>
+              {activeAction === "restore" ? copy.restoringNative : copy.restorePreviousRoute}
+            </SecondaryButton>
           </div>
         </div>
       ) : (
@@ -1033,9 +1114,24 @@ function CodexConfigSurface({
           <p className="config-explainer">{copy.codexManualBody}</p>
           <div className="config-file-header">
             <span>{config?.configPath ?? "~/.codex/config.toml"}</span>
-            <button className="text-button" disabled={busy} onClick={() => void refresh().catch((cause) => setError(messageOf(cause)))} type="button">{copy.refresh}</button>
+            <div className="inline-actions">
+              {manualDirty ? <span className="config-dirty-label">{copy.unsavedChanges}</span> : null}
+              <SecondaryButton disabled={busy || !manualDirty} loading={activeAction === "save"} onClick={() => void saveManual()}>
+                {activeAction === "save" ? copy.saving : copy.save}
+              </SecondaryButton>
+            </div>
           </div>
-          <pre className="config-file-content">{config?.exists ? config.content : copy.emptyConfig}</pre>
+          {!config?.exists && !manualContent ? <p className="config-empty-hint">{copy.emptyConfig}</p> : null}
+          <textarea
+            className="config-file-content config-file-editor"
+            disabled={busy}
+            onChange={(event) => {
+              setManualContent(event.target.value);
+              setManualDirty(true);
+            }}
+            spellCheck={false}
+            value={manualContent}
+          />
         </div>
       )}
     </ContentSurface>
@@ -1063,8 +1159,8 @@ function McpSurface({
   const [connectorName, setConnectorName] = useState(snapshot.state.connectorName);
   const [credentialsConfigured, setCredentialsConfigured] = useState(snapshot.mcpCredentialsConfigured);
   const [replacingCredentials, setReplacingCredentials] = useState(false);
-  const [localBusy, setLocalBusy] = useState(false);
-  const busy = localBusy || operation?.status === "running";
+  const [activeAction, setActiveAction] = useState<"connect" | "verify" | null>(null);
+  const busy = activeAction !== null || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const steps = useMemo(() => [
     { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
@@ -1095,7 +1191,7 @@ function McpSurface({
   };
   const install = async () => {
     if (busy) return;
-    setLocalBusy(true);
+    setActiveAction("connect");
     setError(null);
     try {
       await api!.setupMcp({
@@ -1113,12 +1209,12 @@ function McpSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setLocalBusy(false);
+      setActiveAction(null);
     }
   };
   const verify = async () => {
     if (busy) return;
-    setLocalBusy(true);
+    setActiveAction("verify");
     setError(null);
     setDoctor(null);
     try {
@@ -1127,7 +1223,7 @@ function McpSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setLocalBusy(false);
+      setActiveAction(null);
     }
   };
 
@@ -1300,25 +1396,97 @@ function McpSurface({
               || connectorName.trim().length > 80
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
+            loading={activeAction === "connect"}
             onClick={() => void install()}
           >
-            {busy ? copy.running : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
+            {activeAction === "connect" ? copy.connectingHarness : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
           </PrimaryButton>
         ) : null}
         {step === 2 ? (
           <PrimaryButton
             disabled={busy}
+            loading={activeAction === "verify"}
             onClick={() => void (doctor?.ok ? onDone() : verify())}
           >
-            {busy
+            {activeAction === "verify"
               ? operation?.name === "mcp-verification" && operation.status === "running"
                 ? operation.message
-                : copy.running
+                : copy.verifyingRuntime
               : doctor?.ok ? copy.done : copy.verifyRuntime}
           </PrimaryButton>
         ) : null}
       </div>
     </ContentSurface>
+  );
+}
+
+function RuntimeServiceSurface({
+  copy,
+  setError,
+  snapshot,
+  updateState,
+}: {
+  copy: Copy;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+  updateState: (state: LauncherState) => void;
+}) {
+  const runtime = snapshot.runtime;
+  const endpoint = runtime.port.port ? `${runtime.port.host}:${runtime.port.port}` : "—";
+  return (
+    <ContentSurface
+      narrow
+      subtitle={copy.runtimeServiceSubtitle}
+      title={copy.runtimeServiceTitle}
+    >
+      <div className={`runtime-service-hero is-${runtime.lifecycle}`}>
+        <div className="runtime-service-status">
+          <StateDot state={runtimeDotState(runtime)} />
+          <div>
+            <strong>{runtimeLifecycleLabel(copy, runtime)}</strong>
+            <small>{runtime.detail || copy.runtimeStatusHealthy}</small>
+          </div>
+        </div>
+        <RuntimeActionButtons copy={copy} runtime={runtime} setError={setError} />
+      </div>
+
+      <SectionHeading label={copy.runtimeDetails} spaced />
+      <div className="runtime-detail-list">
+        <RuntimeDetail label={copy.runtimeMode} value={runtime.mode === "full" ? copy.codexMode : runtime.mode === "browser-only" ? copy.chatgptMode : copy.modeNotConfigured} />
+        <RuntimeDetail label={copy.runtimeEndpoint} value={endpoint} />
+        <RuntimeDetail label={copy.runtimeResponses} value={runtime.daemon.pid ? `PID ${runtime.daemon.pid} · ${runtime.daemon.healthy ? copy.healthy : copy.needsAttention}` : copy.runtimeStopped} />
+        {runtime.mode === "full" ? (
+          <RuntimeDetail
+            label={copy.runtimeTunnel}
+            value={runtime.tunnel?.pid
+              ? `PID ${runtime.tunnel.pid} · ${runtime.tunnel.ready ? copy.runtimeReady : runtime.tunnel.state || copy.needsAttention}`
+              : copy.runtimeStopped}
+          />
+        ) : null}
+        <RuntimeDetail label={copy.runtimeOwner} value={runtime.owner} />
+      </div>
+
+      <SectionHeading label={copy.runtimeBehavior} spaced />
+      <div className="settings-list">
+        <SettingRow body={copy.startRuntimeAutomaticallyBody} label={copy.startRuntimeAutomatically}>
+          <Switch
+            checked={snapshot.state.runtimeAutoStart}
+            onChange={(checked) => void api!.setPreference("runtimeAutoStart", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+      </div>
+    </ContentSurface>
+  );
+}
+
+function RuntimeDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="runtime-detail-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -1366,41 +1534,33 @@ function ActivitySurface({
 
 function SettingsSurface({
   copy,
-  language,
   setError,
   snapshot,
   updateState,
 }: {
   copy: Copy;
-  language: Language;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "bridge" | "uninstall" | null>(null);
+  const busy = activeAction !== null;
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
 
-  const updateLanguage = async (next: Language) => {
-    try {
-      updateState(await api!.setLanguage(next));
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
   const runDoctor = async () => {
-    setBusy(true);
+    setActiveAction("doctor");
     try {
       setDoctor(await api!.doctor());
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setActiveAction(null);
     }
   };
   const cancelTurns = async () => {
-    setBusy(true);
+    setActiveAction("cancel");
     setError(null);
     try {
       await api!.cancelTurns();
@@ -1408,22 +1568,22 @@ function SettingsSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setActiveAction(null);
     }
   };
   const setBridgeEnabled = async (enabled: boolean) => {
-    setBusy(true);
+    setActiveAction("bridge");
     setError(null);
     try {
       updateState(await api!.setBridgeEnabled(enabled));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setActiveAction(null);
     }
   };
   const uninstallIntegration = async () => {
-    setBusy(true);
+    setActiveAction("uninstall");
     setError(null);
     try {
       const result = await api!.uninstallIntegration();
@@ -1434,7 +1594,7 @@ function SettingsSurface({
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      setActiveAction(null);
     }
   };
 
@@ -1447,6 +1607,14 @@ function SettingsSurface({
             checked={snapshot.state.autoStart}
             onChange={(checked) => void api!.setAutostart(checked)
               .then((result) => updateState(result.state))
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow body={copy.startRuntimeAutomaticallyBody} label={copy.startRuntimeAutomatically}>
+          <Switch
+            checked={snapshot.state.runtimeAutoStart}
+            onChange={(checked) => void api!.setPreference("runtimeAutoStart", checked)
+              .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
@@ -1473,9 +1641,6 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
-        <SettingRow body={copy.chooseLanguageHint} label={copy.language}>
-          <LanguageMenu language={language} onChange={(next) => void updateLanguage(next)} />
-        </SettingRow>
       </div>
 
       <SectionHeading label={copy.diagnostics} spaced />
@@ -1485,7 +1650,7 @@ function SettingsSurface({
           <strong>{copy.runDoctor}</strong>
           <small>{doctor ? (doctor.ok ? copy.healthy : copy.needsAttention) : copy.status}</small>
         </span>
-        <Icon name="chevron" />
+        {activeAction === "doctor" ? <ButtonSpinner /> : <Icon name="chevron" />}
       </button>
       <button className="diagnostic-row" disabled={busy} onClick={() => void cancelTurns()} type="button">
         <Icon name="close" />
@@ -1493,7 +1658,7 @@ function SettingsSurface({
           <strong>{copy.cancelTurns}</strong>
           <small>{turnsCancelled ? copy.turnsCancelled : copy.cancelTurnsBody}</small>
         </span>
-        <Icon name="chevron" />
+        {activeAction === "cancel" ? <ButtonSpinner /> : <Icon name="chevron" />}
       </button>
       <button className="diagnostic-row" disabled={busy} onClick={() => void uninstallIntegration()} type="button">
         <Icon name="close" />
@@ -1501,7 +1666,7 @@ function SettingsSurface({
           <strong>{copy.uninstallIntegration}</strong>
           <small>{integrationRemoved ? copy.integrationRemoved : copy.uninstallIntegrationBody}</small>
         </span>
-        <Icon name="chevron" />
+        {activeAction === "uninstall" ? <ButtonSpinner /> : <Icon name="chevron" />}
       </button>
       {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
 
@@ -1551,6 +1716,7 @@ function SetupRow({
   description,
   disabled,
   index,
+  loading = false,
   onAction,
   title,
 }: {
@@ -1559,6 +1725,7 @@ function SetupRow({
   description: string;
   disabled: boolean;
   index: number;
+  loading?: boolean;
   onAction: () => void;
   title: string;
 }) {
@@ -1569,7 +1736,7 @@ function SetupRow({
         <strong>{title}</strong>
         <p>{description}</p>
       </div>
-      <SecondaryButton disabled={disabled || complete} onClick={onAction}>
+      <SecondaryButton disabled={disabled || complete} loading={loading} onClick={onAction}>
         {action}
       </SecondaryButton>
     </div>
@@ -1645,74 +1812,25 @@ function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
   );
 }
 
-function WelcomeOption({
-  active,
-  detail,
-  label,
-  marker,
-  onClick,
-}: {
-  active: boolean;
-  detail: string;
-  label: string;
-  marker: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      aria-checked={active}
-      className={`welcome-option${active ? " is-active" : ""}`}
-      onClick={onClick}
-      role="radio"
-      type="button"
-    >
-      <span>{marker}</span>
-      <strong>{label}</strong>
-      <small>{detail}</small>
-      {active ? <Icon name="check" /> : null}
-    </button>
-  );
-}
-
-function WelcomeAction({
-  complete,
-  disabled,
-  icon,
-  label,
-  onClick,
-}: {
-  complete: boolean;
-  disabled?: boolean;
-  icon: "github" | "x";
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`welcome-option is-social${complete ? " is-complete" : ""}`}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      <span><Icon name={icon} /></span>
-      <strong>{label}</strong>
-      <Icon name={complete ? "check" : "external"} />
-    </button>
-  );
+function ButtonSpinner() {
+  return <i aria-hidden="true" className="button-spinner" />;
 }
 
 function PrimaryButton({
   children,
   disabled = false,
+  loading = false,
   onClick,
 }: {
   children: ReactNode;
   disabled?: boolean;
+  loading?: boolean;
   onClick: () => void;
 }) {
   return (
     <button className="button-primary" disabled={disabled} onClick={onClick} type="button">
-      {children}
+      {loading ? <ButtonSpinner /> : null}
+      <span>{children}</span>
     </button>
   );
 }
@@ -1721,16 +1839,18 @@ function SecondaryButton({
   children,
   disabled = false,
   icon,
+  loading = false,
   onClick,
 }: {
   children: ReactNode;
   disabled?: boolean;
   icon?: IconName;
+  loading?: boolean;
   onClick: () => void;
 }) {
   return (
     <button className="button-secondary" disabled={disabled} onClick={onClick} type="button">
-      {icon ? <Icon name={icon} /> : null}
+      {loading ? <ButtonSpinner /> : icon ? <Icon name={icon} /> : null}
       <span>{children}</span>
     </button>
   );
@@ -1781,63 +1901,6 @@ function Switch({
     >
       <span />
     </button>
-  );
-}
-
-function LanguageMenu({ language, onChange }: { language: Language; onChange: (language: Language) => void }) {
-  const [open, setOpen] = useState(false);
-  const options: Array<{ label: string; value: Language }> = [
-    { label: "English", value: "en" },
-    { label: "简体中文", value: "zh-CN" },
-  ];
-  const selected = options.find((option) => option.value === language) ?? options[0];
-
-  return (
-    <div
-      className={`language-menu${open ? " is-open" : ""}`}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") setOpen(false);
-      }}
-    >
-      <button
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        className="language-menu-trigger"
-        onClick={() => setOpen((current) => !current)}
-        type="button"
-      >
-        <span>{selected.label}</span>
-        <Icon name="chevron" />
-      </button>
-      {open ? (
-        <>
-          <button
-            aria-label="Close language menu"
-            className="language-menu-scrim"
-            onClick={() => setOpen(false)}
-            type="button"
-          />
-          <div aria-label="Language" className="language-menu-panel" role="listbox">
-            {options.map((option) => (
-              <button
-                aria-selected={option.value === language}
-                className={option.value === language ? "is-selected" : ""}
-                key={option.value}
-                onClick={() => {
-                  setOpen(false);
-                  if (option.value !== language) onChange(option.value);
-                }}
-                role="option"
-                type="button"
-              >
-                <span>{option.label}</span>
-                {option.value === language ? <Icon name="check" /> : null}
-              </button>
-            ))}
-          </div>
-        </>
-      ) : null}
-    </div>
   );
 }
 
