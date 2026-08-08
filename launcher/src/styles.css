@@ -2284,8 +2284,14 @@ code {
     width: calc(100% - 48px);
   }
 
+  .wizard-stepper button {
+    gap: 6px;
+    padding-inline: 7px;
+  }
+
   .wizard-stepper em {
-    display: none;
+    display: block;
+    font-size: 10px;
   }
 }
 

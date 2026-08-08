@@ -72,6 +72,8 @@ test("launcher keeps browser chrome flush and MCP instructions below the video",
   );
   assert.match(styles, /\.guide-media img\s*\{[^}]*object-fit:\s*contain/s);
   assert.doesNotMatch(styles, /\.wizard-stepper\s*\{[^}]*border-(?:top|bottom)/s);
+  assert.match(styles, /@media \(max-width: 900px\)[\s\S]*?\.wizard-stepper button\s*\{[^}]*gap:\s*6px[^}]*padding-inline:\s*7px/s);
+  assert.doesNotMatch(styles, /@media \(max-width: 900px\)[\s\S]*?\.wizard-stepper em\s*\{[^}]*display:\s*none/s);
   assert.match(appSource, /M22\.2819 9\.8211/);
   assert.match(appSource, /sidebar-brand-identity/);
 });

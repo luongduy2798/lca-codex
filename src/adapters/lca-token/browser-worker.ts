@@ -1026,11 +1026,10 @@ export class ChatGptBrowserWorker {
     const keywords = await selected.evaluateAll(elements => (
       elements.map(element => element.getAttribute("data-keyword"))
     ));
-    const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
-    if (exactMatches > 1) {
-      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
-    }
-    return exactMatches === 1;
+    // Wide ChatGPT layouts can render more than one visible DOM representation of the same
+    // selected connector. Treat identical data-keyword values as one logical selection instead
+    // of failing on duplicate nodes; the exact keyword remains the source of truth.
+    return new Set(keywords.filter(keyword => keyword === this.config.appName)).size === 1;
   }
 
   private async connectorMenuRowsNearComposer(
@@ -1104,19 +1103,33 @@ export class ChatGptBrowserWorker {
       if (triggerAttempts > 1) await page.keyboard.press("Escape").catch(() => {});
       await composer.fill("");
       await composer.focus();
-      // Insert the complete mention query atomically, then use the same exact-row locator strategy
-      // as the original fast implementation. The expensive geometric scanner is fallback-only.
-      await composer.fill(`@${this.config.appName}`);
+      // ChatGPT's narrow responsive composer only opens connector autocomplete from a real `@`
+      // key event. Filling the complete `@name` string can leave the text visible while never
+      // mounting the popover. Trigger the mention semantically, then type only as much of the
+      // configured name as needed for the exact connector row to appear.
+      await page.keyboard.type("@");
       if (!firstMenuCaptured) {
         firstMenuCaptured = true;
         await captureDiagnostic?.("connector-mention-triggered");
       }
+      let keyedReady = await exactResult.first().waitFor({ state: "visible", timeout: 350 })
+        .then(() => true)
+        .catch(() => false);
+      if (!keyedReady) {
+        for (const character of this.config.appName) {
+          await page.keyboard.type(character);
+          keyedReady = await exactResult.first().waitFor({ state: "visible", timeout: 125 })
+            .then(() => true)
+            .catch(() => false);
+          if (keyedReady) break;
+        }
+      }
       await captureDiagnostic?.("connector-mention-filtered");
 
-      // Normal path: the full configured name should narrow a large plugin catalog to one row almost
-      // immediately. Avoid boundingBox/innerText scans unless this exact locator misses hydration.
+      // Normal path: stop as soon as the exact configured connector row is visible. Avoid
+      // boundingBox/innerText scans unless the semantic exact-row locator misses hydration.
       const fastTimeout = Math.min(1_200, Math.max(1, menuDeadline - Date.now()));
-      const fastReady = await exactResult.waitFor({ state: "visible", timeout: fastTimeout })
+      const fastReady = keyedReady || await exactResult.waitFor({ state: "visible", timeout: fastTimeout })
         .then(() => true)
         .catch(() => false);
       if (fastReady) {
@@ -1175,7 +1188,7 @@ export class ChatGptBrowserWorker {
     // detached/hidden editor even though verification just succeeded.
     const selectedComposer = await this.activeComposer(page);
     const selectedConnector = this.selectedConnectorControl(selectedComposer);
-    await selectedConnector.waitFor({ state: "visible", timeout: 10_000 });
+    await selectedConnector.first().waitFor({ state: "visible", timeout: 10_000 });
     if (!await this.connectorIsSelected(selectedComposer)) {
       throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
     }

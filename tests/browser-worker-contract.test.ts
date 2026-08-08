@@ -121,7 +121,10 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 test("connector verification and real tool turns share one Playwright selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
-  expect(workerSource).toContain('await composer.fill(`@${this.config.appName}`)');
+  expect(workerSource).toContain('await page.keyboard.type("@");');
+  expect(workerSource).toContain("for (const character of this.config.appName)");
+  expect(workerSource).toContain("await page.keyboard.type(character);");
+  expect(workerSource).not.toContain('composer.fill(`@${this.config.appName}`)');
   expect(workerSource).toContain('const exactResult = menuRows');
   expect(workerSource).toContain('const menuRows = page.locator(CHATGPT_CONNECTOR_MENU_ROW_SELECTOR)');
   expect(workerSource).toContain('[data-testid="composer-intelligence-picker-content"] button');
@@ -191,10 +194,28 @@ test("large read-only context is inserted in bounded edits before exact verifica
   expect(asserted).toBe(prompt);
 });
 
+test("duplicate DOM representations of one selected connector are treated as one logical selection", async () => {
+  const selected = {
+    evaluateAll: async (callback: (elements: Array<{ getAttribute(name: string): string | null }>) => unknown) => callback([
+      { getAttribute: (name: string) => name === "data-keyword" ? "lca-token" : null },
+      { getAttribute: (name: string) => name === "data-keyword" ? "lca-token" : null },
+    ]),
+  };
+  const connectorIsSelected = (ChatGptBrowserWorker.prototype as unknown as {
+    connectorIsSelected(composer: unknown): Promise<boolean>;
+  }).connectorIsSelected;
+
+  expect(await connectorIsSelected.call({
+    config: { appName: "lca-token" },
+    selectedConnectorControl: () => selected,
+  }, {})).toBeTrue();
+});
+
 test("connector selection re-resolves the active composer after ChatGPT replaces it", async () => {
   const calls: Array<[string, string?]> = [];
   let connectorSelected = false;
   const appResult = {
+    first() { return this; },
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
     dispatchEvent: async (event: string) => {
@@ -204,6 +225,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     },
   };
   const selectedConnector = {
+    first() { return this; },
     waitFor: async () => {
       expect(connectorSelected).toBeTrue();
       calls.push(["waitForSelectedConnector"]);
@@ -247,7 +269,10 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       }
       throw new Error(`Unexpected locator: ${selector}`);
     },
-    keyboard: { press: async (value: string) => { calls.push(["pagePress", value]); } },
+    keyboard: {
+      press: async (value: string) => { calls.push(["pagePress", value]); },
+      type: async (value: string) => { calls.push(["type", value]); },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -269,10 +294,79 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   expect(calls).toEqual([
     ["fill", ""],
     ["focus"],
-    ["fill", "@lca-token"],
+    ["type", "@"],
     ["waitForResult"],
     ["dispatchResult", "click"],
     ["waitForSelectedConnector"],
+  ]);
+});
+
+test("narrow composer connector selection uses a real mention key and stops at the first exact row", async () => {
+  const calls: string[] = [];
+  let query = "";
+  let selected = false;
+  const timeout = new Error("not filtered yet");
+  timeout.name = "TimeoutError";
+  const appResult = {
+    first() { return this; },
+    waitFor: async () => {
+      calls.push(`menu:${query}`);
+      if (query !== "@l") throw timeout;
+    },
+    count: async () => 1,
+    dispatchEvent: async (event: string) => {
+      expect(event).toBe("click");
+      selected = true;
+      calls.push("activate");
+    },
+  };
+  const selectedConnector = {
+    first() { return this; },
+    waitFor: async () => { calls.push("selected"); },
+  };
+  const initialComposer = {
+    fill: async (value: string) => {
+      expect(value).toBe("");
+      query = "";
+      calls.push("clear");
+    },
+    focus: async () => { calls.push("focus"); },
+  };
+  const selectedComposer = { id: "selected" };
+  const page = {
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("__menu-item")
+      ? { filter: () => ({ filter: () => appResult }) }
+      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: {
+      press: async (value: string) => { calls.push(`press:${value}`); },
+      type: async (value: string) => {
+        query += value;
+        calls.push(`type:${value}`);
+      },
+    },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  const result = await selectConnector.call({
+    config: { appName: "lca-token" },
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
+    activeComposer: async () => selected ? selectedComposer : initialComposer,
+  }, page);
+
+  expect(result).toBe(selectedComposer);
+  expect(calls).toEqual([
+    "clear",
+    "focus",
+    "type:@",
+    "menu:@",
+    "type:l",
+    "menu:@l",
+    "activate",
+    "selected",
   ]);
 });
 
@@ -283,6 +377,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   const timeout = new Error("menu not hydrated");
   timeout.name = "TimeoutError";
   const selectedConnector = {
+    first() { return this; },
     waitFor: async () => {
       expect(selected).toBeTrue();
       calls.push("selected");
@@ -290,10 +385,11 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     count: async () => 1,
   };
   const appResult = {
+    first() { return this; },
     waitFor: async () => {
       menuAttempt += 1;
       calls.push(`menu:${menuAttempt}`);
-      if (menuAttempt === 1) throw timeout;
+      if (menuAttempt < 12) throw timeout;
     },
     count: async () => 1,
     dispatchEvent: async () => {
@@ -313,7 +409,10 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => ({ filter: () => appResult }) }
       : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
-    keyboard: { press: async () => { calls.push("escape"); } },
+    keyboard: {
+      press: async () => { calls.push("escape"); },
+      type: async (value: string) => { calls.push(`type:${value}`); },
+    },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -331,9 +430,12 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   }, page);
 
   expect(calls).toEqual([
-    "clear", "focus", "fill:@lca-token", "menu:1",
+    "clear", "focus", "type:@", "menu:1",
+    "type:l", "menu:2", "type:c", "menu:3", "type:a", "menu:4", "type:-", "menu:5",
+    "type:t", "menu:6", "type:o", "menu:7", "type:k", "menu:8", "type:e", "menu:9",
+    "type:n", "menu:10", "menu:11",
     "escape", "clear",
-    "escape", "clear", "focus", "fill:@lca-token", "menu:2",
+    "escape", "clear", "focus", "type:@", "menu:12",
     "activate", "selected",
   ]);
 });
@@ -342,6 +444,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const calls: Array<[string, string?]> = [];
   let selected = false;
   const selectedConnector = {
+    first() { return this; },
     waitFor: async () => {
       expect(selected).toBeTrue();
       calls.push(["selectedConnector"]);
@@ -349,6 +452,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     count: async () => 1,
   };
   const appResult = {
+    first() { return this; },
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
     dispatchEvent: async () => {
@@ -372,6 +476,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
       press: async (value: string) => { calls.push(["press", value]); },
+      type: async (value: string) => { calls.push(["type", value]); },
     },
   };
   const attachPrompt = (ChatGptBrowserWorker.prototype as unknown as {
@@ -401,7 +506,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   expect(calls).toEqual([
     ["fill", ""],
     ["focus"],
-    ["fill", "@lca-token"],
+    ["type", "@"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
