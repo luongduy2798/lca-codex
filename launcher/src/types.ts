@@ -7,6 +7,7 @@ export interface LauncherState {
   bridgeEnabled: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
+  hideCodexUsageUpsell: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
@@ -109,6 +110,16 @@ export interface CodexConfigSnapshot {
   errors: string[];
 }
 
+export interface CodexUsageUpsellStatus {
+  state: "not-found" | "unsupported" | "available" | "applied" | "error";
+  version: string | null;
+  extensionPath: string | null;
+  bundlePath: string | null;
+  backupAvailable: boolean;
+  reloadRequired: boolean;
+  message: string | null;
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
@@ -131,6 +142,7 @@ export interface LauncherSnapshot {
   smokePassed: boolean;
   operation: OperationState | null;
   update: UpdateState;
+  codexUsageUpsell: CodexUsageUpsellStatus;
 }
 
 export interface LauncherApi {
@@ -168,6 +180,7 @@ export interface LauncherApi {
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setPreference(key: "runtimeAutoStart" | "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
+  setCodexUsageUpsellHidden(enabled: boolean): Promise<{ state: LauncherState; status: CodexUsageUpsellStatus }>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
@@ -181,6 +194,7 @@ export interface LauncherApi {
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
+  onCodexUsageUpsellState(listener: (state: CodexUsageUpsellStatus) => void): () => void;
 }
 
 declare global {

@@ -691,11 +691,14 @@ export class ChatGptBrowserWorker {
     stage: string,
     timeoutMs: number,
     action: (abortSignal: AbortSignal) => Promise<T>,
+    turnAbortSignal?: AbortSignal,
   ): Promise<T> {
+    if (turnAbortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
     const startedAt = performance.now();
     console.info(`[lca-token] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let turnAbortListener: (() => void) | undefined;
     try {
       const timeout = new Promise<never>((_, rejectTimeout) => {
         timer = setTimeout(() => {
@@ -703,7 +706,21 @@ export class ChatGptBrowserWorker {
           controller.abort();
         }, timeoutMs);
       });
-      const value = await Promise.race([action(controller.signal), timeout]);
+      const turnAbort = turnAbortSignal
+        ? new Promise<never>((_, rejectAbort) => {
+            turnAbortListener = () => {
+              rejectAbort(new DOMException("Lca Token turn aborted", "AbortError"));
+              controller.abort();
+            };
+            turnAbortSignal.addEventListener("abort", turnAbortListener, { once: true });
+            if (turnAbortSignal.aborted) turnAbortListener();
+          })
+        : undefined;
+      const value = await Promise.race([
+        action(controller.signal),
+        timeout,
+        ...(turnAbort ? [turnAbort] : []),
+      ]);
       console.info(`[lca-token] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
@@ -711,6 +728,7 @@ export class ChatGptBrowserWorker {
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
+      if (turnAbortSignal && turnAbortListener) turnAbortSignal.removeEventListener("abort", turnAbortListener);
     }
   }
 
@@ -1546,7 +1564,7 @@ export class ChatGptBrowserWorker {
         }
         turnConnection = connection.browser;
         return connection.page;
-      });
+      }, turn.abortSignal);
       if (!launcherSurfaceId) managedPage = page;
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
@@ -1555,12 +1573,12 @@ export class ChatGptBrowserWorker {
       );
       await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
-      ));
+      ), turn.abortSignal);
       await diagnostics.capture(page, "temporary-chat-navigation-complete");
       try {
         await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
           this.activeComposer(page)
-        ));
+        ), turn.abortSignal);
       } catch {
         throw new Error("Lca Token login is expired or the Temporary Chat surface is unavailable");
       }
@@ -1569,7 +1587,7 @@ export class ChatGptBrowserWorker {
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
-      });
+      }, turn.abortSignal);
       await diagnostics.capture(page, "session-verified");
       const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
         this.selectModelAndEffort(
@@ -1579,15 +1597,15 @@ export class ChatGptBrowserWorker {
           turn.capabilities,
           checkpoint => diagnostics.capture(page, checkpoint),
         )
-      ));
+      ), turn.abortSignal);
       await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
         this.attachPrompt(page, prepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
-      ));
+      ), turn.abortSignal);
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
         this.attachFiles(page, prepared)
-      ));
+      ), turn.abortSignal);
       await diagnostics.capture(page, "file-attachment-complete");
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
       const initialResponseTurnCount = await responseTurns.count();
@@ -1616,7 +1634,7 @@ export class ChatGptBrowserWorker {
           stageSignal,
         );
         console.info(`[lca-token] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
-      });
+      }, turn.abortSignal);
       await diagnostics.capture(page, "send-accepted");
 
       let lastHeartbeat = 0;

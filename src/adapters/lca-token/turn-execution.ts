@@ -125,6 +125,12 @@ export type ChatGptTurnRuntime =
   | (ChatGptTurnRuntimeBase & { mode: "tools"; token: Promise<string> })
   | (ChatGptTurnRuntimeBase & { mode: "read-only" });
 
+export interface ChatGptTurnSessionScope {
+  threadId?: string;
+  turnId?: string;
+  purpose: "response" | "compaction";
+}
+
 function executionKey(parsed: CodexParsedRequest, payload: unknown): string {
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,
@@ -184,7 +190,10 @@ export class ChatGptTurnSession {
   private settledBrowserOutcome?: ChatGptBrowserOutcome;
   private tail: Promise<void> = Promise.resolve();
 
-  constructor(readonly runtime: ChatGptTurnRuntime) {
+  constructor(
+    readonly runtime: ChatGptTurnRuntime,
+    readonly scope?: ChatGptTurnSessionScope,
+  ) {
     this.browserOutcome = runtime.browser
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
@@ -284,7 +293,11 @@ export class ChatGptTurnSessions {
     private readonly maxEntries = 256,
   ) {}
 
-  getOrCreate(key: string, start: () => ChatGptTurnRuntime): ChatGptTurnSession {
+  getOrCreate(
+    key: string,
+    start: () => ChatGptTurnRuntime,
+    scope?: ChatGptTurnSessionScope,
+  ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
     if (existing) {
@@ -298,9 +311,25 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`Lca Token session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start());
+    const session = new ChatGptTurnSession(start(), scope);
     this.entries.set(key, session);
     return session;
+  }
+
+  async retireSupersededThreadTurns(threadId: string, turnId: string, keepKey?: string): Promise<number> {
+    const keys = [...this.entries]
+      .filter(([key, session]) => (
+        key !== keepKey
+        && session.isActive()
+        && session.scope?.purpose === "response"
+        && session.scope.threadId === threadId
+        && session.scope.turnId !== undefined
+        && session.scope.turnId !== turnId
+      ))
+      .map(([key]) => key);
+    if (keys.length === 0) return 0;
+    await Promise.all(keys.map(key => this.retireAndWait(key)));
+    return keys.length;
   }
 
   async waitForRetirement(key: string): Promise<void> {

@@ -433,6 +433,45 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(second.outstanding()).toEqual([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
   });
 
+  test("retires an active previous turn when a new turn starts on the same Codex thread", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let oldReject!: (error: Error) => void;
+    let otherReject!: (error: Error) => void;
+    let oldCancellations = 0;
+    let otherCancellations = 0;
+    const old = sessions.getOrCreate("old", () => ({
+      mode: "read-only",
+      browser: new Promise<string>((_resolve, reject) => { oldReject = reject; }),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {
+        oldCancellations += 1;
+        oldReject(new DOMException("old turn cancelled", "AbortError"));
+      },
+    }), { threadId: "thread-a", turnId: "turn-old", purpose: "response" });
+    const sameTurnRetry = sessions.getOrCreate("old", () => {
+      throw new Error("same execution key must reuse its session");
+    }, { threadId: "thread-a", turnId: "turn-old", purpose: "response" });
+    const otherThread = sessions.getOrCreate("other", () => ({
+      mode: "read-only",
+      browser: new Promise<string>((_resolve, reject) => { otherReject = reject; }),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {
+        otherCancellations += 1;
+        otherReject(new DOMException("other turn cancelled", "AbortError"));
+      },
+    }), { threadId: "thread-b", turnId: "turn-other", purpose: "response" });
+
+    expect(sameTurnRetry).toBe(old);
+    expect(await sessions.retireSupersededThreadTurns("thread-a", "turn-new", "new")).toBe(1);
+    expect(oldCancellations).toBe(1);
+    expect(otherCancellations).toBe(0);
+    expect((await old.browserOutcome).type).toBe("error");
+    expect(otherThread.isActive()).toBe(true);
+    sessions.clear();
+  });
+
   test("retires a failed session so the next native retry starts a new browser turn", async () => {
     const sessions = new ChatGptTurnSessions();
     let starts = 0;
@@ -741,6 +780,42 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(response.usage.total_tokens).toBe(usage.totalTokens!);
   });
 
+  test("turn cancellation interrupts an in-flight browser stage instead of waiting for its timeout", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "lca-token",
+      baseUrl: "browser://chatgpt",
+      lcaToken: { localToolsEnabled: false, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+      runStage<T>(
+        traceId: string,
+        stage: string,
+        timeoutMs: number,
+        action: (signal: AbortSignal) => Promise<T>,
+        turnAbortSignal?: AbortSignal,
+      ): Promise<T>;
+    };
+    const turnAbort = new AbortController();
+    let stageAborted = false;
+    const pending = worker.runStage(
+      "trace_abort_stage",
+      "test_stage",
+      60_000,
+      stageSignal => new Promise<string>((_resolve, reject) => {
+        stageSignal.addEventListener("abort", () => {
+          stageAborted = true;
+          reject(new DOMException("stage aborted", "AbortError"));
+        }, { once: true });
+      }),
+      turnAbort.signal,
+    );
+
+    turnAbort.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(stageAborted).toBe(true);
+  });
+
   test("accepts completion only from the response-scoped final answer action", () => {
     const state = {
       responsePresent: true,
@@ -959,6 +1034,87 @@ describe("ChatGPT outer-native harness v3", () => {
     await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
       .rejects.toThrow("has already finished");
     await broker.close();
+  });
+
+  test("a new Codex turn retires a stopped previous tool loop on the same thread", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-new-turn-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "lca-token",
+      baseUrl: "browser://chatgpt",
+      lcaToken: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    let firstBrowserStopped = false;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      const prepared = await turn.prepare();
+      try {
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("turn token missing from compiled prompt");
+        if (browserStarts === 1) {
+          const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+          try {
+            await callTurnBroker<BrokerToolResult>(socketPath, {
+              method: "invoke",
+              bindingId: claimed.bindingId,
+              wireName: "exec_command",
+              freeform: false,
+              arguments: { cmd: "pwd", workdir: tempRoot },
+            }, 30_000);
+            throw new Error("stopped first turn unexpectedly received a tool result");
+          } catch (error) {
+            firstBrowserStopped = turn.abortSignal?.aborted === true
+              && error instanceof Error
+              && error.message.includes("revoked");
+            throw error;
+          }
+        }
+        const answer = "new turn completed";
+        turn.onTextDelta(answer);
+        return answer;
+      } finally {
+        prepared.release();
+      }
+    };
+
+    const adapter = createLcaTokenAdapter(provider);
+    const firstRequest = rawWireRequest(environmentXml);
+    const firstEvents: AdapterEvent[] = [];
+    try {
+      await adapter.runTurn!(firstRequest, { headers: new Headers() }, event => firstEvents.push(event));
+      expect(firstEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
+
+      const secondRequest = rawWireRequest(environmentXml);
+      const raw = secondRequest._rawBody as {
+        client_metadata: Record<string, unknown>;
+        input: Array<Record<string, unknown>>;
+      };
+      const secondTurnId = "turn_test_456";
+      raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+        thread_id: "thread_test_123",
+        turn_id: secondTurnId,
+      });
+      for (const item of raw.input) {
+        const metadata = item.internal_chat_message_metadata_passthrough as Record<string, unknown> | undefined;
+        if (metadata) metadata.turn_id = secondTurnId;
+      }
+      const activeUser = raw.input.at(-1)!;
+      activeUser.content = [{ type: "input_text", text: "Start a fresh request after Stop" }];
+      secondRequest.context.messages = [{ role: "user", content: "Start a fresh request after Stop", timestamp: 3 }];
+
+      const secondEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
+
+      expect(firstBrowserStopped).toBe(true);
+      expect(browserStarts).toBe(2);
+      expect(secondEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      expect(secondEvents.some(event => event.type === "text_delta" && event.text === "new turn completed")).toBe(true);
+    } finally {
+      (worker as unknown as { run: typeof worker.run }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close().catch(() => {});
+    }
   });
 
   test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {

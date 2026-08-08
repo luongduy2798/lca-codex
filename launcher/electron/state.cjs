@@ -11,6 +11,7 @@ const DEFAULT_STATE = Object.freeze({
   bridgeEnabled: true,
   keepRunningOnClose: false,
   showBrowserDuringTurns: true,
+  hideCodexUsageUpsell: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
@@ -47,6 +48,7 @@ function readState(filePath) {
       "bridgeEnabled",
       "keepRunningOnClose",
       "showBrowserDuringTurns",
+      "hideCodexUsageUpsell",
       "browserSmokePassed",
       "sidebarOpen",
     ]) {

@@ -29,6 +29,7 @@ const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
+const { CodexUsageUpsellPatcher } = require("./codex-ui-patch.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -93,6 +94,12 @@ let catalogVerificationInFlight = false;
 let runtimeStatusTimer = null;
 let runtimeStatusInFlight = false;
 let updateController = null;
+let codexUsageUpsellPatcher = null;
+let codexUsageUpsellTimer = null;
+let codexUsageUpsellInFlight = false;
+let codexUsageUpsellReloadRequired = false;
+let codexUsageUpsellLastError = null;
+let lastCodexUsageUpsellStatus = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -116,6 +123,106 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+function codexUsageUpsellStatus() {
+  if (codexUsageUpsellLastError) {
+    return {
+      state: "error",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexUsageUpsellReloadRequired,
+      message: codexUsageUpsellLastError,
+    };
+  }
+  if (!codexUsageUpsellPatcher) {
+    return {
+      state: "not-found",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexUsageUpsellReloadRequired,
+      message: null,
+    };
+  }
+  try {
+    return {
+      ...codexUsageUpsellPatcher.inspect(),
+      reloadRequired: codexUsageUpsellReloadRequired,
+      message: null,
+    };
+  } catch (error) {
+    return {
+      state: "error",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexUsageUpsellReloadRequired,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function publishCodexUsageUpsellStatus(status = codexUsageUpsellStatus()) {
+  const serialized = JSON.stringify(status);
+  if (serialized !== lastCodexUsageUpsellStatus) {
+    lastCodexUsageUpsellStatus = serialized;
+    send("launcher:codex-usage-upsell-state", status);
+  }
+  return status;
+}
+
+function syncCodexUsageUpsellPatch({ logger, stateStore, migrateExisting = false } = {}) {
+  if (!codexUsageUpsellPatcher || codexUsageUpsellInFlight) return codexUsageUpsellStatus();
+  codexUsageUpsellInFlight = true;
+  try {
+    let status = codexUsageUpsellPatcher.inspect();
+    let state = stateStore.read();
+    if (migrateExisting && status.state === "applied" && state.hideCodexUsageUpsell !== true) {
+      state = stateStore.update({ hideCodexUsageUpsell: true });
+      send("launcher:state-changed", state);
+      logger.info("codex.ui_usage_upsell_preference_migrated", { version: status.version });
+    }
+    if (state.hideCodexUsageUpsell === true && status.state !== "applied") {
+      const result = codexUsageUpsellPatcher.apply();
+      if (result.mutated) codexUsageUpsellReloadRequired = true;
+      status = result;
+    }
+    codexUsageUpsellLastError = null;
+    const { mutated: _mutated, ...statusResult } = status;
+    return publishCodexUsageUpsellStatus({
+      ...statusResult,
+      reloadRequired: codexUsageUpsellReloadRequired,
+      message: null,
+    });
+  } catch (error) {
+    codexUsageUpsellLastError = error instanceof Error ? error.message : String(error);
+    logger.warn("codex.ui_usage_upsell_sync_failed", { message: codexUsageUpsellLastError });
+    return publishCodexUsageUpsellStatus(codexUsageUpsellStatus());
+  } finally {
+    codexUsageUpsellInFlight = false;
+  }
+}
+
+function startCodexUsageUpsellMonitor({ logger, stateStore }) {
+  if (codexUsageUpsellTimer) clearInterval(codexUsageUpsellTimer);
+  codexUsageUpsellTimer = setInterval(() => {
+    if (stateStore.read().hideCodexUsageUpsell === true) {
+      syncCodexUsageUpsellPatch({ logger, stateStore });
+    } else {
+      publishCodexUsageUpsellStatus();
+    }
+  }, 60_000);
+  codexUsageUpsellTimer.unref?.();
+}
+
+function stopCodexUsageUpsellMonitor() {
+  if (codexUsageUpsellTimer) clearInterval(codexUsageUpsellTimer);
+  codexUsageUpsellTimer = null;
 }
 
 async function publishRuntimeStatus() {
@@ -494,6 +601,7 @@ function registerIpc({ logger, stateStore }) {
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
+    codexUsageUpsell: codexUsageUpsellStatus(),
   }));
 
   handle("launcher:runtime-status", () => publishRuntimeStatus());
@@ -697,6 +805,31 @@ function registerIpc({ logger, stateStore }) {
       ...autostart,
     };
   });
+  handle("launcher:codex-usage-upsell-hidden", async (_event, enabled) => {
+    const desired = enabled === true;
+    let state = stateStore.update({ hideCodexUsageUpsell: desired });
+    send("launcher:state-changed", state);
+    try {
+      const result = desired ? codexUsageUpsellPatcher.apply() : codexUsageUpsellPatcher.restore();
+      if (result.mutated) codexUsageUpsellReloadRequired = true;
+      codexUsageUpsellLastError = null;
+      const { mutated: _mutated, ...statusResult } = result;
+      const status = publishCodexUsageUpsellStatus({
+        ...statusResult,
+        reloadRequired: codexUsageUpsellReloadRequired,
+        message: null,
+      });
+      return { state, status };
+    } catch (error) {
+      codexUsageUpsellLastError = error instanceof Error ? error.message : String(error);
+      if (!desired) {
+        state = stateStore.update({ hideCodexUsageUpsell: true });
+        send("launcher:state-changed", state);
+      }
+      publishCodexUsageUpsellStatus(codexUsageUpsellStatus());
+      throw error;
+    }
+  });
   handle("launcher:set-preference", async (_event, key, value) => {
     if (key !== "runtimeAutoStart" && key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
       throw new Error("Unknown preference");
@@ -750,6 +883,7 @@ async function requestQuit() {
   shutdownInProgress = true;
   stopCatalogVerificationMonitor();
   stopRuntimeStatusMonitor();
+  stopCodexUsageUpsellMonitor();
   browserHost?.abortAllTurns();
   try {
     const activeOperation = runtimeHost?.currentOperation();
@@ -840,6 +974,9 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  codexUsageUpsellPatcher = new CodexUsageUpsellPatcher({ logger });
+  syncCodexUsageUpsellPatch({ logger, stateStore, migrateExisting: true });
+  startCodexUsageUpsellMonitor({ logger, stateStore });
   const startHidden = process.argv.includes("--hidden");
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({

@@ -17,6 +17,7 @@ const DEFAULT_EXPECTED = {
   bridgeEnabled: true,
   keepRunningOnClose: false,
   showBrowserDuringTurns: true,
+  hideCodexUsageUpsell: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
@@ -36,6 +37,7 @@ test("launcher state persists manual runtime preferences atomically", () => {
     store.update({
       runtimeAutoStart: true,
       keepRunningOnClose: true,
+      hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       connectorName: "Duy Local Codex",
@@ -44,6 +46,7 @@ test("launcher state persists manual runtime preferences atomically", () => {
       ...DEFAULT_EXPECTED,
       runtimeAutoStart: true,
       keepRunningOnClose: true,
+      hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       connectorName: "Duy Local Codex",

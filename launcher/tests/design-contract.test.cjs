@@ -111,6 +111,8 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(appSource, /className="titlebar-runtime no-drag"/);
   assert.doesNotMatch(styles, /\.titlebar-runtime\s*\{|\.runtime-status-chip\s*\{/);
   assert.doesNotMatch(styles, /\.browser-tab-strip\s*\{\s*padding-right:\s*150px/s);
+  assert.match(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*1;/);
+  assert.doesNotMatch(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*0;/);
 });
 
 test("runtime details explain the active role and ChatGPT mode offers a Codex-mode MCP CTA", () => {
@@ -192,6 +194,19 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
   assert.match(electronMain, /launcher:setup-mcp[\s\S]*?codexRestartPending\([\s\S]*?publishRuntimeStatus\(\)[\s\S]*?startCatalogVerificationMonitor\(\{ logger, stateStore \}\)/);
   assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
+});
+
+test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
+  assert.match(appSource, /label=\{copy\.hideCodexUsageUpsell\}[\s\S]*?checked=\{snapshot\.state\.hideCodexUsageUpsell\}/);
+  assert.match(appSource, /api!\.setCodexUsageUpsellHidden\(enabled\)/);
+  assert.match(preloadSource, /setCodexUsageUpsellHidden:[\s\S]*?launcher:codex-usage-upsell-hidden/);
+  assert.match(preloadSource, /onCodexUsageUpsellState:[\s\S]*?launcher:codex-usage-upsell-state/);
+  assert.match(electronMain, /new CodexUsageUpsellPatcher\(\{ logger \}\)/);
+  assert.match(electronMain, /migrateExisting:\s*true/);
+  assert.match(electronMain, /hideCodexUsageUpsell === true[\s\S]*?syncCodexUsageUpsellPatch/);
+  assert.match(i18nSource, /hideCodexUsageUpsell: "Hide Codex usage-limit upsell"/);
+  assert.match(i18nSource, /Usage limits, credits and API behavior are unchanged/);
+  assert.match(i18nSource, /official extension remains updateable through VS Code/);
 });
 
 test("settings expose a persistent fail-closed Codex bridge switch", () => {

@@ -700,13 +700,8 @@ code {
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--color-icon-tertiary);
-  opacity: 0;
-  place-items: center;
-}
-
-.browser-tab:hover > button,
-.browser-tab > button:focus-visible {
   opacity: 1;
+  place-items: center;
 }
 
 .browser-tab > button:hover {

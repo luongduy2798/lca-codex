@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setMcpStep: (step) => ipcRenderer.invoke("launcher:set-mcp-step", step),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
+  setCodexUsageUpsellHidden: (enabled) => ipcRenderer.invoke("launcher:codex-usage-upsell-hidden", enabled),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
@@ -49,4 +50,5 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onOperation: (listener) => subscription("launcher:operation", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
+  onCodexUsageUpsellState: (listener) => subscription("launcher:codex-usage-upsell-state", listener),
 });

@@ -71,6 +71,9 @@ export function App() {
     const unsubscribeUpdate = api.onUpdateState((update) => {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
+    const unsubscribeCodexUsageUpsell = api.onCodexUsageUpsellState((codexUsageUpsell) => {
+      setSnapshot((current) => current ? { ...current, codexUsageUpsell } : current);
+    });
     return () => {
       cancelled = true;
       unsubscribeState();
@@ -79,6 +82,7 @@ export function App() {
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
+      unsubscribeCodexUsageUpsell();
     };
   }, []);
 
@@ -1565,7 +1569,7 @@ function SettingsSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "bridge" | "uninstall" | null>(null);
+  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "bridge" | "upsell" | "uninstall" | null>(null);
   const busy = activeAction !== null;
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
@@ -1597,6 +1601,18 @@ function SettingsSurface({
     setError(null);
     try {
       updateState(await api!.setBridgeEnabled(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const setCodexUsageUpsellHidden = async (enabled: boolean) => {
+    setActiveAction("upsell");
+    setError(null);
+    try {
+      const result = await api!.setCodexUsageUpsellHidden(enabled);
+      updateState(result.state);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1660,6 +1676,16 @@ function SettingsSurface({
             onChange={(checked) => void api!.setPreference("showBrowserDuringTurns", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
+        <SettingRow
+          body={`${copy.hideCodexUsageUpsellBody} ${codexUsageUpsellStatusText(copy, snapshot.codexUsageUpsell)}`}
+          label={copy.hideCodexUsageUpsell}
+        >
+          <Switch
+            checked={snapshot.state.hideCodexUsageUpsell}
+            disabled={busy}
+            onChange={(checked) => void setCodexUsageUpsellHidden(checked)}
           />
         </SettingRow>
       </div>
@@ -1788,6 +1814,23 @@ function NoticeRow({
       <span>{children}</span>
     </div>
   );
+}
+
+function codexUsageUpsellStatusText(copy: Copy, status: LauncherSnapshot["codexUsageUpsell"]) {
+  const version = status.version ?? "unknown";
+  let text: string;
+  if (status.message) {
+    text = copy.codexUsageUpsellError.replace("{message}", status.message);
+  } else if (status.state === "applied") {
+    text = copy.codexUsageUpsellApplied.replace("{version}", version);
+  } else if (status.state === "available") {
+    text = copy.codexUsageUpsellDetected.replace("{version}", version);
+  } else if (status.state === "unsupported") {
+    text = copy.codexUsageUpsellUnsupported.replace("{version}", version);
+  } else {
+    text = copy.codexUsageUpsellNotFound;
+  }
+  return status.reloadRequired ? `${text} ${copy.codexUsageUpsellReload}` : text;
 }
 
 function SettingRow({ body, children, label }: { body: string; children: ReactNode; label: string }) {

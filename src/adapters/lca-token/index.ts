@@ -267,13 +267,13 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
       const turnCapabilities = parsed._compactionRequest
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
+      const identity = extractChatGptTurnIdentity(parsed);
       const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
           environment = environmentStore.resolve(parsed);
         } catch (error) {
-          const identity = extractChatGptTurnIdentity(parsed);
           console.warn(
             `[lca-token] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
           );
@@ -285,11 +285,19 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
       const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
+      if (!parsed._compactionRequest && identity.threadId && identity.turnId) {
+        await chatGptTurnSessions.retireSupersededThreadTurns(identity.threadId, identity.turnId, executionKey);
+      }
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
+        {
+          threadId: identity.threadId,
+          turnId: identity.turnId,
+          purpose: parsed._compactionRequest ? "compaction" : "response",
+        },
       );
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
