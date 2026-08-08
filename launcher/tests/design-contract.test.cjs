@@ -92,7 +92,7 @@ test("closing the launcher follows the persisted background-launcher preference"
   assert.match(i18nSource, /keepRunningOnClose: "Keep launcher running when window closes"/);
 });
 
-test("sidebar shows runtime mode first, lifecycle second, and keeps actions at the bottom", () => {
+test("sidebar keeps the brand prominent, runtime actions clear, and Settings free of unexplained status dots", () => {
   assert.match(appSource, /className=\{`sidebar-runtime-card is-\$\{snapshot\.runtime\.lifecycle\}/);
   assert.match(appSource, /className="sidebar-runtime-overview"[\s\S]*?navigateSurface\("runtime"\)/);
   assert.match(appSource, /sidebar-runtime-mode-line[\s\S]*?runtimeModeLabel[\s\S]*?sidebar-runtime-lifecycle[\s\S]*?runtimeLifecycleLabel\(copy, snapshot\.runtime\)/);
@@ -103,6 +103,10 @@ test("sidebar shows runtime mode first, lifecycle second, and keeps actions at t
   assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*17px/s);
   assert.match(styles, /\.sidebar-runtime-card\.is-ready\s*\{[^}]*border-color:/s);
   assert.match(styles, /\.sidebar-runtime-card\.is-error,[\s\S]*?background:\s*linear-gradient/s);
+  assert.match(styles, /\.sidebar-brand-identity strong\s*\{[^}]*font-size:\s*15px[^}]*font-weight:\s*650/s);
+  assert.match(styles, /\.sidebar-brand-row \.sidebar-brand-identity > \.brand-mark\s*\{[^}]*width:\s*26px[^}]*height:\s*26px/s);
+  assert.match(appSource, /active=\{surface === "settings"\}\s*icon="settings"\s*label=\{copy\.settings\}/);
+  assert.doesNotMatch(appSource, /active=\{surface === "settings"\}[\s\S]{0,120}?badge=/);
   assert.doesNotMatch(appSource, /chatgptModeSummary|codexModeSummary|modeNotConfiguredSummary/);
   assert.doesNotMatch(appSource, /className="titlebar-runtime no-drag"/);
   assert.doesNotMatch(styles, /\.titlebar-runtime\s*\{|\.runtime-status-chip\s*\{/);
@@ -138,7 +142,7 @@ test("manual-first runtime controls are global and startup stays observe-only by
   assert.match(appSource, /activeAction === "stop" \? <ButtonSpinner \/> : null/);
   assert.match(appSource, /function RuntimeServiceSurface/);
   assert.match(appSource, /setPreference\("runtimeAutoStart", checked\)/);
-  assert.match(electronMain, /await publishRuntimeStatus\(\);\s*startRuntimeStatusMonitor\(\);\s*if \(stateStore\.read\(\)\.runtimeAutoStart === true\)/);
+  assert.match(electronMain, /await publishRuntimeStatus\(\);\s*startRuntimeStatusMonitor\(\{ logger, stateStore \}\);\s*if \(stateStore\.read\(\)\.runtimeAutoStart === true\)/);
   assert.match(electronMain, /const status = await runtimeSupervisor\.startRuntime\(\)/);
   assert.match(electronMain, /const status = await runtimeSupervisor\.stopRuntime\(\)/);
 });
@@ -175,23 +179,28 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.doesNotMatch(electronMain, /launcher:codex-config-reset/);
   assert.match(i18nSource, /restorePreviousRoute: "Restore native Codex"/);
   assert.match(i18nSource, /save: "Save"/);
-  assert.match(codexConfigSource, /className="codex-next-steps"/);
-  assert.match(codexConfigSource, /api!\.startRuntime\(\)/);
-  assert.match(codexConfigSource, /copy\.startLcaServiceAction/);
-  assert.match(codexConfigSource, /copy\.codexCliRestart/);
-  assert.match(codexConfigSource, /copy\.vscodeRestart/);
+  assert.match(appSource, /function CodexRestartGuide/);
+  assert.equal((appSource.match(/<CodexRestartGuide/g) ?? []).length, 2);
+  assert.match(appSource, /function CodexRestartGuide[\s\S]*?api!\.startRuntime\(\)/);
+  assert.match(appSource, /function CodexRestartGuide[\s\S]*?copy\.startLcaServiceAction/);
+  assert.match(appSource, /function CodexRestartGuide[\s\S]*?copy\.codexCliRestart/);
+  assert.match(appSource, /function CodexRestartGuide[\s\S]*?copy\.vscodeRestart/);
+  assert.doesNotMatch(i18nSource, /restartCodex: "Restart Codex once/);
   assert.match(i18nSource, /Developer: Reload Window/);
   assert.match(styles, /\.codex-next-step\.is-pending\s*\{[^}]*opacity:/s);
+  assert.match(electronMain, /function codexRestartPending[\s\S]*?codexCatalogVerified:\s*false[\s\S]*?codexRestartRequestedAt:/);
+  assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
+  assert.match(electronMain, /launcher:setup-mcp[\s\S]*?codexRestartPending\([\s\S]*?publishRuntimeStatus\(\)[\s\S]*?startCatalogVerificationMonitor\(\{ logger, stateStore \}\)/);
+  assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
 });
 
-test("settings expose a persistent fail-closed Codex bridge switch and status indicator", () => {
+test("settings expose a persistent fail-closed Codex bridge switch", () => {
   assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
-  assert.match(appSource, /snapshot\.state\.bridgeEnabled \? "success" : "error"/);
   assert.match(appSource, /body=\{copy\.bridgeRouteBody\} label=\{copy\.bridgeRoute\}/);
   assert.match(styles, /\.action-dot\.is-success\s*\{[^}]*background:\s*var\(--green-300\)/s);
   assert.match(styles, /\.action-dot\.is-error\s*\{[^}]*background:\s*var\(--red-300\)/s);
   assert.match(electronMain, /runtimeHost\.setBridgeEnabled\(enabled === true\)/);
-  assert.match(electronMain, /codexRestartRequired:\s*true/);
+  assert.match(electronMain, /function codexRestartPending[\s\S]*?codexRestartRequired:\s*true[\s\S]*?codexRestartRequestedAt:/);
   assert.match(i18nSource, /Turning it off restores your previous model route without deleting setup or saved credentials/);
 });
 

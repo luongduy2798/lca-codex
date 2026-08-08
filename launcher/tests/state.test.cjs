@@ -24,6 +24,7 @@ const DEFAULT_EXPECTED = {
   mcpGuideStep: 0,
   connectorName: "",
   sessionRefreshReminderAt: null,
+  codexRestartRequestedAt: null,
 };
 
 test("launcher state persists manual runtime preferences atomically", () => {
@@ -83,6 +84,7 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
       mcpGuideStep: 99,
       connectorName: 42,
       sessionRefreshReminderAt: "not-a-date",
+      codexRestartRequestedAt: "not-a-date",
       coreSetupComplete: "yes",
     }));
     assert.deepEqual(createStateStore(file).read(), DEFAULT_EXPECTED);

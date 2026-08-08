@@ -16,6 +16,7 @@ export interface LauncherState {
   mcpSetupComplete?: boolean;
   mcpRuntimeInstalled?: boolean;
   codexRestartRequired?: boolean;
+  codexRestartRequestedAt: string | null;
   mcpGuideStep: number;
   connectorName: string;
   sessionRefreshReminderAt: string | null;

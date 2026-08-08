@@ -18,6 +18,7 @@ const DEFAULT_STATE = Object.freeze({
   mcpGuideStep: 0,
   connectorName: "",
   sessionRefreshReminderAt: null,
+  codexRestartRequestedAt: null,
 });
 
 function nextSessionRefreshReminderAt(now = Date.now()) {
@@ -72,6 +73,11 @@ function readState(filePath) {
       && (typeof state.sessionRefreshReminderAt !== "string"
         || !Number.isFinite(Date.parse(state.sessionRefreshReminderAt)))) {
       state.sessionRefreshReminderAt = DEFAULT_STATE.sessionRefreshReminderAt;
+    }
+    if (state.codexRestartRequestedAt !== null
+      && (typeof state.codexRestartRequestedAt !== "string"
+        || !Number.isFinite(Date.parse(state.codexRestartRequestedAt)))) {
+      state.codexRestartRequestedAt = DEFAULT_STATE.codexRestartRequestedAt;
     }
     for (const key of [
       "coreSetupComplete",

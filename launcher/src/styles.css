@@ -302,9 +302,9 @@ code {
 }
 
 .sidebar-brand-row .sidebar-brand-identity > .brand-mark {
-  width: 24px;
-  height: 24px;
-  color: var(--color-icon-primary);
+  width: 26px;
+  height: 26px;
+  color: var(--color-text-primary);
 }
 
 .sidebar-brand-identity {
@@ -317,8 +317,9 @@ code {
 .sidebar-brand-identity strong {
   overflow: hidden;
   color: var(--color-text-primary);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

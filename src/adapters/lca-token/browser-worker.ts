@@ -172,6 +172,18 @@ const browserStageTimeouts = {
  */
 export const CHATGPT_PROMPT_INSERT_CHUNK_CHARS = 200_000;
 
+export const CHATGPT_CONNECTOR_MENU_ROW_SELECTOR = [
+  ".__menu-item",
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="menu"] button',
+  '[role="listbox"] button',
+  '[data-testid="composer-intelligence-picker-content"] button',
+  '[data-testid="composer-intelligence-picker-content"] [tabindex="0"]',
+  '[data-radix-popper-content-wrapper] button',
+  '[data-radix-popper-content-wrapper] [tabindex="0"]',
+].join(", ");
+
 export interface BrowserTurn {
   traceId: string;
   modelId: string;
@@ -1060,7 +1072,7 @@ export class ChatGptBrowserWorker {
       return composer;
     }
 
-    const menuRows = page.locator('.__menu-item, [role="menuitem"], [role="option"]');
+    const menuRows = page.locator(CHATGPT_CONNECTOR_MENU_ROW_SELECTOR);
     const exactResult = menuRows
       .filter({ has: page.getByText(this.config.appName, { exact: true }) })
       .filter({ visible: true });

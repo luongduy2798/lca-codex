@@ -405,9 +405,6 @@ function LauncherShell({
               ) : null}
               <SidebarItem
                 active={surface === "settings"}
-                badge={snapshot.state.coreSetupComplete
-                  ? <ActionDot tone={snapshot.state.bridgeEnabled ? "success" : "error"} />
-                  : null}
                 icon="settings"
                 label={copy.settings}
                 onClick={() => navigateSurface("settings")}
@@ -865,9 +862,7 @@ function SetupSurface({
       </div>
 
       {snapshot.state.codexRestartRequired ? (
-        <NoticeRow icon="alert" tone="warning">
-          {copy.restartCodex}
-        </NoticeRow>
+        <CodexRestartGuide copy={copy} disabled={busy} setError={setError} snapshot={snapshot} />
       ) : null}
 
       <SectionHeading label="MCP" meta={copy.optional} spaced />
@@ -881,6 +876,78 @@ function SetupSurface({
         <Icon name="chevron" />
       </button>
     </ContentSurface>
+  );
+}
+
+function CodexRestartGuide({
+  copy,
+  disabled = false,
+  setError,
+  snapshot,
+}: {
+  copy: Copy;
+  disabled?: boolean;
+  setError: (error: string | null) => void;
+  snapshot: LauncherSnapshot;
+}) {
+  const [starting, setStarting] = useState(false);
+  const runtimeReady = snapshot.runtime.lifecycle === "ready";
+  const runtimeCanStart = snapshot.runtime.configured
+    && ["stopped", "stale"].includes(snapshot.runtime.lifecycle);
+
+  const startRuntime = async () => {
+    if (disabled || starting || !runtimeCanStart) return;
+    setStarting(true);
+    setError(null);
+    try {
+      await api!.startRuntime();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="codex-next-steps">
+      <header>
+        <strong>{copy.codexNextSteps}</strong>
+        <span>{copy.codexNextStepsBody}</span>
+      </header>
+      <div className={`codex-next-step${runtimeReady ? " is-complete" : ""}`}>
+        <span className="codex-step-index">{runtimeReady ? <Icon name="check" /> : "1"}</span>
+        <div>
+          <strong>{runtimeReady ? copy.lcaServiceReady : copy.startLcaService}</strong>
+          <p>{runtimeReady ? copy.lcaServiceReadyBody : copy.startLcaServiceBody}</p>
+        </div>
+        {!runtimeReady && runtimeCanStart ? (
+          <SecondaryButton
+            disabled={disabled || starting}
+            loading={starting}
+            onClick={() => void startRuntime()}
+          >
+            {starting ? copy.startingRuntime : copy.startLcaServiceAction}
+          </SecondaryButton>
+        ) : null}
+      </div>
+      <div className={`codex-next-step${runtimeReady ? "" : " is-pending"}`}>
+        <span className="codex-step-index">2</span>
+        <div>
+          <strong>{copy.restartCodexStep}</strong>
+          <p>{copy.restartCodexStepBody}</p>
+          <div className="codex-restart-options">
+            <div>
+              <b>{copy.codexCli}</b>
+              <span>{copy.codexCliRestart}</span>
+            </div>
+            <div>
+              <b>{copy.vscode}</b>
+              <span>{copy.vscodeRestart}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -901,11 +968,8 @@ function CodexConfigSurface({
   const [manualContent, setManualContent] = useState("");
   const [manualDirty, setManualDirty] = useState(false);
   const [mode, setMode] = useState<"automatic" | "manual">("automatic");
-  const [activeAction, setActiveAction] = useState<"install" | "restore" | "refresh" | "save" | "start-runtime" | null>(null);
+  const [activeAction, setActiveAction] = useState<"install" | "restore" | "refresh" | "save" | null>(null);
   const busy = activeAction !== null || operation?.status === "running";
-  const runtimeReady = snapshot.runtime.lifecycle === "ready";
-  const runtimeCanStart = snapshot.runtime.configured
-    && ["stopped", "stale"].includes(snapshot.runtime.lifecycle);
 
   const refresh = useCallback(async () => {
     const next = await api!.codexConfig();
@@ -974,18 +1038,6 @@ function CodexConfigSurface({
     const result = await api!.uninstallIntegration();
     if (!result.cancelled) updateState(result.state);
   });
-  const startRuntimeFromGuide = async () => {
-    if (busy || !runtimeCanStart) return;
-    setActiveAction("start-runtime");
-    setError(null);
-    try {
-      await api!.startRuntime();
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setActiveAction(null);
-    }
-  };
   const saveManual = async () => {
     if (busy || !manualDirty) return;
     setActiveAction("save");
@@ -1044,45 +1096,7 @@ function CodexConfigSurface({
             <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow>
           ) : null}
           {config?.state === "configured" && snapshot.state.codexRestartRequired ? (
-            <div className="codex-next-steps">
-              <header>
-                <strong>{copy.codexNextSteps}</strong>
-                <span>{copy.codexNextStepsBody}</span>
-              </header>
-              <div className={`codex-next-step${runtimeReady ? " is-complete" : ""}`}>
-                <span className="codex-step-index">{runtimeReady ? <Icon name="check" /> : "1"}</span>
-                <div>
-                  <strong>{runtimeReady ? copy.lcaServiceReady : copy.startLcaService}</strong>
-                  <p>{runtimeReady ? copy.lcaServiceReadyBody : copy.startLcaServiceBody}</p>
-                </div>
-                {!runtimeReady && runtimeCanStart ? (
-                  <SecondaryButton
-                    disabled={busy}
-                    loading={activeAction === "start-runtime"}
-                    onClick={() => void startRuntimeFromGuide()}
-                  >
-                    {activeAction === "start-runtime" ? copy.startingRuntime : copy.startLcaServiceAction}
-                  </SecondaryButton>
-                ) : null}
-              </div>
-              <div className={`codex-next-step${runtimeReady ? "" : " is-pending"}`}>
-                <span className="codex-step-index">2</span>
-                <div>
-                  <strong>{copy.restartCodexStep}</strong>
-                  <p>{copy.restartCodexStepBody}</p>
-                  <div className="codex-restart-options">
-                    <div>
-                      <b>{copy.codexCli}</b>
-                      <span>{copy.codexCliRestart}</span>
-                    </div>
-                    <div>
-                      <b>{copy.vscode}</b>
-                      <span>{copy.vscodeRestart}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <CodexRestartGuide copy={copy} disabled={busy} setError={setError} snapshot={snapshot} />
           ) : null}
           <p className="config-explainer">{copy.codexAutomaticBody}</p>
           <div className="inline-actions config-actions">

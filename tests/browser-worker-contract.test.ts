@@ -123,6 +123,9 @@ test("connector verification and real tool turns share one Playwright selector",
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource).toContain('await composer.fill(`@${this.config.appName}`)');
   expect(workerSource).toContain('const exactResult = menuRows');
+  expect(workerSource).toContain('const menuRows = page.locator(CHATGPT_CONNECTOR_MENU_ROW_SELECTOR)');
+  expect(workerSource).toContain('[data-testid="composer-intelligence-picker-content"] button');
+  expect(workerSource).toContain('[data-radix-popper-content-wrapper] button');
   expect(workerSource).toContain('exactResult.waitFor({ state: "visible", timeout: fastTimeout })');
   expect(workerSource).toContain('appResult.dispatchEvent("click")');
   expect(workerSource).not.toContain('composer.pressSequentially("@c"');

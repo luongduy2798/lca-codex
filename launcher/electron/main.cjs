@@ -141,13 +141,21 @@ function stopRuntimeStatusMonitor() {
   runtimeStatusTimer = null;
 }
 
-function startRuntimeStatusMonitor() {
+function startRuntimeStatusMonitor({ logger, stateStore }) {
   stopRuntimeStatusMonitor();
   const tick = async () => {
     if (runtimeStatusInFlight || !runtimeSupervisor) return;
     runtimeStatusInFlight = true;
     try {
-      await publishRuntimeStatus();
+      const status = await publishRuntimeStatus();
+      const current = stateStore.read();
+      const verificationPending = current.coreSetupComplete === true
+        && (current.codexRestartRequired === true || current.codexCatalogVerified !== true);
+      if (status.lifecycle === "ready" && verificationPending && !catalogVerificationTimer) {
+        startCatalogVerificationMonitor({ logger, stateStore });
+      } else if (status.lifecycle !== "ready" && catalogVerificationTimer) {
+        stopCatalogVerificationMonitor();
+      }
     } catch (error) {
       // Runtime observation is diagnostic and must never make the launcher unusable.
     } finally {
@@ -159,19 +167,26 @@ function startRuntimeStatusMonitor() {
   void tick();
 }
 
-function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
-  if (!upgrade?.updated) return;
-  const state = stateStore.update({
-    bridgeEnabled: upgrade.bridgeEnabled,
-    coreSetupComplete: true,
+function codexRestartPending(patch = {}) {
+  return {
+    ...patch,
     codexCatalogVerified: false,
     codexRestartRequired: true,
+    codexRestartRequestedAt: new Date().toISOString(),
+  };
+}
+
+function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
+  if (!upgrade?.updated) return;
+  const state = stateStore.update(codexRestartPending({
+    bridgeEnabled: upgrade.bridgeEnabled,
+    coreSetupComplete: true,
     ...(upgrade.mode === "browser-only" ? {
       mcpRuntimeInstalled: false,
       mcpSetupComplete: false,
       mcpGuideStep: 0,
     } : {}),
-  });
+  }));
   send("launcher:state-changed", state);
   logger.info("runtime.release_upgraded", {
     fromVersion: upgrade.fromVersion,
@@ -230,7 +245,8 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   const check = async () => {
     const current = stateStore.read();
-    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+    const verificationPending = current.codexRestartRequired === true || current.codexCatalogVerified !== true;
+    if (current.coreSetupComplete !== true || !verificationPending) {
       stopCatalogVerificationMonitor();
       return;
     }
@@ -241,9 +257,16 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
       const health = await runtimeSupervisor.proxyHealthPayload(config);
       if (!Number.isInteger(health?.successful_model_catalog_requests)
         || health.successful_model_catalog_requests < 1) return;
+      const lastRequestAt = Date.parse(health.last_successful_model_catalog_request_at ?? "");
+      const restartRequestedAt = Date.parse(current.codexRestartRequestedAt ?? "");
+      const requestIsFresh = Number.isFinite(restartRequestedAt)
+        ? Number.isFinite(lastRequestAt) && lastRequestAt >= restartRequestedAt
+        : true;
+      if (!requestIsFresh) return;
       const state = stateStore.update({
         codexCatalogVerified: true,
         codexRestartRequired: false,
+        codexRestartRequestedAt: null,
       });
       logger.info("codex.model_catalog_verified", {
         requests: health.successful_model_catalog_requests,
@@ -268,11 +291,9 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
   try {
     const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
     if (!route.installed || route.active) return { restored: false };
-    const state = stateStore.update({
+    const state = stateStore.update(codexRestartPending({
       bridgeEnabled: false,
-      codexCatalogVerified: false,
-      codexRestartRequired: true,
-    });
+    }));
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
     logger.warn("bridge.route_restored_after_runtime_failure", {
@@ -552,17 +573,19 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
   handle("launcher:codex-config-save", async (_event, content) => {
     const config = await runtimeHost.saveCodexConfig(content);
-    const state = stateStore.update({ codexRestartRequired: true });
+    const state = stateStore.update(codexRestartPending());
     send("launcher:state-changed", state);
+    const runtime = await publishRuntimeStatus();
+    if (runtime.lifecycle === "ready" && config.state === "configured") startCatalogVerificationMonitor({ logger, stateStore });
+    else stopCatalogVerificationMonitor();
     return { config, state };
   });
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
   handle("launcher:bridge-enabled", async (_event, enabled) => {
     const result = await runtimeHost.setBridgeEnabled(enabled === true);
-    const state = stateStore.update({
+    const state = stateStore.update(codexRestartPending({
       bridgeEnabled: result.active,
-      codexRestartRequired: true,
-    });
+    }));
     send("launcher:state-changed", state);
     if (result.active) startCatalogVerificationMonitor({ logger, stateStore });
     else stopCatalogVerificationMonitor();
@@ -585,15 +608,13 @@ function registerIpc({ logger, stateStore }) {
     } finally {
       browserHost.writeDescriptor();
     }
-    const state = stateStore.update({
+    const state = stateStore.update(codexRestartPending({
       coreSetupComplete: false,
       bridgeEnabled: false,
-      codexCatalogVerified: false,
       mcpSetupComplete: false,
       mcpRuntimeInstalled: false,
       mcpGuideStep: 0,
-      codexRestartRequired: true,
-    });
+    }));
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
@@ -607,17 +628,15 @@ function registerIpc({ logger, stateStore }) {
         throw new Error("Run the browser smoke test before installing the Codex integration");
       }
       const result = await runtimeHost.setupCore({ replaceCodexRoute: true });
-      const state = stateStore.update({
+      const state = stateStore.update(codexRestartPending({
         bridgeEnabled: true,
         coreSetupComplete: true,
-        codexCatalogVerified: false,
-        codexRestartRequired: true,
         ...(result.mode === "browser-only" ? {
           mcpSetupComplete: false,
           mcpRuntimeInstalled: false,
           mcpGuideStep: 0,
         } : {}),
-      });
+      }));
       send("launcher:state-changed", state);
       await browserHost.returnToIdle().catch((error) => {
         logger.warn("browser.idle_cleanup_failed", {
@@ -654,13 +673,15 @@ function registerIpc({ logger, stateStore }) {
       replace: input?.replace === true,
       appName: typeof input?.connectorName === "string" ? input.connectorName : "",
     });
-    const state = stateStore.update({
+    const state = stateStore.update(codexRestartPending({
       connectorName: runtimeHost.mcpConnectorName(),
       mcpRuntimeInstalled: true,
       mcpGuideStep: 2,
-      codexRestartRequired: true,
-    });
+    }));
     send("launcher:state-changed", state);
+    const runtime = await publishRuntimeStatus();
+    if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
+    else stopCatalogVerificationMonitor();
     return { ok: true, stdout: result.stdout };
   });
   handle("launcher:set-mcp-step", (_event, step) => {
@@ -944,7 +965,7 @@ async function start() {
     }
 
     await publishRuntimeStatus();
-    startRuntimeStatusMonitor();
+    startRuntimeStatusMonitor({ logger, stateStore });
     if (stateStore.read().runtimeAutoStart === true) {
       try {
         await startManagedRuntime({ logger, stateStore });
