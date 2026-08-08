@@ -151,9 +151,12 @@ test("manual-first runtime controls are global and startup stays observe-only by
 
 test("Codex config keeps automatic actions minimal and manual mode editable", () => {
   const start = appSource.indexOf("function CodexConfigSurface");
-  const end = appSource.indexOf("function McpSurface", start);
+  const end = appSource.indexOf("function VsCodeAdvancedSurface", start);
   const codexConfigSource = appSource.slice(start, end);
   assert.match(codexConfigSource, /api!\.setupCore\(\)/);
+  assert.match(codexConfigSource, /SectionHeading label=\{copy\.vscodeAdvancedSection\} meta=\{copy\.optional\} spaced/);
+  assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("vscode-advanced"\)/);
+  assert.match(codexConfigSource, /copy\.vscodeAdvancedTitle[\s\S]*?copy\.vscodeAdvancedSubtitle/);
   assert.match(codexConfigSource, /className="config-mode-toolbar"[\s\S]*?copy\.refreshing[\s\S]*?copy\.refresh/);
   assert.match(codexConfigSource, /api!\.uninstallIntegration\(\)/);
   assert.match(codexConfigSource, /api!\.saveCodexConfig\(manualContent\)/);
@@ -194,6 +197,36 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
   assert.match(electronMain, /launcher:setup-mcp[\s\S]*?codexRestartPending\([\s\S]*?publishRuntimeStatus\(\)[\s\S]*?startCatalogVerificationMonitor\(\{ logger, stateStore \}\)/);
   assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
+});
+
+test("Advanced VS Code setup is nested under Codex Config and offers Automatic and Manual paths", () => {
+  const start = appSource.indexOf("function VsCodeAdvancedSurface");
+  const end = appSource.indexOf("function McpSurface", start);
+  const source = appSource.slice(start, end);
+  const sidebarStart = appSource.indexOf('<nav className="sidebar-nav"');
+  const sidebarEnd = appSource.indexOf("</nav>", sidebarStart);
+  const sidebarSource = appSource.slice(sidebarStart, sidebarEnd);
+  assert.ok(start >= 0 && end > start);
+  assert.doesNotMatch(appSource, /surface === "vscode-advanced"/);
+  assert.doesNotMatch(sidebarSource, /vscode-advanced|copy\.vscodeAdvanced/);
+  assert.match(sidebarSource, /label=\{copy\.codexConfig\}[\s\S]*?onClick=\{navigateCodexRoot\}/);
+  assert.match(appSource, /const navigateCodexRoot = \(\) => \{[\s\S]*?setCodexRootRequest\(\(request\) => request \+ 1\)[\s\S]*?navigateSurface\("codex"\)/);
+  assert.match(appSource, /rootRequest=\{codexRootRequest\}/);
+  assert.match(appSource, /useEffect\(\(\) => \{\s*setSubview\("config"\);\s*\}, \[rootRequest\]\)/);
+  assert.match(source, /onBack: \(\) => void/);
+  assert.match(source, /className="text-button nested-surface-back"[\s\S]*?copy\.codexConfig/);
+  assert.match(source, /mode === "automatic"/);
+  assert.match(source, /mode === "manual"/);
+  assert.match(source, /api!\.setupVsCodeAdvanced\(\)/);
+  assert.match(source, /api!\.installVsCodeAdvancedProxy\(\)/);
+  assert.match(source, /api!\.removeVsCodeAdvanced\(\)/);
+  assert.match(source, /chatgpt\.cliExecutable/);
+  assert.match(source, /copy\.vscodeAdvancedFallback/);
+  assert.match(preloadSource, /vscodeAdvancedConfig:[\s\S]*?launcher:vscode-advanced-config/);
+  assert.match(preloadSource, /setupVsCodeAdvanced:[\s\S]*?launcher:vscode-advanced-setup/);
+  assert.match(electronMain, /launcher:vscode-advanced-proxy-install[\s\S]*?runtimeHost\.installVsCodeAdvancedProxy\(\)/);
+  assert.doesNotMatch(i18nSource, /JetBrains|client-agnostic/);
+  assert.match(i18nSource, /normal next-prompt cleanup remains active without it/i);
 });
 
 test("settings expose a reversible UI-only Codex usage upsell toggle", () => {

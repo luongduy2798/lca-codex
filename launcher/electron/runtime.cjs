@@ -7,6 +7,11 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const {
+  bridgeStatus: vscodeAdvancedStatus,
+  removeBridge: removeVsCodeAdvanced,
+  setupBridge: setupVsCodeAdvanced,
+} = require("./codex-lifecycle-bridge.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -124,6 +129,7 @@ class RuntimeHost {
     installedRuntimeRoot,
     runtimeRootProvider,
     browserDescriptorPath,
+    coreHome,
     codexHome,
     launchAgentsDir,
     platform = process.platform,
@@ -136,6 +142,8 @@ class RuntimeHost {
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
     this.browserDescriptorPath = browserDescriptorPath;
+    this.coreHome = resolveUserPath(coreHome || process.env.LCA_TOKEN_HOME?.trim() || path.join(os.homedir(), ".lca-token"));
+    this.codexLifecycleProxySource = path.join(__dirname, "codex-cli-proxy.cjs");
     this.platform = platform;
     this.codexHome = codexHome
       ? resolveUserPath(codexHome)
@@ -635,6 +643,45 @@ class RuntimeHost {
     } finally {
       if (this.codexConfigSnapshotInFlight === snapshot) this.codexConfigSnapshotInFlight = null;
     }
+  }
+
+  vscodeAdvancedSnapshot() {
+    return vscodeAdvancedStatus({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      platform: this.platform,
+    });
+  }
+
+  setupVsCodeAdvanced() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return setupVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      electronExecutable: process.execPath,
+      platform: this.platform,
+      configureSettings: true,
+    });
+  }
+
+  installVsCodeAdvancedProxy() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return setupVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      electronExecutable: process.execPath,
+      platform: this.platform,
+      configureSettings: false,
+    });
+  }
+
+  removeVsCodeAdvanced() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return removeVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      platform: this.platform,
+    });
   }
 
   async saveCodexConfig(content) {

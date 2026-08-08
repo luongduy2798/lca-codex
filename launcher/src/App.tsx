@@ -20,6 +20,7 @@ import type {
   OperationState,
   RuntimeStatus,
   Surface,
+  VsCodeAdvancedSnapshot,
 } from "./types";
 
 const api = window.codexWebLauncher;
@@ -138,6 +139,7 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     snapshot.state.coreSetupComplete && snapshot.state.codexCatalogVerified ? "browser" : "setup",
   );
+  const [codexRootRequest, setCodexRootRequest] = useState(0);
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
@@ -247,6 +249,11 @@ function LauncherShell({
   const navigateSurface = (next: Surface) => {
     setSurface(next);
     if (compactSidebar) setSidebarOpen(false);
+  };
+
+  const navigateCodexRoot = () => {
+    setCodexRootRequest((request) => request + 1);
+    navigateSurface("codex");
   };
 
   const installUpdate = async () => {
@@ -370,7 +377,7 @@ function LauncherShell({
                   badge={snapshot.state.coreSetupComplete && !snapshot.state.bridgeEnabled ? <ActionDot tone="error" /> : null}
                   icon="setup"
                   label={copy.codexConfig}
-                  onClick={() => navigateSurface("codex")}
+                  onClick={navigateCodexRoot}
                 />
                 <SidebarItem
                   active={surface === "mcp"}
@@ -452,6 +459,7 @@ function LauncherShell({
               <CodexConfigSurface
                 copy={copy}
                 operation={operation}
+                rootRequest={codexRootRequest}
                 setError={setError}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -958,12 +966,14 @@ function CodexRestartGuide({
 function CodexConfigSurface({
   copy,
   operation,
+  rootRequest,
   setError,
   snapshot,
   updateState,
 }: {
   copy: Copy;
   operation: OperationState | null;
+  rootRequest: number;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -972,8 +982,14 @@ function CodexConfigSurface({
   const [manualContent, setManualContent] = useState("");
   const [manualDirty, setManualDirty] = useState(false);
   const [mode, setMode] = useState<"automatic" | "manual">("automatic");
+  const [subview, setSubview] = useState<"config" | "vscode-advanced">("config");
+  const [advancedConfig, setAdvancedConfig] = useState<VsCodeAdvancedSnapshot | null>(null);
   const [activeAction, setActiveAction] = useState<"install" | "restore" | "refresh" | "save" | null>(null);
   const busy = activeAction !== null || operation?.status === "running";
+
+  useEffect(() => {
+    setSubview("config");
+  }, [rootRequest]);
 
   const refresh = useCallback(async () => {
     const next = await api!.codexConfig();
@@ -989,14 +1005,21 @@ function CodexConfigSurface({
     return next;
   }, []);
 
+  const refreshAdvanced = useCallback(async () => {
+    const next = await api!.vscodeAdvancedConfig();
+    setAdvancedConfig(next);
+    return next;
+  }, []);
+
   useEffect(() => {
     if (operation?.status === "running") return;
     let cancelled = false;
-    void api!.codexConfig().then((next) => {
+    void Promise.all([api!.codexConfig(), api!.vscodeAdvancedConfig()]).then(([next, advanced]) => {
       if (!cancelled) {
         setConfig(next);
         setManualContent(next.content);
         setManualDirty(false);
+        setAdvancedConfig(advanced);
       }
     }).catch((cause) => {
       if (!cancelled) setError(messageOf(cause));
@@ -1065,6 +1088,27 @@ function CodexConfigSurface({
       : config?.state === "inconsistent"
         ? copy.codexInconsistent
         : copy.notConfigured;
+  const advancedStatusLabel = advancedConfig?.state === "configured"
+    ? copy.vscodeAdvancedConfigured
+    : advancedConfig?.state === "installed"
+      ? copy.vscodeAdvancedProxyInstalled
+      : advancedConfig?.state === "inconsistent"
+        ? copy.vscodeAdvancedNeedsRepair
+        : copy.vscodeAdvancedNotInstalled;
+
+  if (subview === "vscode-advanced") {
+    return (
+      <VsCodeAdvancedSurface
+        copy={copy}
+        onBack={() => {
+          setSubview("config");
+          void refreshAdvanced();
+        }}
+        operation={operation}
+        setError={setError}
+      />
+    );
+  }
 
   return (
     <ContentSurface narrow subtitle={copy.codexConfigSubtitle} title={copy.codexConfigTitle}>
@@ -1137,6 +1181,159 @@ function CodexConfigSurface({
             spellCheck={false}
             value={manualContent}
           />
+        </div>
+      )}
+
+      <SectionHeading label={copy.vscodeAdvancedSection} meta={copy.optional} spaced />
+      <button className="next-surface-row" onClick={() => setSubview("vscode-advanced")} type="button">
+        <Icon name="setup" />
+        <span>
+          <strong>{copy.vscodeAdvancedTitle}</strong>
+          <small>{copy.vscodeAdvancedSubtitle}</small>
+        </span>
+        <em>{advancedStatusLabel}</em>
+        <Icon name="chevron" />
+      </button>
+    </ContentSurface>
+  );
+}
+
+function VsCodeAdvancedSurface({
+  copy,
+  onBack,
+  operation,
+  setError,
+}: {
+  copy: Copy;
+  onBack: () => void;
+  operation: OperationState | null;
+  setError: (error: string | null) => void;
+}) {
+  const [config, setConfig] = useState<VsCodeAdvancedSnapshot | null>(null);
+  const [mode, setMode] = useState<"automatic" | "manual">("automatic");
+  const [activeAction, setActiveAction] = useState<"setup" | "proxy" | "remove" | "refresh" | null>(null);
+  const busy = activeAction !== null || operation?.status === "running";
+
+  const refresh = useCallback(async () => {
+    const next = await api!.vscodeAdvancedConfig();
+    setConfig(next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    if (operation?.status === "running") return;
+    let cancelled = false;
+    void api!.vscodeAdvancedConfig().then((next) => {
+      if (!cancelled) setConfig(next);
+    }).catch((cause) => {
+      if (!cancelled) setError(messageOf(cause));
+    });
+    return () => { cancelled = true; };
+  }, [operation?.status, setError]);
+
+  const run = async (name: "setup" | "proxy" | "remove", action: () => Promise<VsCodeAdvancedSnapshot>) => {
+    if (busy) return;
+    setActiveAction(name);
+    setError(null);
+    try {
+      setConfig(await action());
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+
+  const refreshFromToolbar = async () => {
+    if (busy) return;
+    setActiveAction("refresh");
+    setError(null);
+    try {
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+
+  const statusLabel = config?.state === "configured"
+    ? copy.vscodeAdvancedConfigured
+    : config?.state === "installed"
+      ? copy.vscodeAdvancedProxyInstalled
+      : config?.state === "inconsistent"
+        ? copy.vscodeAdvancedNeedsRepair
+        : copy.vscodeAdvancedNotInstalled;
+  const proxyPath = config?.proxyPath ?? "~/.lca-token/bin/lca-codex-proxy";
+  const settingsPath = config?.settingsPath || "VS Code settings.json";
+  const manualSnippet = `"chatgpt.cliExecutable": ${JSON.stringify(proxyPath)}`;
+
+  return (
+    <ContentSurface narrow subtitle={copy.vscodeAdvancedSubtitle} title={copy.vscodeAdvancedTitle}>
+      <button className="text-button nested-surface-back" onClick={onBack} type="button">
+        <Icon name="back" />
+        {copy.codexConfig}
+      </button>
+      <div className="config-mode-toolbar">
+        <div className="config-mode-tabs" role="tablist" aria-label={copy.vscodeAdvanced}>
+          <button className={mode === "automatic" ? "is-active" : ""} onClick={() => setMode("automatic")} role="tab" type="button">
+            {copy.automatic}
+          </button>
+          <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")} role="tab" type="button">
+            {copy.manual}
+          </button>
+        </div>
+        <button className="text-button config-refresh-button" disabled={busy} onClick={() => void refreshFromToolbar()} type="button">
+          {activeAction === "refresh" ? <ButtonSpinner /> : null}
+          {activeAction === "refresh" ? copy.refreshing : copy.refresh}
+        </button>
+      </div>
+
+      {mode === "automatic" ? (
+        <div className="codex-config-panel">
+          <div className="config-status-card">
+            <div>
+              <span>{copy.status}</span>
+              <strong>{statusLabel}</strong>
+            </div>
+            <StateDot state={config?.state === "configured" ? "ready" : config?.state === "inconsistent" ? "error" : "busy"} />
+          </div>
+          <div className="config-detail-list">
+            <div><span>{copy.vscodeAdvancedSettingsPath}</span><code>{settingsPath}</code></div>
+            <div><span>{copy.vscodeAdvancedProxyPath}</span><code>{proxyPath}</code></div>
+          </div>
+          <p className="config-explainer">{copy.vscodeAdvancedAutomaticBody}</p>
+          <NoticeRow icon="alert" tone="warning">{copy.vscodeAdvancedFallback}</NoticeRow>
+          {config?.errors.length ? <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow> : null}
+          {config?.reloadRequired ? <NoticeRow icon="alert" tone="warning">{copy.reloadVsCodeAdvanced}</NoticeRow> : null}
+          <div className="inline-actions config-actions">
+            <SecondaryButton disabled={busy} loading={activeAction === "setup"} onClick={() => void run("setup", () => api!.setupVsCodeAdvanced())}>
+              {activeAction === "setup" ? copy.settingUpVsCodeAdvanced : config?.installed ? copy.repairVsCodeAdvanced : copy.setupVsCodeAdvanced}
+            </SecondaryButton>
+            <SecondaryButton disabled={busy || !config?.installed} loading={activeAction === "remove"} onClick={() => void run("remove", () => api!.removeVsCodeAdvanced())}>
+              {activeAction === "remove" ? copy.removingVsCodeAdvanced : copy.removeVsCodeAdvanced}
+            </SecondaryButton>
+          </div>
+        </div>
+      ) : (
+        <div className="codex-config-panel">
+          <p className="config-explainer">{copy.vscodeAdvancedManualBody}</p>
+          <div className="config-detail-list">
+            <div><span>{copy.vscodeAdvancedSettingsPath}</span><code>{settingsPath}</code></div>
+            <div><span>{copy.vscodeAdvancedProxyPath}</span><code>{proxyPath}</code></div>
+          </div>
+          <div className="config-file-header"><span>{copy.vscodeAdvancedSnippet}</span></div>
+          <pre className="config-file-content vscode-advanced-snippet">{manualSnippet}</pre>
+          <NoticeRow icon="alert" tone="warning">{copy.vscodeAdvancedFallback}</NoticeRow>
+          {config?.errors.length ? <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow> : null}
+          <div className="inline-actions config-actions">
+            <SecondaryButton disabled={busy} loading={activeAction === "proxy"} onClick={() => void run("proxy", () => api!.installVsCodeAdvancedProxy())}>
+              {activeAction === "proxy" ? copy.installingVsCodeProxy : copy.installVsCodeProxy}
+            </SecondaryButton>
+            <SecondaryButton disabled={busy || !config?.installed} loading={activeAction === "remove"} onClick={() => void run("remove", () => api!.removeVsCodeAdvanced())}>
+              {activeAction === "remove" ? copy.removingVsCodeAdvanced : copy.removeVsCodeAdvanced}
+            </SecondaryButton>
+          </div>
         </div>
       )}
     </ContentSurface>

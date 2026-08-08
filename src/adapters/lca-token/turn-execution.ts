@@ -364,6 +364,28 @@ export class ChatGptTurnSessions {
     return true;
   }
 
+  retireThreadTurn(threadId: string, turnId: string): number {
+    let retired = 0;
+    for (const [key, session] of [...this.entries]) {
+      if (session.scope?.threadId !== threadId || session.scope?.turnId !== turnId) continue;
+      session.cancel();
+      this.entries.delete(key);
+      retired += 1;
+    }
+    return retired;
+  }
+
+  retireThread(threadId: string): number {
+    let retired = 0;
+    for (const [key, session] of [...this.entries]) {
+      if (session.scope?.threadId !== threadId) continue;
+      session.cancel();
+      this.entries.delete(key);
+      retired += 1;
+    }
+    return retired;
+  }
+
   clear(): number {
     const cancelled = this.entries.size;
     for (const session of this.entries.values()) session.cancel();

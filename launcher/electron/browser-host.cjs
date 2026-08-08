@@ -977,6 +977,32 @@ class BrowserHost {
     throw new Error("ChatGPT login was not completed before the timeout");
   }
 
+  async waitForVisibleComposer(timeoutMs = 15_000, pollMs = 100) {
+    const deadline = Date.now() + timeoutMs;
+    let state;
+    do {
+      state = await this.view.webContents.executeJavaScript(`(() => {
+        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+        return {
+          composer: Boolean(composer),
+          visibilityState: document.visibilityState,
+          readyState: document.readyState,
+        };
+      })()`, true).catch(() => ({
+        composer: false,
+        visibilityState: "unknown",
+        readyState: "unknown",
+      }));
+      if (state.composer && state.visibilityState === "visible") return state;
+      await sleep(pollMs);
+    } while (Date.now() < deadline);
+    throw new Error(
+      `ChatGPT connector verification could not activate a visible composer`
+      + ` (document=${state?.readyState || "unknown"}; visibility=${state?.visibilityState || "unknown"};`
+      + ` composer=${state?.composer ? "ready" : "missing"})`,
+    );
+  }
+
   async smokeTest() {
     return await this.withManualOperation("browser smoke test", () => this.runSmokeTest());
   }
@@ -1488,20 +1514,30 @@ class BrowserHost {
       throw new Error("Connector name is invalid");
     }
     const connectorName = appName.trim();
+    const previousVisible = this.visible;
+    const previousSurfaceActive = this.surfaceActive;
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+    this.setSurfaceActive(true);
+    this.show();
+    try {
+      if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
+        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      }
+      await this.waitForAuthenticated(60_000);
+      await this.waitForVisibleComposer();
+      const result = await this.verifyConnectorWithBrowserHelper({
+        helper: this.helper,
+        descriptorPath: this.descriptorPath,
+        appName: connectorName,
+        logger: this.logger,
+      });
+      this.logger.info("connector.verified", { appName: connectorName });
+      this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
+      return result;
+    } finally {
+      if (!previousVisible) this.hide();
+      this.setSurfaceActive(previousSurfaceActive);
     }
-    await this.waitForAuthenticated(60_000);
-    const result = await this.verifyConnectorWithBrowserHelper({
-      helper: this.helper,
-      descriptorPath: this.descriptorPath,
-      appName: connectorName,
-      logger: this.logger,
-    });
-    this.logger.info("connector.verified", { appName: connectorName });
-    this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
-    return result;
   }
 
   async inspectSession(detectPro = false) {

@@ -151,6 +151,39 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   }
 });
 
+test("authenticated Codex lifecycle interrupt cancels only the matching browser turn", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  const cancelled: string[] = [];
+  chatGptTurnSessions.clear();
+  const runtime = (name: string) => ({
+    mode: "read-only" as const,
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled.push(name); },
+  });
+  chatGptTurnSessions.getOrCreate("match", () => runtime("match"), { threadId: "thread-a", turnId: "turn-a", purpose: "response" });
+  chatGptTurnSessions.getOrCreate("other", () => runtime("other"), { threadId: "thread-b", turnId: "turn-b", purpose: "response" });
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/admin/codex-lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.controlToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ method: "turn/interrupt", threadId: "thread-a", turnId: "turn-a" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "ok", method: "turn/interrupt", cancelled_browser_turns: 1, active_browser_turns: 1 });
+    expect(cancelled).toEqual(["match"]);
+  } finally {
+    chatGptTurnSessions.clear();
+    await server.stop(true);
+  }
+});
+
 test("a full-mode runtime exposes its broker endpoint before any turn registers", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));
   // The endpoint is a Unix socket on POSIX and a named pipe on Windows, so liveness is proven by

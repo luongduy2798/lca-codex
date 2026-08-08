@@ -1155,6 +1155,18 @@ code {
   color: var(--color-text-primary);
 }
 
+.nested-surface-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 8px -5px;
+}
+
+.nested-surface-back svg {
+  width: 14px;
+  height: 14px;
+}
+
 .notice-row {
   display: flex;
   min-height: 42px;
@@ -1452,6 +1464,13 @@ code {
   font-size: 11px;
   line-height: 1.55;
   white-space: pre;
+}
+
+.vscode-advanced-snippet {
+  min-height: 84px;
+  max-height: none;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .config-file-editor {

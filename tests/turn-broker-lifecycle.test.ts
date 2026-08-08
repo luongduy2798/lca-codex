@@ -33,6 +33,29 @@ test("explicit browser-turn cancellation aborts and removes every registered ses
   expect(sessions.activeCount()).toBe(0);
 });
 
+test("lifecycle cancellation targets only the matching Codex thread and turn", () => {
+  const sessions = new ChatGptTurnSessions();
+  const cancelled: string[] = [];
+  const runtime = (name: string) => ({
+    mode: "read-only" as const,
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled.push(name); },
+  });
+  sessions.getOrCreate("a1", () => runtime("a1"), { threadId: "thread-a", turnId: "turn-1", purpose: "response" });
+  sessions.getOrCreate("a2", () => runtime("a2"), { threadId: "thread-a", turnId: "turn-2", purpose: "response" });
+  sessions.getOrCreate("b1", () => runtime("b1"), { threadId: "thread-b", turnId: "turn-1", purpose: "response" });
+
+  expect(sessions.retireThreadTurn("thread-a", "turn-1")).toBe(1);
+  expect(cancelled).toEqual(["a1"]);
+  expect(sessions.activeCount()).toBe(2);
+  expect(sessions.retireThread("thread-a")).toBe(1);
+  expect(cancelled).toEqual(["a1", "a2"]);
+  expect(sessions.activeCount()).toBe(1);
+  sessions.clear();
+});
+
 test("session cache expiry never cancels a still-active long browser turn", async () => {
   const sessions = new ChatGptTurnSessions(1);
   let cancelled = 0;

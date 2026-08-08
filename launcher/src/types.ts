@@ -99,6 +99,17 @@ export interface RuntimeStatus {
   };
 }
 
+export interface VsCodeAdvancedSnapshot {
+  state: "configured" | "installed" | "inconsistent" | "not-configured";
+  installed: boolean;
+  configured: boolean;
+  vscodeDetected: boolean;
+  proxyPath: string;
+  settingsPath: string;
+  errors: string[];
+  reloadRequired: boolean;
+}
+
 export interface CodexConfigSnapshot {
   state: "configured" | "disconnected" | "inconsistent" | "not-configured";
   installed: boolean;
@@ -166,6 +177,10 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   codexConfig(): Promise<CodexConfigSnapshot>;
+  vscodeAdvancedConfig(): Promise<VsCodeAdvancedSnapshot>;
+  setupVsCodeAdvanced(): Promise<VsCodeAdvancedSnapshot>;
+  installVsCodeAdvancedProxy(): Promise<VsCodeAdvancedSnapshot>;
+  removeVsCodeAdvanced(): Promise<VsCodeAdvancedSnapshot>;
   saveCodexConfig(content: string): Promise<{ config: CodexConfigSnapshot; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   setBridgeEnabled(enabled: boolean): Promise<LauncherState>;

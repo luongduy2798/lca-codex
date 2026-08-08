@@ -679,6 +679,10 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:doctor", () => runtimeHost.doctor());
   handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
+  handle("launcher:vscode-advanced-config", () => runtimeHost.vscodeAdvancedSnapshot());
+  handle("launcher:vscode-advanced-setup", () => runtimeHost.setupVsCodeAdvanced());
+  handle("launcher:vscode-advanced-proxy-install", () => runtimeHost.installVsCodeAdvancedProxy());
+  handle("launcher:vscode-advanced-remove", () => runtimeHost.removeVsCodeAdvanced());
   handle("launcher:codex-config-save", async (_event, content) => {
     const config = await runtimeHost.saveCodexConfig(content);
     const state = stateStore.update(codexRestartPending());
@@ -1017,6 +1021,7 @@ async function start() {
     installedRuntimeRoot,
     runtimeRootProvider,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
+    coreHome: CORE_HOME,
     publishOperation,
     supervisor: runtimeSupervisor,
   });

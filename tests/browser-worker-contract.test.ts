@@ -33,7 +33,7 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
     traceId,
     modelId: "gpt-5.6-sol",
     capabilities: { localToolsEnabled: false, proAvailable: true },
-    prepare: async () => ({ text: traceId, images: [], release() {} }),
+    prepare: async () => ({ text: traceId, images: [], transport: "inline" as const, release() {} }),
     onTextDelta() {},
   });
 

@@ -481,6 +481,35 @@ export function startServer(
         const cancelled = chatGptTurnSessions.clear();
         return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
       }
+      if (req.method === "POST" && url.pathname === "/admin/codex-lifecycle") {
+        if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        return readJsonRequestBody(req).then(raw => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            return formatErrorResponse(400, "invalid_request_error", "Codex lifecycle event must be an object");
+          }
+          const event = raw as { method?: unknown; threadId?: unknown; turnId?: unknown };
+          const method = typeof event.method === "string" ? event.method : "";
+          const threadId = typeof event.threadId === "string" ? event.threadId : "";
+          const turnId = typeof event.turnId === "string" ? event.turnId : "";
+          if (!threadId || threadId.length > 200 || turnId.length > 200) {
+            return formatErrorResponse(400, "invalid_request_error", "Codex lifecycle event has invalid turn identity");
+          }
+          let cancelled = 0;
+          if (method === "turn/interrupt" || method === "turn/completed") {
+            if (!turnId) return formatErrorResponse(400, "invalid_request_error", `${method} requires turnId`);
+            cancelled = chatGptTurnSessions.retireThreadTurn(threadId, turnId);
+          } else if (method === "thread/stop") {
+            cancelled = chatGptTurnSessions.retireThread(threadId);
+          } else if (method !== "turn/start" && method !== "turn/started") {
+            return formatErrorResponse(400, "invalid_request_error", `Unsupported Codex lifecycle method: ${method || "missing"}`);
+          }
+          return Response.json({ status: "ok", method, cancelled_browser_turns: cancelled, ...activity() });
+        }).catch(error => formatErrorResponse(
+          400,
+          "invalid_request_error",
+          error instanceof Error ? error.message : "Codex lifecycle request must be valid JSON",
+        ));
+      }
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         const current = activity();

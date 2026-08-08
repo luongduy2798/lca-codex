@@ -800,15 +800,29 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
   );
 });
 
-test("connector verification is effort-independent and works while the browser surface is hidden", async () => {
+test("connector verification temporarily reveals a visible ChatGPT composer before helper attach", async () => {
   const calls = [];
   const fixture = {
+    visible: false,
+    surfaceActive: false,
     helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
     descriptorPath: "/runtime/launcher-browser.json",
     logger: { info: (event, detail) => calls.push(["log", event, detail]) },
     setState: (patch) => calls.push(["state", patch]),
-    show: () => calls.push(["show"]),
+    setSurfaceActive(active) {
+      this.surfaceActive = active;
+      calls.push(["surface", active]);
+    },
+    show() {
+      this.visible = true;
+      calls.push(["show"]);
+    },
+    hide() {
+      this.visible = false;
+      calls.push(["hide"]);
+    },
     waitForAuthenticated: async () => calls.push(["authenticated"]),
+    waitForVisibleComposer: async () => calls.push(["visible-composer"]),
     selectHighEffort: async () => {
       throw new Error("connector verification must not select an effort");
     },
@@ -827,19 +841,21 @@ test("connector verification is effort-independent and works while the browser s
   const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-token");
 
   assert.deepEqual(result, { ok: true, appName: "lca-token" });
-  assert.equal(calls.some(([type]) => type === "show"), false);
-  assert.deepEqual(
-    calls.filter(([type]) => ["load", "helper"].includes(type)),
-    [
-      ["load", "https://chatgpt.com/?temporary-chat=true"],
-      ["helper", {
-        helper: fixture.helper,
-        descriptorPath: fixture.descriptorPath,
-        appName: "lca-token",
-        logger: fixture.logger,
-      }],
-    ],
-  );
+  assert.deepEqual(calls.filter(([type]) => ["surface", "show", "visible-composer", "helper", "hide"].includes(type)).map(([type, value]) => [type, value]), [
+    ["surface", true],
+    ["show", undefined],
+    ["visible-composer", undefined],
+    ["helper", {
+      helper: fixture.helper,
+      descriptorPath: fixture.descriptorPath,
+      appName: "lca-token",
+      logger: fixture.logger,
+    }],
+    ["hide", undefined],
+    ["surface", false],
+  ]);
+  assert.equal(fixture.visible, false);
+  assert.equal(fixture.surfaceActive, false);
 });
 
 test("connector verification has no independent CDP typing or coordinate-click path", () => {
@@ -908,9 +924,15 @@ test("a replacement helper takes over only after the previous owner exited", () 
 test("connector verification preserves an already hydrated Temporary Chat page", async () => {
   let loaded = false;
   const fixture = {
+    visible: true,
+    surfaceActive: true,
     logger: { info() {} },
     setState() {},
+    setSurfaceActive(active) { this.surfaceActive = active; },
+    show() { this.visible = true; },
+    hide() { this.visible = false; },
     waitForAuthenticated: async () => {},
+    waitForVisibleComposer: async () => {},
     helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
     descriptorPath: "/runtime/launcher-browser.json",
     verifyConnectorWithBrowserHelper: async ({ appName }) => ({ ok: true, appName }),
@@ -925,6 +947,8 @@ test("connector verification preserves an already hydrated Temporary Chat page",
   await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-token");
 
   assert.equal(loaded, false);
+  assert.equal(fixture.visible, true);
+  assert.equal(fixture.surfaceActive, true);
 });
 
 test("launcher session refresh resolves persisted authentication before setup actions", async () => {
