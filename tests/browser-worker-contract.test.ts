@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaTokenInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-token/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, CHATGPT_TEXT_DELTA_COALESCE_MS, CHATGPT_TEXT_DELTA_MIN_CHARS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTextDeltaCoalescer, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaTokenInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-token/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -871,6 +871,100 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain('checkpoint !== "response-stalled-30s"');
 });
 
+test("response polling balances visible latency with weak-machine efficiency", () => {
+  expect(CHATGPT_RESPONSE_POLL_MS).toBe(250);
+  expect(CHATGPT_RESPONSE_IDLE_POLL_MS).toBe(500);
+  const tracker = new ChatGptVisibleTraceTracker();
+  const block = [{ kind: "status", text: "Inspecting runtime state" }] as const;
+  expect(tracker.observe([...block], false, 1_000)).toEqual([]);
+  expect(tracker.observe([...block], false, 1_099)).toEqual([]);
+  expect(tracker.observe([...block], false, 1_100)).toEqual([
+    { kind: "reasoning", text: "Inspecting runtime state" },
+  ]);
+});
+
+test("short completed answers flush to Codex before the full turn completion settle window", () => {
+  const completedState = {
+    responsePresent: true,
+    running: false,
+    currentText: "Mình đang dùng GPT-5.6 Sol.",
+    currentHtml: "<p>Mình đang dùng GPT-5.6 Sol.</p>",
+    completionActionVisible: true,
+  };
+  const displayTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS);
+  const finalTracker = new ChatGptCompletionTracker();
+  expect(displayTracker.update(completedState, 1_000)).toBeFalse();
+  expect(finalTracker.update(completedState, 1_000)).toBeFalse();
+  expect(displayTracker.update(completedState, 1_250)).toBeTrue();
+  expect(finalTracker.update(completedState, 1_250)).toBeFalse();
+  expect(finalTracker.update(completedState, 3_000)).toBeTrue();
+
+  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("const displayCompletionTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS)");
+  expect(workerSource).toContain("&& displayCompletionTracker.update(completionState)");
+  expect(workerSource).toContain("const visibleFinal = markdownBuffer.flush()");
+  expect(workerSource).toContain("emitCoalescedText(visibleFinal.delta, observedAt, true)");
+  expect(workerSource).toContain("if (completionTracker.update(completionState))");
+});
+
+test("adaptive polling backs off only after repeated unchanged snapshots", () => {
+  const scheduler = new ChatGptAdaptivePollScheduler();
+  expect(scheduler.nextDelay(true)).toBe(250);
+  expect(scheduler.nextDelay(false)).toBe(250);
+  expect(scheduler.nextDelay(false)).toBe(500);
+  expect(scheduler.nextDelay(false)).toBe(500);
+  expect(scheduler.nextDelay(true)).toBe(250);
+});
+
+test("tiny final-answer deltas coalesce into one bounded pending suffix", () => {
+  expect(CHATGPT_TEXT_DELTA_MIN_CHARS).toBe(32);
+  expect(CHATGPT_TEXT_DELTA_COALESCE_MS).toBe(250);
+  const coalescer = new ChatGptTextDeltaCoalescer(32, 250);
+  expect(coalescer.push("tiny", 1_000)).toBe("");
+  expect(coalescer.push(" update", 1_100)).toBe("");
+  expect(coalescer.push("", 1_249)).toBe("");
+  expect(coalescer.push("", 1_250)).toBe("tiny update");
+  expect(coalescer.push("x".repeat(32), 2_000)).toBe("x".repeat(32));
+  expect(coalescer.flush()).toBe("");
+});
+
+test("visible trace rewrites start a fresh block instead of crashing the turn", () => {
+  const tracker = new ChatGptVisibleTraceTracker(0);
+  expect(tracker.observe([{ kind: "status", text: "Searching sources", key: "action" }], false, 1_000)).toEqual([
+    { kind: "reasoning", text: "Searching sources" },
+  ]);
+  expect(tracker.observe([{ kind: "status", text: "Reviewed sources", key: "action" }], false, 1_010)).toEqual([
+    { kind: "reasoning", text: "Reviewed sources" },
+  ]);
+});
+
+test("incomplete commentary streams a guarded stable prefix instead of waiting for the next action", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100, {
+    tailGuardChars: 8,
+    minDeltaChars: 4,
+    prefixStabilityMs: 50,
+    flushIntervalMs: 50,
+  });
+  expect(tracker.observe([
+    { kind: "commentary", text: "Checking repository architecture now", complete: false },
+  ], false, 1_000)).toEqual([]);
+  expect(tracker.observe([
+    { kind: "commentary", text: "Checking repository architecture now carefully", complete: false },
+  ], false, 1_050)).toEqual([
+    { kind: "commentary", text: "Checking repository " },
+  ]);
+  expect(tracker.observe([
+    { kind: "commentary", text: "Checking repository architecture now carefully for drift", complete: false },
+  ], false, 1_100)).toEqual([
+    { kind: "commentary", text: "architecture now ", continuation: true },
+  ]);
+  expect(tracker.observe([
+    { kind: "commentary", text: "Checking repository architecture now carefully for drift", complete: true },
+  ], false, 1_200)).toEqual([
+    { kind: "commentary", text: "carefully for drift", continuation: true },
+  ]);
+});
+
 test("visible DOM trace interleaves statuses and explicit intermediate commentary", () => {
   const tracker = new ChatGptVisibleTraceTracker(100);
   const initialBlocks = [
@@ -970,13 +1064,14 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
-  expect(workerSource).toContain('fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join("")');
-  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap");
-  expect(workerSource).toContain('key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`');
-  expect(workerSource).toContain("streamable: childIsComplete || itemIndex < listItems.length - 1");
-  expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments)");
-  expect(workerSource).not.toContain("stableHtml:");
-  expect(workerSource).not.toContain("observeStableHtml");
+  expect(workerSource).toContain("const markdownRoots = renderedRoots.map");
+  expect(workerSource).toContain("renderSignature: markdownRoots.map(candidate => fingerprint(candidate.html)).join(\"|\")");
+  expect(workerSource).toContain("markdownBuffer.observeRoots(snapshot.markdownRoots)");
+  expect(workerSource).toContain("const pollScheduler = new ChatGptAdaptivePollScheduler()");
+  expect(workerSource).toContain("const textCoalescer = new ChatGptTextDeltaCoalescer()");
+  expect(workerSource).toContain("setTimeout(resolveSleep, nextPollMs)");
+  expect(workerSource).not.toContain("markdownSegments");
+  expect(workerSource).not.toContain("streamable: childIsComplete");
   expect(workerSource).toContain("const overlapsRenderedAnswer = (candidate: HTMLElement)");
   expect(workerSource).toContain("const statusSemantic = (candidate: HTMLElement)");
   expect(workerSource).toContain('candidate.closest<HTMLElement>("button") ?? candidate');

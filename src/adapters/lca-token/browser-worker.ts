@@ -5,7 +5,7 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
-import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "./markdown";
+import { ChatGptMarkdownBuffer, type ChatGptMarkdownRoot } from "./markdown";
 import { resolveLcaTokenModelMode, type LcaTokenCapabilities, type LcaTokenModelMode } from "./model";
 import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaTokenPrompt, type LcaTokenPromptImage } from "./prompt";
 import { estimateCompiledLcaTokenInputTokens } from "./usage";
@@ -51,6 +51,10 @@ export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+export const CHATGPT_RESPONSE_POLL_MS = 250;
+export const CHATGPT_RESPONSE_IDLE_POLL_MS = 500;
+export const CHATGPT_TEXT_DELTA_COALESCE_MS = 250;
+export const CHATGPT_TEXT_DELTA_MIN_CHARS = 32;
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -258,6 +262,55 @@ export class ChatGptCompletionTracker {
   }
 }
 
+/** Back off DOM polling after unchanged snapshots while returning to the active cadence immediately. */
+export class ChatGptAdaptivePollScheduler {
+  private unchangedPolls = 0;
+
+  constructor(
+    private readonly activeMs = CHATGPT_RESPONSE_POLL_MS,
+    private readonly idleMs = CHATGPT_RESPONSE_IDLE_POLL_MS,
+    private readonly idleAfterPolls = 2,
+  ) {}
+
+  nextDelay(changed: boolean): number {
+    if (changed) {
+      this.unchangedPolls = 0;
+      return this.activeMs;
+    }
+    this.unchangedPolls += 1;
+    return this.unchangedPolls >= this.idleAfterPolls ? this.idleMs : this.activeMs;
+  }
+}
+
+/** Keep at most one pending final-answer suffix so weak clients do not accumulate tiny SSE frames. */
+export class ChatGptTextDeltaCoalescer {
+  private pending = "";
+  private pendingSince?: number;
+
+  constructor(
+    private readonly minChars = CHATGPT_TEXT_DELTA_MIN_CHARS,
+    private readonly maxDelayMs = CHATGPT_TEXT_DELTA_COALESCE_MS,
+  ) {}
+
+  push(delta: string, now = Date.now()): string {
+    if (delta) {
+      if (!this.pending) this.pendingSince = now;
+      this.pending += delta;
+    }
+    if (!this.pending) return "";
+    if (this.pending.length >= this.minChars) return this.flush();
+    if (this.pendingSince !== undefined && now - this.pendingSince >= this.maxDelayMs) return this.flush();
+    return "";
+  }
+
+  flush(): string {
+    const delta = this.pending;
+    this.pending = "";
+    this.pendingSince = undefined;
+    return delta;
+  }
+}
+
 export class ChatGptTurnDomHealthTracker {
   private sawResponse = false;
   private missingResponseSince?: number;
@@ -333,8 +386,8 @@ export interface ChatGptVisibleTraceEvent {
 interface ChatGptResponseDomSnapshot {
   responsePresent: boolean;
   visibleText: string;
-  fullHtml: string;
-  markdownSegments: ChatGptMarkdownSegment[];
+  markdownRoots: ChatGptMarkdownRoot[];
+  renderSignature: string;
   completionActionVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -342,18 +395,53 @@ interface ChatGptResponseDomSnapshot {
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   responsePresent: false,
   visibleText: "",
-  fullHtml: "",
-  markdownSegments: [],
+  markdownRoots: [],
+  renderSignature: "",
   completionActionVisible: false,
   traceBlocks: [],
 });
 
+interface ChatGptTraceStreamingOptions {
+  tailGuardChars?: number;
+  minDeltaChars?: number;
+  prefixStabilityMs?: number;
+  flushIntervalMs?: number;
+}
+
+function traceCommonPrefixLength(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) index += 1;
+  return index;
+}
+
+function traceSafePrefixCutoff(text: string, maximum: number): number {
+  const bounded = Math.min(Math.max(0, maximum), text.length);
+  for (let index = bounded; index > 0; index -= 1) {
+    if (/\s|[.,;:!?)]/.test(text[index - 1]!)) return index;
+  }
+  return 0;
+}
+
 /** Convert the public ChatGPT turn DOM into append-only Codex reasoning summaries. */
 export class ChatGptVisibleTraceTracker {
   private readonly emittedTrace = new Map<string, string>();
-  private readonly traceCandidates = new Map<string, { text: string; changedAt: number }>();
+  private readonly traceCandidates = new Map<string, { text: string; changedAt: number; observedAt: number }>();
+  private readonly commentaryFlushAt = new Map<string, number>();
+  private readonly tailGuardChars: number;
+  private readonly minDeltaChars: number;
+  private readonly prefixStabilityMs: number;
+  private readonly flushIntervalMs: number;
 
-  constructor(private readonly traceStabilityMs = 250) {}
+  constructor(
+    private readonly traceStabilityMs = 100,
+    options: ChatGptTraceStreamingOptions = {},
+  ) {
+    this.tailGuardChars = options.tailGuardChars ?? 64;
+    this.minDeltaChars = options.minDeltaChars ?? 16;
+    this.prefixStabilityMs = options.prefixStabilityMs ?? 100;
+    this.flushIntervalMs = options.flushIntervalMs ?? 150;
+  }
 
   observe(blocks: ChatGptVisibleTraceBlock[], completionActionVisible: boolean, now = Date.now()): ChatGptVisibleTraceEvent[] {
     const output: ChatGptVisibleTraceEvent[] = [];
@@ -374,28 +462,51 @@ export class ChatGptVisibleTraceTracker {
         .trim();
       const text = block.kind === "status" ? stripped.replace(/\s+/g, " ") : stripped;
       if (!text) continue;
-      let candidate = this.traceCandidates.get(slot);
+      const previousCandidate = this.traceCandidates.get(slot);
+      let candidate = previousCandidate;
       if (!candidate || candidate.text !== text) {
-        candidate = { text, changedAt: now };
+        candidate = { text, changedAt: now, observedAt: now };
         this.traceCandidates.set(slot, candidate);
-        if (!completionActionVisible && this.traceStabilityMs > 0) continue;
+      } else {
+        candidate = { ...candidate, observedAt: now };
+        this.traceCandidates.set(slot, candidate);
       }
-      // A commentary Markdown root remains mutable until ChatGPT appends the next reasoning item.
-      // Emitting it earlier lets a tool-status boundary split one semantic paragraph into multiple
-      // Codex messages. The next anchored item (or final completion evidence) is the stable boundary.
-      if (block.kind === "commentary" && block.complete === false && !completionActionVisible) continue;
-      if (!completionActionVisible && now - candidate.changedAt < this.traceStabilityMs) continue;
 
-      const previous = this.emittedTrace.get(slot);
+      const previous = this.emittedTrace.get(slot) ?? "";
+      const kind = block.kind === "commentary" ? "commentary" : "reasoning";
+      if (previous && !text.startsWith(previous)) {
+        // Visible status/commentary can be rewritten by ChatGPT's renderer. Responses cannot retract,
+        // so start a fresh visible block after the normal stability window instead of crashing.
+        if (!completionActionVisible && now - candidate.changedAt < this.traceStabilityMs) continue;
+        this.emittedTrace.set(slot, text);
+        this.commentaryFlushAt.set(slot, now);
+        output.push({ kind, text });
+        continue;
+      }
+
+      if (block.kind === "commentary" && block.complete === false && !completionActionVisible) {
+        if (!previousCandidate || now - previousCandidate.observedAt < this.prefixStabilityMs) continue;
+        const stableLength = traceCommonPrefixLength(previousCandidate.text, text);
+        const cutoff = traceSafePrefixCutoff(text, stableLength - this.tailGuardChars);
+        if (cutoff - previous.length < this.minDeltaChars) continue;
+        const lastFlushAt = this.commentaryFlushAt.get(slot) ?? Number.NEGATIVE_INFINITY;
+        if (now - lastFlushAt < this.flushIntervalMs) continue;
+        const prefix = text.slice(0, cutoff);
+        this.emittedTrace.set(slot, prefix);
+        this.commentaryFlushAt.set(slot, now);
+        output.push(previous
+          ? { kind, text: prefix.slice(previous.length), continuation: true }
+          : { kind, text: prefix });
+        continue;
+      }
+
+      if (!completionActionVisible && now - candidate.changedAt < this.traceStabilityMs) continue;
       if (previous === text) continue;
       this.emittedTrace.set(slot, text);
-      const kind = block.kind === "commentary" ? "commentary" : "reasoning";
-
-      if (previous && text.startsWith(previous)) {
-        output.push({ kind, text: text.slice(previous.length), continuation: true });
-      } else {
-        output.push({ kind, text });
-      }
+      this.commentaryFlushAt.set(slot, now);
+      output.push(previous
+        ? { kind, text: text.slice(previous.length), continuation: true }
+        : { kind, text });
     }
     return output;
   }
@@ -1298,55 +1409,8 @@ export class ChatGptBrowserWorker {
       const renderedRoots = allMarkdownRoots.filter(candidate => (
         candidate.closest("[data-streaming-response-status]") === null
       ));
-      const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) => {
-        const rootIsComplete = rootIndex < renderedRoots.length - 1;
-        const hasDirectText = [...markdownRoot.childNodes].some(node => (
-          node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
-        ));
-        const children = [...markdownRoot.children] as HTMLElement[];
-        if (hasDirectText || children.length === 0) {
-          return markdownRoot.innerHTML.trim() ? [{
-            key: `${rootIndex}:root`,
-            html: markdownRoot.innerHTML,
-            text: markdownRoot.innerText.trim(),
-            streamable: rootIsComplete,
-          }] : [];
-        }
-
-        return children.flatMap((child, childIndex) => {
-          const tag = child.tagName.toLowerCase();
-          const childIsComplete = rootIsComplete || childIndex < children.length - 1;
-          const listItems = tag === "ol" || tag === "ul"
-            ? [...child.children].filter(candidate => candidate.tagName === "LI") as HTMLElement[]
-            : [];
-          if (listItems.length === 0) {
-            return [{
-              key: `${rootIndex}:${childIndex}:${tag}`,
-              html: child.outerHTML,
-              text: child.innerText.trim(),
-              streamable: childIsComplete,
-            }];
-          }
-
-          const group = `${rootIndex}:${childIndex}:${tag}`;
-          const orderedStart = tag === "ol" ? Number(child.getAttribute("start") ?? "1") : undefined;
-          return listItems.map((item, itemIndex) => {
-            const shell = child.cloneNode(false) as HTMLElement;
-            shell.removeAttribute("data-is-last-node");
-            if (orderedStart !== undefined && Number.isFinite(orderedStart)) {
-              shell.setAttribute("start", String(orderedStart + itemIndex));
-            }
-            shell.append(item.cloneNode(true));
-            return {
-              key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`,
-              html: shell.outerHTML,
-              text: item.innerText.trim(),
-              group,
-              streamable: childIsComplete || itemIndex < listItems.length - 1,
-            };
-          });
-        });
-      });
+      // Mirror the whole visible final-answer DOM. The Markdown buffer compares consecutive full
+      // snapshots, so nested wrappers and structural Markdown never become one giant "last block".
       const rendered = renderedRoots.at(-1);
       const completionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
@@ -1435,11 +1499,23 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
+      const markdownRoots = renderedRoots.map((candidate, index) => ({
+        key: `root:${index}`,
+        html: candidate.innerHTML,
+      }));
+      const fingerprint = (value: string): string => {
+        let hash = 2166136261;
+        for (let index = 0; index < value.length; index += 1) {
+          hash ^= value.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return `${value.length}:${hash >>> 0}`;
+      };
       return {
         responsePresent: true,
         visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
-        fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
-        markdownSegments,
+        markdownRoots,
+        renderSignature: markdownRoots.map(candidate => fingerprint(candidate.html)).join("|"),
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
@@ -1658,8 +1734,18 @@ export class ChatGptBrowserWorker {
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
+      const textCoalescer = new ChatGptTextDeltaCoalescer();
+      const pollScheduler = new ChatGptAdaptivePollScheduler();
+      const displayCompletionTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS);
       const completionTracker = new ChatGptCompletionTracker();
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let completionTailFlushed = false;
+      let previousActivitySignature = "";
+      const emitCoalescedText = (delta: string, now: number, force = false) => {
+        let ready = textCoalescer.push(delta, now);
+        if (force) ready += textCoalescer.flush();
+        if (ready) turn.onTextDelta(ready);
+      };
       for (;;) {
         if (page.isClosed()) {
           throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
@@ -1696,17 +1782,27 @@ export class ChatGptBrowserWorker {
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
+        const activitySignature = [
+          running ? "1" : "0",
+          snapshot.completionActionVisible ? "1" : "0",
+          snapshot.renderSignature,
+          ...snapshot.traceBlocks.map(block => `${block.kind}:${block.key ?? ""}:${block.text}`),
+        ].join("\0");
+        const activityChanged = activitySignature !== previousActivitySignature;
+        previousActivitySignature = activitySignature;
+        const nextPollMs = pollScheduler.nextDelay(activityChanged);
+        const observedAt = Date.now();
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
-          const textDelta = markdownBuffer.observe(snapshot.markdownSegments);
-          for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
+          const textDelta = markdownBuffer.observeRoots(snapshot.markdownRoots);
+          for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible, observedAt)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
-          if (textDelta) turn.onTextDelta(textDelta);
+          emitCoalescedText(textDelta, observedAt);
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -1714,13 +1810,21 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
-          if (completionTracker.update({
+          const completionState = {
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
-            currentHtml: snapshot.fullHtml,
+            currentHtml: snapshot.renderSignature,
             completionActionVisible: snapshot.completionActionVisible,
-          })) {
+          };
+          if (!completionTailFlushed
+            && snapshot.visibleText !== "api_tool unavailable"
+            && displayCompletionTracker.update(completionState)) {
+            const visibleFinal = markdownBuffer.flush();
+            emitCoalescedText(visibleFinal.delta, observedAt, true);
+            completionTailFlushed = true;
+          }
+          if (completionTracker.update(completionState)) {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
             }
@@ -1728,7 +1832,7 @@ export class ChatGptBrowserWorker {
             if (!final.markdown && snapshot.visibleText) {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
-            if (final.delta) turn.onTextDelta(final.delta);
+            emitCoalescedText(final.delta, observedAt, true);
             finalText = final.markdown;
             break;
           }
@@ -1751,7 +1855,7 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        await new Promise(resolveSleep => setTimeout(resolveSleep, nextPollMs));
       }
 
       if (this.context && this.config.browserHost === "managed-chrome") {

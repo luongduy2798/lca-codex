@@ -47,116 +47,169 @@ export interface ChatGptMarkdownSegment {
   text: string;
   group?: string;
   streamable: boolean;
+  /** Plain prose-like blocks may stream a guarded stable prefix before the next DOM block exists. */
+  incremental?: boolean;
 }
 
-interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
-  changedAt: number;
-  streamableAt?: number;
-}
-
-interface CommittedChatGptMarkdownSegment {
+export interface ChatGptMarkdownRoot {
   key: string;
-  text: string;
+  html: string;
+}
+
+interface CachedChatGptMarkdownRoot extends ChatGptMarkdownRoot {
+  markdown: string;
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) index += 1;
+  return index;
+}
+
+function suffixPrefixOverlapLength(left: string, right: string, minimum = 32, maximum = 8_192): number {
+  const limit = Math.min(left.length, right.length, maximum);
+  if (limit < minimum) return 0;
+  const pattern = right.slice(0, limit);
+  const text = left.slice(-limit);
+  const prefix = new Array<number>(pattern.length).fill(0);
+  for (let index = 1, matched = 0; index < pattern.length;) {
+    if (pattern[index] === pattern[matched]) {
+      prefix[index++] = ++matched;
+    } else if (matched > 0) {
+      matched = prefix[matched - 1]!;
+    } else {
+      prefix[index++] = 0;
+    }
+  }
+  let matched = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    while (matched > 0 && pattern[matched] !== char) matched = prefix[matched - 1]!;
+    if (pattern[matched] === char) matched += 1;
+    if (matched === pattern.length && index < text.length - 1) {
+      // A full match before the text ends cannot be the final suffix; continue with its fallback.
+      matched = prefix[matched - 1]!;
+    }
+  }
+  return matched >= minimum ? matched : 0;
+}
+
+function segmentsToMarkdown(segments: ChatGptMarkdownSegment[]): string {
+  let markdown = "";
+  let lastGroup: string | undefined;
+  for (const segment of segments) {
+    const block = chatGptHtmlToMarkdown(segment.html);
+    if (!block) continue;
+    const separator = markdown
+      ? segment.group !== undefined && segment.group === lastGroup ? "\n" : "\n\n"
+      : "";
+    markdown += `${separator}${block}`;
+    lastGroup = segment.group;
+  }
+  return markdown;
 }
 
 /**
- * Converts structurally completed ChatGPT DOM blocks into an append-only Markdown stream.
+ * Mirrors the Markdown currently visible in ChatGPT into an append-only Codex stream.
  *
- * ChatGPT can rewrite old HTML while hydrating citations and controls, so a character prefix is
- * not a safe commit boundary. The browser supplies semantic blocks and marks a block streamable
- * only after a following block exists. Each completed block must then remain byte-stable for the
- * configured window. Once committed, presentation-only HTML rewrites are harmless; changing its
- * visible text is an explicit protocol error because Responses deltas cannot be retracted.
+ * There is deliberately no block-type gating. Every poll serializes the whole visible answer. The
+ * common prefix shared by the previous and current snapshots is already proven to have remained on
+ * screen for one poll, so that prefix can be appended immediately. This naturally streams headings,
+ * lists, bold text and code without waiting for a following DOM block: Markdown closing markers that
+ * move as text grows simply fall outside the common prefix until they stop moving.
  */
 export class ChatGptMarkdownBuffer {
-  private readonly candidates = new Map<number, ChatGptMarkdownCandidate>();
-  private readonly committed: CommittedChatGptMarkdownSegment[] = [];
-  private latest: ChatGptMarkdownSegment[] = [];
-  private markdown = "";
-  private lastGroup: string | undefined;
+  private previousSnapshot = "";
+  private latestSnapshot = "";
+  private emitted = "";
+  private finished = false;
+  private rootCache = new Map<string, CachedChatGptMarkdownRoot>();
 
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
-    private readonly stabilityMs = 750,
-  ) {
-    if (!Number.isFinite(stabilityMs) || stabilityMs < 0) {
-      throw new Error("ChatGPT Markdown stability window must be a non-negative finite number");
-    }
+    _legacyStabilityMs = 0,
+    _legacyOptions: Record<string, number> = {},
+    private readonly serializeHtml: (html: string) => string = chatGptHtmlToMarkdown,
+  ) {}
+
+  /** Legacy segment entry point retained for focused tests and callers outside the browser worker. */
+  observe(segments: ChatGptMarkdownSegment[]): string {
+    return this.observeMarkdown(this.transform(segmentsToMarkdown(segments)));
   }
 
-  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
-    this.assertCommittedPrefix(segments);
-    this.latest = segments.map(segment => ({ ...segment }));
+  /** Legacy single-root entry point. Production uses observeRoots so unchanged roots stay cached. */
+  observeHtml(html: string): string {
+    return this.observeRoots([{ key: "root", html }]);
+  }
 
-    for (let index = this.committed.length; index < segments.length; index += 1) {
-      const segment = segments[index]!;
-      const previous = this.candidates.get(index);
-      const unchanged = previous
-        && previous.key === segment.key
-        && previous.html === segment.html
-        && previous.text === segment.text
-        && previous.group === segment.group;
-      this.candidates.set(index, {
-        ...segment,
-        changedAt: unchanged ? previous.changedAt : now,
-        ...(segment.streamable ? {
-          streamableAt: unchanged && previous.streamableAt !== undefined
-            ? previous.streamableAt
-            : now,
-        } : {}),
-      });
+  /**
+   * Serialize only final-answer roots whose HTML changed since the previous poll. The cache contains
+   * current roots only, so retained DOM/Markdown state stays bounded even if ChatGPT replaces roots.
+   */
+  observeRoots(roots: ChatGptMarkdownRoot[]): string {
+    const nextCache = new Map<string, CachedChatGptMarkdownRoot>();
+    const markdownRoots: string[] = [];
+    for (const root of roots) {
+      const cached = this.rootCache.get(root.key);
+      const markdown = cached?.html === root.html ? cached.markdown : this.serializeHtml(root.html);
+      nextCache.set(root.key, { ...root, markdown });
+      if (markdown) markdownRoots.push(markdown);
     }
-    for (const index of this.candidates.keys()) {
-      if (index >= segments.length) this.candidates.delete(index);
-    }
+    this.rootCache = nextCache;
+    return this.observeMarkdown(this.transform(markdownRoots.join("\n\n")));
+  }
 
-    let delta = "";
-    while (this.committed.length < segments.length) {
-      const index = this.committed.length;
-      const candidate = this.candidates.get(index);
-      if (!candidate?.streamable || candidate.streamableAt === undefined) break;
-      if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
-      delta += this.commit(candidate);
-      this.committed.push({ key: candidate.key, text: candidate.text });
-      this.candidates.delete(index);
-    }
-    return delta;
+  /** Flush everything currently visible without declaring the browser turn final. */
+  flush(): { markdown: string; delta: string } {
+    if (this.finished) return { markdown: this.emitted, delta: "" };
+    if (!this.latestSnapshot.startsWith(this.emitted)) return { markdown: this.emitted, delta: "" };
+    const delta = this.latestSnapshot.slice(this.emitted.length);
+    this.emitted = this.latestSnapshot;
+    return { markdown: this.emitted, delta };
   }
 
   finish(): { markdown: string; delta: string } {
-    this.assertCommittedPrefix(this.latest);
+    if (this.finished) return { markdown: this.emitted, delta: "" };
     let delta = "";
-    for (let index = this.committed.length; index < this.latest.length; index += 1) {
-      const segment = this.latest[index]!;
-      delta += this.commit(segment);
-      this.committed.push({ key: segment.key, text: segment.text });
+    if (this.latestSnapshot.startsWith(this.emitted)) {
+      delta = this.latestSnapshot.slice(this.emitted.length);
+    } else if (this.latestSnapshot !== this.emitted) {
+      // Responses deltas cannot retract. A rare late rewrite therefore starts a fresh correction
+      // paragraph instead of crashing the turn or withholding the final visible answer forever.
+      delta = this.emitted ? `\n\n${this.latestSnapshot}` : this.latestSnapshot;
     }
-    this.candidates.clear();
-    return { markdown: this.markdown, delta };
+    this.emitted += delta;
+    this.finished = true;
+    return { markdown: this.emitted, delta };
   }
 
-  private assertCommittedPrefix(segments: ChatGptMarkdownSegment[]): void {
-    if (segments.length < this.committed.length) {
-      throw new Error("ChatGPT removed a completed text block that was already streamed to Codex");
+  private observeMarkdown(visibleCurrent: string): string {
+    if (this.finished) return "";
+    let current = visibleCurrent;
+    if (!current.startsWith(this.emitted) && this.emitted) {
+      // Long ChatGPT answers may virtualize older DOM and leave only a visible suffix. Reconstruct
+      // the append-only snapshot from a substantial emitted-suffix/current-prefix overlap instead
+      // of treating this as a rewrite. A true incompatible rewrite still pauses and is handled once.
+      const overlap = suffixPrefixOverlapLength(this.emitted, current);
+      if (overlap > 0) current = `${this.emitted}${current.slice(overlap)}`;
     }
-    for (let index = 0; index < this.committed.length; index += 1) {
-      const previous = this.committed[index]!;
-      const current = segments[index]!;
-      if (current.key !== previous.key || current.text !== previous.text) {
-        throw new Error("ChatGPT changed a completed text block that was already streamed to Codex");
-      }
+    if (!current.startsWith(this.emitted)) {
+      // Do not replace the last compatible snapshot with a pure DOM shrink. If this is a real late
+      // rewrite, keep it as the final candidate so finish() can append one bounded correction.
+      if (current.length >= this.emitted.length) this.latestSnapshot = current;
+      this.previousSnapshot = current;
+      return "";
     }
-  }
-
-  private commit(segment: ChatGptMarkdownSegment): string {
-    const block = this.transform(chatGptHtmlToMarkdown(segment.html));
-    if (!block) return "";
-    const separator = this.markdown
-      ? segment.group !== undefined && segment.group === this.lastGroup ? "\n" : "\n\n"
-      : "";
-    const delta = `${separator}${block}`;
-    this.markdown += delta;
-    this.lastGroup = segment.group;
+    this.latestSnapshot = current;
+    const stableLength = commonPrefixLength(this.previousSnapshot, current);
+    if (stableLength < this.emitted.length) {
+      this.previousSnapshot = current;
+      return "";
+    }
+    const delta = current.slice(this.emitted.length, stableLength);
+    if (delta) this.emitted += delta;
+    this.previousSnapshot = current;
     return delta;
   }
 }

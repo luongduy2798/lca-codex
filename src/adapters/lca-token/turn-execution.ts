@@ -81,7 +81,8 @@ export class ChatGptTextFeed {
   push(delta: string): void {
     if (!delta) return;
     this.text += delta;
-    this.queued.push(delta);
+    if (this.queued.length === 0) this.queued.push(delta);
+    else this.queued[this.queued.length - 1] += delta;
     const waiter = this.waiters.values().next().value as TextWaiter | undefined;
     if (!waiter) return;
     this.waiters.delete(waiter);

@@ -846,61 +846,139 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(tracker.update({ ...state, running: true }, 8_100)).toBe(false);
   });
 
-  test("preserves GFM formatting while streaming only completed stable DOM blocks", () => {
-    const heading = '<h2 data-start="0" data-end="15">Format Probe</h2>';
-    const bold = '<p data-start="16" data-end="24"><strong>bold</strong></p>';
-    const alpha = '<ul><li><p>alpha</p></li></ul>';
-    const beta = '<ul><li><p>beta</p></li></ul>';
-    const list = '<ul><li><p>alpha</p></li><li><p>beta</p></li></ul>';
-    const html = `${heading}${bold}${list}`;
+  test("preserves GFM formatting in complete visible snapshots", () => {
+    const html = [
+      '<h2 data-start="0" data-end="15">Format Probe</h2>',
+      '<p data-start="16" data-end="24"><strong>bold</strong></p>',
+      '<ul><li><p>alpha</p></li><li><p>beta</p></li></ul>',
+    ].join("");
     expect(chatGptHtmlToMarkdown(html)).toBe("## Format Probe\n\n**bold**\n\n- alpha\n- beta");
+  });
 
-    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
-    const first = [
-      { key: "heading", html: heading, text: "Format Probe", streamable: true },
-      { key: "bold", html: bold, text: "bold", streamable: false },
-    ];
-    expect(buffer.observe(first, 0)).toBe("");
-    expect(buffer.observe(first, 100)).toBe("## Format Probe");
+  test("mirrors structured Markdown after one poll without waiting for blocks to complete", () => {
+    const prefixLength = (left: string, right: string) => {
+      let index = 0;
+      while (index < left.length && index < right.length && left[index] === right[index]) index++;
+      return index;
+    };
+    const firstHtml = [
+      "<div>",
+      "<h2>Plan</h2>",
+      "<p><strong>Runtime</strong>: inspect</p>",
+      "<ul><li>alpha</li><li>beta</li></ul>",
+      "<p>Use <code>run()</code> now</p>",
+      "<pre><code>const x = 1;</code></pre>",
+      "</div>",
+    ].join("");
+    const secondHtml = firstHtml.replace("const x = 1;", "const x = 1;\nconst y = 2;");
+    const thirdHtml = firstHtml.replace("const x = 1;", "const x = 1;\nconst y = 2;\nconst z = 3;");
+    const firstMarkdown = chatGptHtmlToMarkdown(firstHtml);
+    const secondMarkdown = chatGptHtmlToMarkdown(secondHtml);
+    const thirdMarkdown = chatGptHtmlToMarkdown(thirdHtml);
+    const firstStable = firstMarkdown.slice(0, prefixLength(firstMarkdown, secondMarkdown));
+    const secondStable = secondMarkdown.slice(0, prefixLength(secondMarkdown, thirdMarkdown));
 
-    const expanded = [
-      { key: "heading", html: heading, text: "Format Probe", streamable: true },
-      { key: "bold", html: bold, text: "bold", streamable: true },
-      { key: "alpha", html: alpha, text: "alpha", group: "list", streamable: true },
-      { key: "beta", html: beta, text: "beta", group: "list", streamable: false },
+    const buffer = new ChatGptMarkdownBuffer();
+    expect(buffer.observeHtml(firstHtml)).toBe("");
+    expect(buffer.observeHtml(secondHtml)).toBe(firstStable);
+    expect(firstStable).toContain("## Plan");
+    expect(firstStable).toContain("**Runtime**");
+    expect(firstStable).toContain("- alpha\n- beta");
+    expect(firstStable).toContain("`run()`");
+    expect(firstStable).toContain("const x = 1;");
+    expect(buffer.observeHtml(thirdHtml)).toBe(secondStable.slice(firstStable.length));
+    const final = buffer.finish();
+    expect(final.markdown).toBe(thirdMarkdown);
+    expect(`${firstStable}${secondStable.slice(firstStable.length)}${final.delta}`).toBe(thirdMarkdown);
+  });
+
+  test("unchanged Markdown roots reuse cached serialization and only changed roots rerun Turndown", () => {
+    let serializations = 0;
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0, {}, html => {
+      serializations += 1;
+      return chatGptHtmlToMarkdown(html);
+    });
+    const roots = [
+      { key: "root:0", html: "<h2>Plan</h2><p>Stable section</p>" },
+      { key: "root:1", html: "<p>Growing tail</p>" },
     ];
-    expect(buffer.observe(expanded, 150)).toBe("");
-    expect(buffer.observe(expanded, 250)).toBe("\n\n**bold**\n\n- alpha");
+    expect(buffer.observeRoots(roots)).toBe("");
+    expect(serializations).toBe(2);
+    buffer.observeRoots(roots);
+    expect(serializations).toBe(2);
+    buffer.observeRoots([
+      roots[0]!,
+      { key: "root:1", html: "<p>Growing tail with more text</p>" },
+    ]);
+    expect(serializations).toBe(3);
+    buffer.observeRoots([{ key: "root:1", html: "<p>Growing tail with more text</p>" }]);
+    expect(serializations).toBe(3);
+  });
+
+  test("large answers keep Markdown serialization proportional to changed roots", () => {
+    let serializations = 0;
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0, {}, html => {
+      serializations += 1;
+      return chatGptHtmlToMarkdown(html);
+    });
+    const roots = Array.from({ length: 40 }, (_unused, index) => ({
+      key: `root:${index}`,
+      html: `<p>Section ${index} ${"x".repeat(2_000)}</p>`,
+    }));
+    buffer.observeRoots(roots);
+    expect(serializations).toBe(40);
+    for (let revision = 1; revision <= 20; revision += 1) {
+      buffer.observeRoots([
+        ...roots.slice(0, -1),
+        { key: "root:39", html: `<p>Section 39 ${"x".repeat(2_000)} revision ${revision}</p>` },
+      ]);
+    }
+    expect(serializations).toBe(60);
+  });
+
+  test("virtualized DOM prefixes reconnect through emitted suffix overlap", () => {
+    const head = "Head section remains cached before virtualization. ";
+    const overlap = "Shared overlap that is comfortably longer than thirty two characters. ";
+    const buffer = new ChatGptMarkdownBuffer();
+    expect(buffer.observeHtml(`<p>${head}${overlap}</p>`)).toBe("");
+    expect(buffer.observeHtml(`<p>${head}${overlap}Tail one.</p>`)).toBe(`${head}${overlap}`.trimEnd());
+    expect(buffer.observeHtml(`<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail one.");
+    expect(buffer.observeHtml(`<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail two.");
     expect(buffer.finish()).toEqual({
-      delta: "\n- beta",
-      markdown: "## Format Probe\n\n**bold**\n\n- alpha\n- beta",
+      markdown: `${head}${overlap}Tail one. Tail two.`,
+      delta: "",
     });
   });
 
-  test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
-    const plain = "<p>Source</p>";
-    const linked = '<p><a href="https://example.com">Source</a></p>';
-    const hydrated = new ChatGptMarkdownBuffer(markdown => markdown, 100);
-    expect(hydrated.observe([
-      { key: "source", html: plain, text: "Source", streamable: true },
-    ], 0)).toBe("");
-    expect(hydrated.observe([
-      { key: "source", html: linked, text: "Source", streamable: true },
-    ], 50)).toBe("");
-    expect(hydrated.observe([
-      { key: "source", html: linked, text: "Source", streamable: true },
-    ], 150)).toBe("[Source](https://example.com)");
-    expect(hydrated.observe([
-      { key: "source", html: `${linked}<button>Copy</button>`, text: "Source", streamable: true },
-    ], 200)).toBe("");
+  test("nested renderer wrappers do not turn a multi-section answer into one delayed block", () => {
+    const firstHtml = "<div><div><h3>Feature plan</h3><p>First section</p></div></div>";
+    const secondHtml = "<div><div><h3>Feature plan</h3><p>First section grows while visible</p></div></div>";
+    const buffer = new ChatGptMarkdownBuffer();
+    expect(buffer.observeHtml(firstHtml)).toBe("");
+    const delta = buffer.observeHtml(secondHtml);
+    expect(delta).toContain("### Feature plan");
+    expect(delta).toContain("First section");
+  });
 
-    const rewritten = new ChatGptMarkdownBuffer(markdown => markdown, 100);
-    const source = [{ key: "source", html: plain, text: "Source", streamable: true }];
-    expect(rewritten.observe(source, 0)).toBe("");
-    expect(rewritten.observe(source, 100)).toBe("Source");
-    expect(() => rewritten.observe([
-      { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
-    ], 200)).toThrow("completed text block");
+  test("temporary visible rewrites pause append-only mirroring and resume when the emitted prefix returns", () => {
+    const buffer = new ChatGptMarkdownBuffer();
+    expect(buffer.observeHtml("<p>Alpha beta</p>")).toBe("");
+    expect(buffer.observeHtml("<p>Alpha beta gamma</p>")).toBe("Alpha beta");
+    expect(buffer.observeHtml("<p>Alpha zeta gamma</p>")).toBe("");
+    expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe("");
+    expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe(" gamma delta");
+    expect(buffer.finish()).toEqual({ markdown: "Alpha beta gamma delta", delta: "" });
+  });
+
+  test("a permanent late rewrite is appended as a final correction instead of crashing the turn", () => {
+    const buffer = new ChatGptMarkdownBuffer();
+    expect(buffer.observeHtml("<p>Original answer</p>")).toBe("");
+    expect(buffer.observeHtml("<p>Original answer grows</p>")).toBe("Original answer");
+    expect(buffer.observeHtml("<p>Rewritten final answer</p>")).toBe("");
+    expect(buffer.finish()).toEqual({
+      delta: "\n\nRewritten final answer",
+      markdown: "Original answer\n\nRewritten final answer",
+    });
   });
 
   test("drops decorative HTML images without removing textual links", () => {
