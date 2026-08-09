@@ -25,7 +25,6 @@ import type {
 
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
-const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.gif", import.meta.url).href,
   new URL("./assets/mcp-connect-connector.gif", import.meta.url).href,
@@ -140,14 +139,11 @@ function LauncherShell({
     snapshot.state.coreSetupComplete && snapshot.state.codexCatalogVerified ? "browser" : "setup",
   );
   const [codexRootRequest, setCodexRootRequest] = useState(0);
-  const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
-  const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
-  const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
-  const browserSurfaceActive = surface === "browser" && !(compactSidebar && sidebarOpen);
+  const browserSurfaceActive = surface === "browser";
   const needsBrowser = browser?.authenticated !== true;
   const needsSetup = !needsBrowser
     && (snapshot.state.coreSetupComplete !== true || snapshot.state.codexCatalogVerified !== true);
@@ -202,17 +198,6 @@ function LauncherShell({
   }, [browserSlot, browserSurfaceActive, setError]);
 
   useEffect(() => {
-    const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
-    const apply = () => {
-      setCompactSidebar(media.matches);
-      setSidebarOpen(!media.matches);
-    };
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
-  }, []);
-
-  useEffect(() => {
     const reminderAt = snapshot.state.sessionRefreshReminderAt;
     const reminderTime = reminderAt === null ? Number.NaN : Date.parse(reminderAt);
     if (browser?.authenticated !== true || !Number.isFinite(reminderTime)) {
@@ -235,20 +220,8 @@ function LauncherShell({
     if (show) await api!.showBrowser();
   }, []);
 
-  const toggleSidebar = () => {
-    const next = !sidebarOpen;
-    if (compactSidebar && next && surface === "browser") {
-      void api!.setBrowserSurfaceActive(false)
-        .then(() => setSidebarOpen(true))
-        .catch((cause) => setError(messageOf(cause)));
-      return;
-    }
-    setSidebarOpen(next);
-  };
-
   const navigateSurface = (next: Surface) => {
     setSurface(next);
-    if (compactSidebar) setSidebarOpen(false);
   };
 
   const navigateCodexRoot = () => {
@@ -297,30 +270,12 @@ function LauncherShell({
   return (
     <motion.main
       animate={{ opacity: 1 }}
-      className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}`}
+      className="app-shell"
       initial={{ opacity: 0 }}
     >
-      <TitleBar
-        copy={copy}
-        sidebarOpen={sidebarOpen}
-        toggleSidebar={toggleSidebar}
-      />
+      <TitleBar />
 
-      {compactSidebar && sidebarOpen ? (
-        <button
-          aria-label={copy.hideSidebar}
-          className="sidebar-backdrop"
-          onClick={() => setSidebarOpen(false)}
-          type="button"
-        />
-      ) : null}
-
-      <motion.aside
-        animate={{ width: sidebarOpen ? "var(--sidebar-width)" : 0 }}
-        className="app-sidebar"
-        initial={false}
-        transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
-      >
+      <aside className="app-sidebar">
         <div className="sidebar-clip">
           <div className="sidebar-content">
             <div className="sidebar-brand-row">
@@ -423,7 +378,7 @@ function LauncherShell({
             </div>
           </div>
         </div>
-      </motion.aside>
+      </aside>
 
       <section className="workspace">
         <AnimatePresence mode="wait" initial={false}>
@@ -511,26 +466,8 @@ function LauncherShell({
   );
 }
 
-function TitleBar({
-  copy,
-  sidebarOpen,
-  toggleSidebar,
-}: {
-  copy: Copy;
-  sidebarOpen: boolean;
-  toggleSidebar: () => void;
-}) {
-  return (
-    <header className="app-titlebar draggable">
-      <div className="titlebar-left no-drag">
-        <IconButton
-          icon="sidebar"
-          label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
-          onClick={toggleSidebar}
-        />
-      </div>
-    </header>
-  );
+function TitleBar() {
+  return <header className="app-titlebar draggable" />;
 }
 
 function runtimeLifecycleLabel(copy: Copy, runtime: RuntimeStatus) {

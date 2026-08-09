@@ -55,6 +55,15 @@ test("launcher retains the native shell and owned browser surface structure", ()
   assert.equal(styles.includes(".sidebar-resize-handle"), false);
 });
 
+test("runtime sidebar stays visible at every window width", () => {
+  assert.doesNotMatch(appSource, /COMPACT_SIDEBAR_QUERY|compactSidebar|sidebarOpen|toggleSidebar|sidebar-backdrop/);
+  assert.doesNotMatch(styles, /\.sidebar-backdrop|\.app-shell\.is-compact|is-sidebar-open/);
+  assert.match(appSource, /const browserSurfaceActive = surface === "browser";/);
+  assert.match(appSource, /<aside className="app-sidebar">/);
+  assert.match(styles, /\.app-sidebar\s*\{[^}]*width:\s*var\(--sidebar-width\)[^}]*min-width:\s*var\(--sidebar-width\)[^}]*flex:\s*0 0 var\(--sidebar-width\)/s);
+  assert.match(styles, /\.workspace\s*\{[^}]*min-width:\s*0[^}]*flex:\s*1/s);
+});
+
 test("embedded ChatGPT is measured after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
@@ -95,6 +104,10 @@ test("closing the launcher follows the persisted background-launcher preference"
 });
 
 test("sidebar keeps the brand prominent, runtime actions clear, and Settings free of unexplained status dots", () => {
+  assert.match(appSource, /sidebar-brand-identity[\s\S]*?<BrandMark small \/>[\s\S]*?<strong>\{copy\.product\}<\/strong>/);
+  assert.doesNotMatch(appSource, /sidebar-brand-identity[\s\S]{0,240}?copy\.tagline/);
+  assert.match(styles, /\.sidebar-brand-identity strong\s*\{[^}]*background:\s*linear-gradient[^}]*font-size:\s*18px[^}]*font-weight:\s*700/s);
+  assert.doesNotMatch(styles, /\.sidebar-brand-copy small\s*\{/);
   assert.match(appSource, /className=\{`sidebar-runtime-card is-\$\{snapshot\.runtime\.lifecycle\}/);
   assert.match(appSource, /className="sidebar-runtime-overview"[\s\S]*?navigateSurface\("runtime"\)/);
   assert.match(appSource, /sidebar-runtime-mode-line[\s\S]*?runtimeModeLabel[\s\S]*?sidebar-runtime-lifecycle[\s\S]*?runtimeLifecycleLabel\(copy, snapshot\.runtime\)/);
@@ -105,8 +118,7 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*17px/s);
   assert.match(styles, /\.sidebar-runtime-card\.is-ready\s*\{[^}]*border-color:/s);
   assert.match(styles, /\.sidebar-runtime-card\.is-error,[\s\S]*?background:\s*linear-gradient/s);
-  assert.match(styles, /\.sidebar-brand-identity strong\s*\{[^}]*font-size:\s*15px[^}]*font-weight:\s*650/s);
-  assert.match(styles, /\.sidebar-brand-row \.sidebar-brand-identity > \.brand-mark\s*\{[^}]*width:\s*26px[^}]*height:\s*26px/s);
+  assert.match(styles, /\.sidebar-brand-row \.sidebar-brand-identity > \.brand-mark\s*\{[^}]*width:\s*30px[^}]*height:\s*30px/s);
   assert.match(appSource, /active=\{surface === "settings"\}\s*icon="settings"\s*label=\{copy\.settings\}/);
   assert.doesNotMatch(appSource, /active=\{surface === "settings"\}[\s\S]{0,120}?badge=/);
   assert.doesNotMatch(appSource, /chatgptModeSummary|codexModeSummary|modeNotConfiguredSummary/);

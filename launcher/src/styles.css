@@ -244,34 +244,17 @@ code {
   background: transparent;
 }
 
-.sidebar-backdrop {
-  position: fixed;
-  z-index: 30;
-  inset: var(--height-titlebar) 0 0;
-  padding: 0;
-  border: 0;
-  background: rgb(0 0 0 / 32%);
-}
-
 .app-sidebar {
   position: relative;
   z-index: 1;
-  flex: 0 0 auto;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
   height: 100%;
-  min-width: 0;
+  flex: 0 0 var(--sidebar-width);
   overflow: visible;
   background: rgb(33 33 33 / 78%);
   backdrop-filter: blur(28px) saturate(1.08);
   -webkit-backdrop-filter: blur(28px) saturate(1.08);
-}
-
-.app-shell.is-compact .app-sidebar {
-  position: absolute;
-  z-index: 40;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  border-right: 1px solid var(--color-border);
 }
 
 .sidebar-clip {
@@ -293,34 +276,42 @@ code {
 .sidebar-brand-row {
   display: flex;
   width: 100%;
-  min-height: 44px;
+  min-height: 52px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px 8px;
+  padding: 8px;
   color: var(--color-text-primary);
 }
 
 .sidebar-brand-row .sidebar-brand-identity > .brand-mark {
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
   color: var(--color-text-primary);
 }
 
 .sidebar-brand-identity {
   display: flex;
+  width: 100%;
   min-width: 0;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
 }
 
 .sidebar-brand-identity strong {
-  overflow: hidden;
-  color: var(--color-text-primary);
-  font-size: 15px;
-  font-weight: 650;
-  letter-spacing: -0.012em;
-  text-overflow: ellipsis;
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  background: linear-gradient(90deg, #55dcff 0%, #75c7ff 48%, #c68cff 100%);
+  background-clip: text;
+  color: transparent;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 22px;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
   white-space: nowrap;
 }
 
@@ -644,10 +635,6 @@ code {
   padding: 4px min(320px, 45vw) 0 8px;
   border-bottom: 1px solid var(--color-border-light);
   background: rgb(24 24 24 / 72%);
-}
-
-.app-shell:not(.is-sidebar-open) .browser-tab-strip {
-  padding-left: 112px;
 }
 
 .browser-tab {

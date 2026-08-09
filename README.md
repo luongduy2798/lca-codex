@@ -1,7 +1,7 @@
 <h1 align="center">LCA Codex</h1>
 
 <p align="center">
-  <strong>Codex harness powered by ChatGPT Web</strong><br>
+  <strong>ChatGPT Web reasoning backend for Codex</strong><br>
   Use LCA Codex (including Pro) as native Codex models.
 </p>
 

@@ -1,6 +1,6 @@
 export const copy = {
   product: "LCA Codex",
-  tagline: "Codex harness powered by ChatGPT Web",
+  tagline: "ChatGPT Web reasoning backend for Codex",
   setup: "Setup",
   codexConfig: "Codex Config",
   codexConfigTitle: "Codex configuration",
