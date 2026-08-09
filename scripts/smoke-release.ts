@@ -6,7 +6,7 @@ import { VERSION } from "../src/version";
 
 const sourceBundle = resolve(process.argv[2] ?? "dist/runtime");
 const sourceRoot = resolve(import.meta.dir, "..");
-const root = join(homedir(), `.lca-token-release-smoke-${process.pid}-${Date.now()}`);
+const root = join(homedir(), `.lca-codex-release-smoke-${process.pid}-${Date.now()}`);
 const firstLocation = join(root, "first-location");
 const runtimeRoot = join(root, "relocated-runtime");
 cpSync(sourceBundle, firstLocation, { recursive: true });
@@ -28,7 +28,7 @@ const entrypoint = join(runtimeRoot, manifest.entrypoint);
 const runtimeCommand = [runtimeExecutable, entrypoint];
 const cliBundle = readFileSync(join(runtimeRoot, "app", "cli.js"), "utf8");
 const launcherText = readFileSync(launcher, "utf8");
-for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/lca-token-verify", "/tmp/lca-token-verify"]) {
+for (const forbidden of [sourceRoot, dirname(sourceBundle), "/private/tmp/lca-codex-verify", "/tmp/lca-codex-verify"]) {
   if (cliBundle.includes(forbidden) || launcherText.includes(forbidden)) {
     throw new Error(`Runtime artifact embeds an ephemeral build path: ${forbidden}`);
   }
@@ -53,7 +53,7 @@ const config = {
   host: "127.0.0.1",
   port,
   contextWindow: 256_000,
-  appName: "lca-token",
+  appName: "lca-codex",
   browserHost: "managed-chrome",
   chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   storageStatePath: join(appHome, "browser", "storage-state.json"),
@@ -68,7 +68,7 @@ const config = {
 writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
 
-const env = { ...process.env, LCA_TOKEN_HOME: appHome, CODEX_HOME: codexHome };
+const env = { ...process.env, LCA_CODEX_HOME: appHome, CODEX_HOME: codexHome };
 const child = Bun.spawn([...runtimeCommand, "serve"], { env, stdout: "pipe", stderr: "pipe" });
 let stoppedGracefully = false;
 try {
@@ -83,7 +83,7 @@ try {
   }
   if (!health?.ok) throw new Error("relocated daemon did not become healthy");
   const payload = await health.json() as Record<string, unknown>;
-  if (payload.service !== "lca-token" || payload.mode !== "browser-only") {
+  if (payload.service !== "lca-codex" || payload.mode !== "browser-only") {
     throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
   }
 
@@ -100,7 +100,7 @@ try {
   const invalid = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "lca-token/not-enabled", input: "test", stream: false }),
+    body: JSON.stringify({ model: "lca-codex/not-enabled", input: "test", stream: false }),
   });
   if (invalid.status !== 400) throw new Error(`unsupported model did not fail closed: HTTP ${invalid.status}`);
 
@@ -122,7 +122,7 @@ try {
   const rejectedWhileDraining = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "lca-token", reasoning: { effort: "high" }, input: "test", stream: false }),
+    body: JSON.stringify({ model: "lca-codex", reasoning: { effort: "high" }, input: "test", stream: false }),
   });
   if (rejectedWhileDraining.status !== 503) {
     throw new Error(`daemon accepted a new turn while draining: HTTP ${rejectedWhileDraining.status}`);

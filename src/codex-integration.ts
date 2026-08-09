@@ -5,15 +5,15 @@ import { dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
-const MANAGED_COMMENT = "# Managed by lca-token; `lca-token uninstall` restores prior values.";
+const MANAGED_COMMENT = "# Managed by lca-codex; `lca-codex uninstall` restores prior values.";
 const MANAGED_REMOTE_COMPACTION_LINE =
-  "remote_compaction_v2 = false # Managed by lca-token: bounds retained Web image history.";
+  "remote_compaction_v2 = false # Managed by lca-codex: bounds retained Web image history.";
 const MANAGED_MULTI_AGENT_LINE =
-  "multi_agent = true # Managed by lca-token: enables routed Web subagents.";
+  "multi_agent = true # Managed by lca-codex: enables routed Web subagents.";
 const MANAGED_MULTI_AGENT_V2_LINE =
-  "multi_agent_v2 = false # Managed by lca-token: keeps routed Web subagent payloads readable.";
+  "multi_agent_v2 = false # Managed by lca-codex: keeps routed Web subagent payloads readable.";
 const MANAGED_MULTI_AGENT_V2_TABLE_LINE =
-  "enabled = false # Managed by lca-token: keeps routed Web subagent payloads readable.";
+  "enabled = false # Managed by lca-codex: keeps routed Web subagent payloads readable.";
 
 interface PreviousAssignment {
   present: boolean;

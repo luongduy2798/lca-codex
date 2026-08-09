@@ -4,7 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 
-export const LAUNCHER_BROWSER_HOST_KIND = "lca-token-launcher";
+export const LAUNCHER_BROWSER_HOST_KIND = "lca-codex-launcher";
 
 export interface LauncherBrowserHostDescriptor {
   version: 1;
@@ -76,10 +76,10 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   if (!helperScript || !existsSync(helperScript)) {
     throw new Error("Launcher browser descriptor helper script does not exist");
   }
-  if (descriptor.partition !== "persist:lca-token-chatgpt") {
+  if (descriptor.partition !== "persist:lca-codex-chatgpt") {
     throw new Error("Launcher browser descriptor identifies an unexpected browser partition");
   }
-  if (descriptor.idleUrl !== "about:blank#lca-token-browser-host") {
+  if (descriptor.idleUrl !== "about:blank#lca-codex-browser-host") {
     throw new Error("Launcher browser descriptor identifies an unexpected idle surface");
   }
   if (typeof descriptor.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(descriptor.surfaceId)) {
@@ -159,8 +159,8 @@ export async function selectLauncherPage(
     const inspected = await Promise.all(candidates.map(async candidate => ({
       ...candidate,
       surfaceId: await candidate.page.evaluate(
-        () => (globalThis as typeof globalThis & { __LCA_TOKEN_SURFACE_ID__?: unknown })
-          .__LCA_TOKEN_SURFACE_ID__,
+        () => (globalThis as typeof globalThis & { __LCA_CODEX_SURFACE_ID__?: unknown })
+          .__LCA_CODEX_SURFACE_ID__,
       ).catch(() => undefined),
     })));
     const owned = inspected.filter(candidate => candidate.surfaceId === surfaceId);

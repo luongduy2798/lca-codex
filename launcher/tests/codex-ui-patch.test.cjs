@@ -11,7 +11,7 @@ const {
 } = require("../electron/codex-ui-patch.cjs");
 
 function fixture(version = "26.5803.41515", body) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-codex-ui-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-codex-ui-"));
   const extensions = path.join(root, ".vscode", "extensions");
   const extension = path.join(extensions, `openai.chatgpt-${version}-darwin-x64`);
   const assets = path.join(extension, "webview", "assets");
@@ -80,11 +80,11 @@ test("Codex usage-limit patch targets the newest installed official extension", 
   }
 });
 
-test("existing legacy Lca Token patch and backup are recognized and can be restored", () => {
+test("existing legacy LCA Codex patch and backup are recognized and can be restored", () => {
   const original = "prefix;function fjt(e){let n=e.rateLimitStatus;const x='codex.upsellBanner.general.title';return n};suffix";
   const fx = fixture("26.5803.41515", original.replace("function fjt(e){", `function fjt(e){${LEGACY_PATCH_MARKER}if(e?.rateLimitStatus?.rate_limit?.limit_reached===!0)return null;`));
   try {
-    fs.writeFileSync(`${fx.bundle}.lca-token-rate-limit-bak`, original);
+    fs.writeFileSync(`${fx.bundle}.lca-codex-rate-limit-bak`, original);
     const patcher = patcherFor(fx.extensions);
     const status = patcher.inspect();
     assert.equal(status.state, "applied");

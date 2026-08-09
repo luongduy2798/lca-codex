@@ -139,7 +139,7 @@ export function setupProxyIsReady(
   health: Record<string, unknown>,
   config: Pick<AppConfig, "mode" | "releaseVersion">,
 ): boolean {
-  return health.service === "lca-token"
+  return health.service === "lca-codex"
     && health.status === "ok"
     && health.mode === config.mode
     && health.version === config.releaseVersion
@@ -257,7 +257,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (!launcherOwned && process.platform !== "darwin") {
     throw new Error(
       "Terminal-only managed Chrome setup currently requires macOS. "
-      + "Use the lca-token launcher on Windows or Linux.",
+      + "Use the lca-codex launcher on Windows or Linux.",
     );
   }
   preflightCodexIntegration(config, {
@@ -278,7 +278,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     }
   }
   if (beforeService.loaded && !existing) {
-    throw new Error("A lca-token service is loaded but its configuration is missing; refusing to replace an unverifiable process");
+    throw new Error("A lca-codex service is loaded but its configuration is missing; refusing to replace an unverifiable process");
   }
 
   let loginCreated = false;

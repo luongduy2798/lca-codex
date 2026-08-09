@@ -79,7 +79,7 @@ const sections = [...visited.values()]
 
 const bunLicense = readFileSync(join(root, "LICENSES", "Bun-1.3.14.md"), "utf8").trim();
 const output = [
-  "lca-token third-party notices",
+  "lca-codex third-party notices",
   "",
   "This file covers runtime JavaScript packages bundled into the standalone executable.",
   "The executable also embeds Bun 1.3.14; Bun's licensing and relinking notice follows first.",

@@ -38,7 +38,7 @@ jobs:
           test -n "$archive"
           stage="$(mktemp -d)"
           ditto -x -k "$archive" "$stage"
-          codesign --verify --deep --strict --verbose=2 "$stage/Lca Token.app"
+          codesign --verify --deep --strict --verbose=2 "$stage/LCA Codex.app"
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.runner }}

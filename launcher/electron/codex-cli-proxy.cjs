@@ -141,7 +141,7 @@ function createLineObserver(direction, onLifecycle) {
 }
 
 function runtimeControlConfig(env = process.env) {
-  const home = path.resolve(env.LCA_TOKEN_HOME?.trim() || path.join(os.homedir(), ".lca-token"));
+  const home = path.resolve(env.LCA_CODEX_HOME?.trim() || path.join(os.homedir(), ".lca-codex"));
   try {
     const config = JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
     if (config?.host !== "127.0.0.1" || !Number.isInteger(config?.port) || config.port < 1 || config.port > 65_535) return null;

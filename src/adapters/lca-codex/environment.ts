@@ -28,7 +28,7 @@ export interface ChatGptTurnUserRevision {
 
 export class MissingTrustedCodexEnvironmentError extends Error {
   constructor(field: string) {
-    super(`Lca Token turn is missing ${field} in trusted Codex environment context`);
+    super(`LCA Codex turn is missing ${field} in trusted Codex environment context`);
     this.name = "MissingTrustedCodexEnvironmentError";
   }
 }
@@ -146,9 +146,9 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
  */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
-  if (!turnId) throw new Error("Lca Token requires native Codex turn_id metadata for browser-session replay");
+  if (!turnId) throw new Error("LCA Codex requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed);
-  if (!revision) throw new Error("Lca Token requires a current-turn user message for browser-session replay");
+  if (!revision) throw new Error("LCA Codex requires a current-turn user message for browser-session replay");
   // Native Codex client_metadata owns the provider-turn identity. A message's passthrough turn_id is
   // message provenance and may refer to a replayed/history item under newer Codex wire shapes; it is
   // intentionally not required to equal the current client_metadata turn_id.
@@ -172,9 +172,9 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnU
 
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
 export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
-  if (!parsed._compactionRequest) throw new Error("Lca Token compaction source requires a compaction request");
+  if (!parsed._compactionRequest) throw new Error("LCA Codex compaction source requires a compaction request");
   const revision = latestChatGptTurnUserRevision(parsed);
-  if (!revision) throw new Error("Lca Token compaction requires a source user message");
+  if (!revision) throw new Error("LCA Codex compaction requires a source user message");
   return revision;
 }
 
@@ -378,7 +378,7 @@ function environmentCwdMatches(text: string): string[] {
 function uniqueAbsolutePaths(values: string[], field: string): string[] {
   const decoded = values.map(value => decodeXmlText(value.trim()));
   if (decoded.length === 0) throw new MissingTrustedCodexEnvironmentError(field);
-  if (decoded.some(path => !isAbsolute(path))) throw new Error(`Lca Token ${field} must contain absolute paths`);
+  if (decoded.some(path => !isAbsolute(path))) throw new Error(`LCA Codex ${field} must contain absolute paths`);
   const unique = new Map<string, string>();
   for (const path of decoded.map(value => resolve(value))) {
     if (!unique.has(pathIdentity(path))) unique.set(pathIdentity(path), path);
@@ -395,14 +395,14 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
   const text = trustedEnvironmentText(parsed);
   const cwdMatches = environmentCwdMatches(text);
   const cwdCandidates = uniqueAbsolutePaths(cwdMatches, "cwd");
-  if (cwdCandidates.length !== 1) throw new Error("Lca Token turn has conflicting trusted Codex cwd values");
+  if (cwdCandidates.length !== 1) throw new Error("LCA Codex turn has conflicting trusted Codex cwd values");
   const cwd = cwdCandidates[0]!;
 
   const rootMatches = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/g)]
     .flatMap(section => [...section[0].matchAll(/<root>([^<]+)<\/root>/g)].map(match => match[1] ?? ""));
   const roots = rootMatches.length > 0 ? uniqueAbsolutePaths(rootMatches, "workspace_roots") : [cwd];
   if (!roots.some(root => matchesPath(root, cwd))) {
-    throw new Error("Lca Token cwd is outside the trusted Codex workspace roots");
+    throw new Error("LCA Codex cwd is outside the trusted Codex workspace roots");
   }
 
   const sandboxType = sandboxTypeFromEnvironment(text);
@@ -410,7 +410,7 @@ export function extractChatGptTurnEnvironment(parsed: CodexParsedRequest): ChatG
     || /network access is enabled/i.test(text);
 
   if (!sandboxType) {
-    throw new Error("Lca Token turn requires one explicit trusted Codex sandbox mode");
+    throw new Error("LCA Codex turn requires one explicit trusted Codex sandbox mode");
   }
   if (sandboxType === "dangerFullAccess") {
     return { cwd, roots, writableRoots: roots, sandboxPolicy: { type: "dangerFullAccess" }, tools: parsed.context.tools ?? [] };

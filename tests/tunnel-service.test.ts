@@ -46,15 +46,15 @@ function parsePinnedTunnelCommand(command: string): string[] {
 }
 
 afterEach(() => {
-  delete process.env.LCA_TOKEN_HOME;
+  delete process.env.LCA_CODEX_HOME;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("tunnel launchd ownership", () => {
   test("runs the pinned client directly and asks launchd to restore it", () => {
-    const root = join(tmpdir(), `lca-token-tunnel-service-${process.pid}-${Date.now()}`);
+    const root = join(tmpdir(), `lca-codex-tunnel-service-${process.pid}-${Date.now()}`);
     roots.push(root);
-    process.env.LCA_TOKEN_HOME = root;
+    process.env.LCA_CODEX_HOME = root;
     const binary = join(root, "bin", "tunnel-client");
     const key = join(root, "secrets", "runtime.key");
     mkdirSync(join(root, "bin"), { recursive: true });
@@ -80,10 +80,10 @@ describe("tunnel launchd ownership", () => {
   });
 
   test("restarts the long-lived MCP worker when the installed release changes", () => {
-    const root = join(tmpdir(), `lca-token-tunnel-runtime-${process.pid}-${Date.now()}`);
+    const root = join(tmpdir(), `lca-codex-tunnel-runtime-${process.pid}-${Date.now()}`);
     roots.push(root);
-    process.env.LCA_TOKEN_HOME = root;
-    const runtime = join(root, "bin", "lca-token");
+    process.env.LCA_CODEX_HOME = root;
+    const runtime = join(root, "bin", "lca-codex");
     mkdirSync(join(root, "bin"), { recursive: true });
     writeFileSync(runtime, "runtime");
     const before = defaultConfig("browser-only");
@@ -99,9 +99,9 @@ describe("tunnel launchd ownership", () => {
   });
 
   test("reuses complete full-mode tunnel credentials during setup updates", () => {
-    const root = join(tmpdir(), `lca-token-existing-tunnel-${process.pid}-${Date.now()}`);
+    const root = join(tmpdir(), `lca-codex-existing-tunnel-${process.pid}-${Date.now()}`);
     roots.push(root);
-    process.env.LCA_TOKEN_HOME = root;
+    process.env.LCA_CODEX_HOME = root;
     const key = join(root, "secrets", "runtime.key");
     mkdirSync(join(root, "secrets"), { recursive: true });
     writeFileSync(key, "secret");
@@ -119,21 +119,21 @@ describe("tunnel launchd ownership", () => {
   });
 
   test("passes the Windows MCP runtime directly to tunnel-client without cmd.exe", () => {
-    const root = join(tmpdir(), `lca-token-windows-mcp-${process.pid}-${Date.now()}`);
+    const root = join(tmpdir(), `lca-codex-windows-mcp-${process.pid}-${Date.now()}`);
     roots.push(root);
-    process.env.LCA_TOKEN_HOME = root;
+    process.env.LCA_CODEX_HOME = root;
     const runtime = join(root, "Program Files", "runtime", "bun.exe");
     mkdirSync(join(root, "Program Files", "runtime"), { recursive: true });
     writeFileSync(runtime, "runtime");
     const config = defaultConfig("browser-only");
     config.runtimeCommand = [runtime, join(root, "Program Files", "app", "cli.js")];
-    config.brokerSocketPath = "\\\\.\\pipe\\lca-token-test";
+    config.brokerSocketPath = "\\\\.\\pipe\\lca-codex-test";
 
     const command = mcpCommand(config, "win32");
     expect(command).toBe(
       `"${runtime.replaceAll("\\", "\\\\")}" `
       + `"${join(root, "Program Files", "app", "cli.js").replaceAll("\\", "\\\\")}" `
-      + '"mcp" "--broker-socket" "\\\\\\\\.\\\\pipe\\\\lca-token-test"',
+      + '"mcp" "--broker-socket" "\\\\\\\\.\\\\pipe\\\\lca-codex-test"',
     );
     expect(command).not.toContain("cmd.exe");
     expect(existsSync(join(root, "bin", "mcp-launcher.cmd"))).toBe(false);
@@ -142,7 +142,7 @@ describe("tunnel launchd ownership", () => {
       join(root, "Program Files", "app", "cli.js"),
       "mcp",
       "--broker-socket",
-      "\\\\.\\pipe\\lca-token-test",
+      "\\\\.\\pipe\\lca-codex-test",
     ]);
   });
 

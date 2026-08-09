@@ -91,7 +91,7 @@ test("forwards standalone Web Search through the authenticated native Codex rout
   expect(await response.json()).toEqual({ results: [{ title: "result" }] });
 });
 
-test("removes Lca Token item identities before native Codex compaction", async () => {
+test("removes LCA Codex item identities before native Codex compaction", async () => {
   const body = {
     model: "gpt-5.6-sol",
     store: false,

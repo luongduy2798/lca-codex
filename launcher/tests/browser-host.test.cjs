@@ -21,22 +21,22 @@ test("only a proven replacement navigation suppresses initial ERR_ABORTED noise"
   const aborted = Object.assign(new Error("ERR_ABORTED (-3) loading 'about:blank'"), { code: "ERR_ABORTED" });
   assert.equal(initializationNavigationWasSuperseded(
     aborted,
-    "about:blank#lca-token-browser-host",
+    "about:blank#lca-codex-browser-host",
     "https://chatgpt.com/?temporary-chat=true",
   ), true);
   assert.equal(initializationNavigationWasSuperseded(
     aborted,
-    "about:blank#lca-token-browser-host",
-    "about:blank#lca-token-browser-host",
+    "about:blank#lca-codex-browser-host",
+    "about:blank#lca-codex-browser-host",
   ), false);
   assert.equal(initializationNavigationWasSuperseded(
     aborted,
-    "about:blank#lca-token-browser-host",
+    "about:blank#lca-codex-browser-host",
     "about:blank",
   ), false);
   assert.equal(initializationNavigationWasSuperseded(
     new Error("net::ERR_FAILED"),
-    "about:blank#lca-token-browser-host",
+    "about:blank#lca-codex-browser-host",
     "https://chatgpt.com/?temporary-chat=true",
   ), false);
 });
@@ -838,9 +838,9 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
     },
   };
 
-  const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-token");
+  const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
 
-  assert.deepEqual(result, { ok: true, appName: "lca-token" });
+  assert.deepEqual(result, { ok: true, appName: "lca-codex" });
   assert.deepEqual(calls.filter(([type]) => ["surface", "show", "visible-composer", "helper", "hide"].includes(type)).map(([type, value]) => [type, value]), [
     ["surface", true],
     ["show", undefined],
@@ -848,7 +848,7 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
     ["helper", {
       helper: fixture.helper,
       descriptorPath: fixture.descriptorPath,
-      appName: "lca-token",
+      appName: "lca-codex",
       logger: fixture.logger,
     }],
     ["hide", undefined],
@@ -944,7 +944,7 @@ test("connector verification preserves an already hydrated Temporary Chat page",
     },
   };
 
-  await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-token");
+  await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
 
   assert.equal(loaded, false);
   assert.equal(fixture.visible, true);
@@ -967,7 +967,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
     },
     view: {
       webContents: {
-        getURL: () => "about:blank#lca-token-browser-host",
+        getURL: () => "about:blank#lca-codex-browser-host",
         loadURL: async (url) => calls.push(["load", url]),
       },
     },

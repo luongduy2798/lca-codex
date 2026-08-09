@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/lca-token/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions } from "../src/adapters/lca-codex/turn-execution";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { callTurnBroker, TurnBroker } from "../src/adapters/lca-token/turn-broker";
-import type { ChatGptContextSnapshot } from "../src/adapters/lca-token/prompt";
+import { callTurnBroker, TurnBroker } from "../src/adapters/lca-codex/turn-broker";
+import type { ChatGptContextSnapshot } from "../src/adapters/lca-codex/prompt";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
 
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {

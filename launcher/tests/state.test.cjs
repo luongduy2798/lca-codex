@@ -29,7 +29,7 @@ const DEFAULT_EXPECTED = {
 };
 
 test("launcher state persists manual runtime preferences atomically", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-launcher-state-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-launcher-state-"));
   const file = path.join(root, "state.json");
   try {
     const store = createStateStore(file);
@@ -69,7 +69,7 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
 });
 
 test("persisted sidebar corruption is repaired without changing valid launcher state", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-sidebar-state-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-sidebar-state-"));
   const file = path.join(root, "state.json");
   try {
     fs.writeFileSync(file, JSON.stringify({
@@ -97,7 +97,7 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
 });
 
 test("legacy background lifecycle preferences migrate to manual-first defaults", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-legacy-lifecycle-state-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-legacy-lifecycle-state-"));
   const file = path.join(root, "state.json");
   try {
     fs.writeFileSync(file, JSON.stringify({

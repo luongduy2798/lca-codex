@@ -9,7 +9,7 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-package-smoke-"));
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
 
@@ -42,10 +42,10 @@ function artifact(pattern, label) {
 function smokeEnvironment() {
   return {
     ...process.env,
-    LCA_TOKEN_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
-    LCA_TOKEN_HOME: coreHome,
+    LCA_CODEX_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
+    LCA_CODEX_HOME: coreHome,
     CODEX_HOME: path.join(scratch, "codex-home"),
-    LCA_TOKEN_SMOKE_FILE: markerPath,
+    LCA_CODEX_SMOKE_FILE: markerPath,
   };
 }
 
@@ -60,7 +60,7 @@ try {
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    executable = path.join(stage, "Lca Token.app", "Contents", "MacOS", "Lca Token");
+    executable = path.join(stage, "LCA Codex.app", "Contents", "MacOS", "LCA Codex");
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {

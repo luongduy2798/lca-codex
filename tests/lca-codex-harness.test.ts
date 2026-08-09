@@ -5,22 +5,22 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
-import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/lca-token/browser-worker";
-import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-token/browser-worker";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-token/environment";
-import { createLcaTokenAdapter } from "../src/adapters/lca-token/index";
-import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/lca-token/markdown";
-import { LCA_TOKEN_MODEL_ID, resolveLcaTokenModelMode } from "../src/adapters/lca-token/model";
-import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaTokenPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/lca-token/prompt";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/lca-token/turn-execution";
-import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/lca-token/turn-broker";
+import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/lca-codex/browser-worker";
+import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
+import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
+import { createLcaCodexAdapter } from "../src/adapters/lca-codex/index";
+import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/lca-codex/markdown";
+import { LCA_CODEX_MODEL_ID, resolveLcaCodexModelMode } from "../src/adapters/lca-codex/model";
+import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/lca-codex/prompt";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/lca-codex/turn-execution";
+import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/lca-codex/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
-import { estimateLcaTokenUsage } from "../src/adapters/lca-token/usage";
+import { estimateLcaCodexUsage } from "../src/adapters/lca-codex/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
-const tempRoot = join(tmpdir(), `lca-token-harness-${process.pid}-${Date.now()}`);
+const tempRoot = join(tmpdir(), `lca-codex-harness-${process.pid}-${Date.now()}`);
 mkdirSync(tempRoot, { recursive: true });
 afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
 
@@ -48,7 +48,7 @@ function brokerTestEndpoint(name: string): string {
 
 function parsed(developerText?: string): CodexParsedRequest {
   return {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     stream: true,
     context: {
       tools,
@@ -132,7 +132,7 @@ function toolResult(value: Record<string, unknown>): BrokerToolResult {
 describe("ChatGPT outer-native harness v3", () => {
   test("rejects an opaque MultiAgent V2 child payload before starting the browser", async () => {
     const request = parseRequest({
-      model: "lca-token",
+      model: "lca-codex",
       stream: true,
       reasoning: { effort: "ultra" },
       input: [{
@@ -146,9 +146,9 @@ describe("ChatGPT outer-native harness v3", () => {
 
     const socketPath = brokerTestEndpoint(`cgw-h3-v2-reject-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt-v2-reject-test",
-      lcaToken: { brokerSocketPath: socketPath, localToolsEnabled: false, proAvailable: true },
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: false, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
@@ -158,7 +158,7 @@ describe("ChatGPT outer-native harness v3", () => {
       return "unexpected";
     };
     try {
-      await expect(createLcaTokenAdapter(provider).runTurn!(
+      await expect(createLcaCodexAdapter(provider).runTurn!(
         request,
         { headers: new Headers() },
         () => {},
@@ -217,9 +217,9 @@ describe("ChatGPT outer-native harness v3", () => {
   test("starts a tool-capable browser turn from the current Codex metadata shape", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-canonical-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt-canonical-metadata-test",
-      lcaToken: { brokerSocketPath: socketPath, localToolsEnabled: true, proAvailable: true },
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
@@ -240,7 +240,7 @@ describe("ChatGPT outer-native harness v3", () => {
       const request = canonicalCurrentWireRequest(environmentXml);
 
       const events: AdapterEvent[] = [];
-      await createLcaTokenAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      await createLcaCodexAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
       expect(browserStarts).toBe(1);
       expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
     } finally {
@@ -543,7 +543,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect this image" },
       { type: "image", imageUrl, detail: "high" },
     ];
-    const compiled = compileLcaTokenPrompt(request, toolCapabilities, "turn_123456789012345678901234");
+    const compiled = compileLcaCodexPrompt(request, toolCapabilities, "turn_123456789012345678901234");
     expect(compiled.text).not.toContain(imageUrl);
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.text).toContain('"version":3');
@@ -591,7 +591,7 @@ describe("ChatGPT outer-native harness v3", () => {
       ], timestamp: 3 },
     ];
     const snapshot = compileChatGptContextSnapshot(request);
-    const compiled = compileLcaTokenPrompt(request, toolCapabilities, "turn_123456789012345678901234", snapshot);
+    const compiled = compileLcaCodexPrompt(request, toolCapabilities, "turn_123456789012345678901234", snapshot);
     const files = chatGptPromptFilePayloads(compiled);
 
     expect(compiled.transport).toBe("mcp-lazy");
@@ -606,27 +606,27 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(files[0]!.mimeType).toBe("image/png");
   });
 
-  test("maps one Lca Token model to explicit effort modes and fails closed on invalid combinations", () => {
-    expect(resolveLcaTokenModelMode(LCA_TOKEN_MODEL_ID, "max", toolCapabilities)).toEqual({
-      modelId: LCA_TOKEN_MODEL_ID,
+  test("maps one LCA Codex model to explicit effort modes and fails closed on invalid combinations", () => {
+    expect(resolveLcaCodexModelMode(LCA_CODEX_MODEL_ID, "max", toolCapabilities)).toEqual({
+      modelId: LCA_CODEX_MODEL_ID,
       effort: "max",
       displayLabel: "Pro",
       uiEffortIndex: 4,
       localTools: false,
     });
-    expect(resolveLcaTokenModelMode(LCA_TOKEN_MODEL_ID, "xhigh", toolCapabilities)).toMatchObject({
+    expect(resolveLcaCodexModelMode(LCA_CODEX_MODEL_ID, "xhigh", toolCapabilities)).toMatchObject({
       uiEffortIndex: 3,
       localTools: true,
     });
-    expect(() => resolveLcaTokenModelMode(LCA_TOKEN_MODEL_ID, "max", {
+    expect(() => resolveLcaCodexModelMode(LCA_CODEX_MODEL_ID, "max", {
       localToolsEnabled: false,
       proAvailable: false,
     })).toThrow("Pro effort is not available");
-    expect(() => resolveLcaTokenModelMode(LCA_TOKEN_MODEL_ID, "xhigh", {
+    expect(() => resolveLcaCodexModelMode(LCA_CODEX_MODEL_ID, "xhigh", {
       localToolsEnabled: true,
       proAvailable: false,
     })).toThrow("Extra High effort is not available");
-    expect(() => resolveLcaTokenModelMode("unknown", "high", toolCapabilities)).toThrow("model is not supported");
+    expect(() => resolveLcaCodexModelMode("unknown", "high", toolCapabilities)).toThrow("model is not supported");
   });
 
   test("builds a context-complete Pro prompt without exposing any local-tool capability", () => {
@@ -652,8 +652,8 @@ describe("ChatGPT outer-native harness v3", () => {
       },
     ];
 
-    const compiled = compileLcaTokenPrompt(request, readOnlyCapabilities);
-    expect(compiled.text).toContain("Lca Token Pro with no lca-token bridge to the user's local computer");
+    const compiled = compileLcaCodexPrompt(request, readOnlyCapabilities);
+    expect(compiled.text).toContain("LCA Codex Pro with no lca-codex bridge to the user's local computer");
     expect(compiled.text).toContain("web search, browsing, research");
     expect(compiled.text).toContain("prepared workspace evidence");
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
@@ -661,12 +661,12 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.images).toHaveLength(1);
     expect(compiled.text).not.toContain("codex_bind_turn");
     expect(compiled.text).not.toContain("turn_token");
-    expect(compiled.text).not.toContain("Use the attached lca-token plugin");
-    expect(() => compileLcaTokenPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
+    expect(compiled.text).not.toContain("Use the attached lca-codex plugin");
+    expect(() => compileLcaCodexPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("running in ChatGPT mode");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("configure MCP in the Lca Token launcher");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("configure MCP in the LCA Codex launcher");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("web search remain available");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).not.toContain("local tool results");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
@@ -679,14 +679,14 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
     const configuredReadOnlyWarning = chatGptReadOnlyContextWarning(proRequest(), toolCapabilities);
     expect(configuredReadOnlyWarning).toContain("Codex mode is configured");
-    expect(configuredReadOnlyWarning).not.toContain("configure MCP in the Lca Token launcher");
+    expect(configuredReadOnlyWarning).not.toContain("configure MCP in the LCA Codex launcher");
     expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
-    expect(() => compileLcaTokenPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
+    expect(() => compileLcaCodexPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
   });
 
   test("reports conservative nonzero usage for browser text and image context", () => {
     const textRequest = parsed();
-    const textUsage = estimateLcaTokenUsage(textRequest, { answer: "done" }, toolCapabilities);
+    const textUsage = estimateLcaCodexUsage(textRequest, { answer: "done" }, toolCapabilities);
     expect(textUsage).toMatchObject({ estimated: true });
     expect(textUsage.inputTokens).toBeGreaterThan(8_000);
     expect(textUsage.outputTokens).toBeGreaterThan(0);
@@ -697,7 +697,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { type: "text", text: "Inspect this image" },
       { type: "image", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==", detail: "high" },
     ];
-    const imageUsage = estimateLcaTokenUsage(imageRequest, { answer: "done" }, toolCapabilities);
+    const imageUsage = estimateLcaCodexUsage(imageRequest, { answer: "done" }, toolCapabilities);
     expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
   });
 
@@ -709,7 +709,7 @@ describe("ChatGPT outer-native harness v3", () => {
       errorType: "rate_limit_error",
       code: "rate_limit_exceeded",
       retryable: true,
-    }], LCA_TOKEN_MODEL_ID) as {
+    }], LCA_CODEX_MODEL_ID) as {
       status: string;
       retryable: boolean;
       error: { type: string; code: string };
@@ -727,7 +727,7 @@ describe("ChatGPT outer-native harness v3", () => {
       errorType: "server_error",
       code: "upstream_server_error",
       retryable: false,
-    }], LCA_TOKEN_MODEL_ID) as {
+    }], LCA_CODEX_MODEL_ID) as {
       status: string;
       retryable: boolean;
       error: { type: string; code: string };
@@ -746,7 +746,7 @@ describe("ChatGPT outer-native harness v3", () => {
       errorType: "invalid_request_error",
       code: "context_length_exceeded",
       retryable: false,
-    }], LCA_TOKEN_MODEL_ID) as {
+    }], LCA_CODEX_MODEL_ID) as {
       status: string;
       retryable: boolean;
       error: { type: string; code: string; message: string };
@@ -765,7 +765,7 @@ describe("ChatGPT outer-native harness v3", () => {
   test("returns one native compaction item with preserved estimated usage", () => {
     const request = parsed();
     const summary = "Completed the tool loop; continue with the deployment check.";
-    const usage = estimateLcaTokenUsage(request, { answer: summary }, toolCapabilities);
+    const usage = estimateLcaCodexUsage(request, { answer: summary }, toolCapabilities);
     const response = buildResponseJSON([
       { type: "text_delta", text: "Completed the tool loop; ", phase: "final_answer" },
       { type: "text_delta", text: "continue with the deployment check.", phase: "final_answer" },
@@ -785,9 +785,9 @@ describe("ChatGPT outer-native harness v3", () => {
 
   test("turn cancellation interrupts an in-flight browser stage instead of waiting for its timeout", async () => {
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt",
-      lcaToken: { localToolsEnabled: false, proAvailable: true },
+      lcaCodex: { localToolsEnabled: false, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
       runStage<T>(
@@ -1019,7 +1019,7 @@ describe("ChatGPT outer-native harness v3", () => {
       { role: "user", content: "continue", timestamp: 5 },
     ];
     const snapshot = compileChatGptContextSnapshot(request);
-    const compiled = compileLcaTokenPrompt(request, toolCapabilities, "turn_123456789012345678901234", snapshot);
+    const compiled = compileLcaCodexPrompt(request, toolCapabilities, "turn_123456789012345678901234", snapshot);
     expect(compiled.transport).toBe("mcp-lazy");
     expect(compiled.text).toContain("first request");
     expect(compiled.text).toContain("Inspected files");
@@ -1122,9 +1122,9 @@ describe("ChatGPT outer-native harness v3", () => {
   test("a new Codex turn retires a stopped previous tool loop on the same thread", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-new-turn-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt",
-      lcaToken: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
+      lcaCodex: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
@@ -1162,7 +1162,7 @@ describe("ChatGPT outer-native harness v3", () => {
       }
     };
 
-    const adapter = createLcaTokenAdapter(provider);
+    const adapter = createLcaCodexAdapter(provider);
     const firstRequest = rawWireRequest(environmentXml);
     const firstEvents: AdapterEvent[] = [];
     try {
@@ -1203,9 +1203,9 @@ describe("ChatGPT outer-native harness v3", () => {
   test("replaces the active browser response after Codex compacts mid-tool-loop", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-adapter-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt",
-      lcaToken: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
+      lcaCodex: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
@@ -1269,7 +1269,7 @@ describe("ChatGPT outer-native harness v3", () => {
       }
     };
 
-    const adapter = createLcaTokenAdapter(provider);
+    const adapter = createLcaCodexAdapter(provider);
     const firstRequest = rawWireRequest(environmentXml);
     const firstEvents: AdapterEvent[] = [];
     const secondEvents: AdapterEvent[] = [];
@@ -1421,20 +1421,20 @@ describe("ChatGPT outer-native harness v3", () => {
   test("runs Pro as one context-complete read-only browser turn with native warning, tracing, and exact replay", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-pro-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
-      adapter: "lca-token",
+      adapter: "lca-codex",
       baseUrl: "browser://chatgpt-pro-test",
       contextWindow: 256_000,
-      lcaToken: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: false, proAvailable: true },
+      lcaCodex: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: false, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
-      expect(turn.modelId).toBe(LCA_TOKEN_MODEL_ID);
+      expect(turn.modelId).toBe(LCA_CODEX_MODEL_ID);
       const prepared = await turn.prepare();
       try {
-        expect(prepared.text).toContain("Lca Token Pro with no lca-token bridge to the user's local computer");
+        expect(prepared.text).toContain("LCA Codex Pro with no lca-codex bridge to the user's local computer");
         expect(prepared.text).toContain("web search, browsing, research");
         expect(prepared.text).not.toContain("turn_token");
         expect(prepared.text).not.toContain("codex_bind_turn");
@@ -1474,7 +1474,7 @@ describe("ChatGPT outer-native harness v3", () => {
       isError: false,
       timestamp: 3,
     });
-    const adapter = createLcaTokenAdapter(provider);
+    const adapter = createLcaCodexAdapter(provider);
     const events: AdapterEvent[] = [];
     try {
       await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
@@ -1504,13 +1504,13 @@ describe("ChatGPT outer-native harness v3", () => {
         .toBe("## Pro result\n\nPrepared context synthesized.");
       expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
 
-      const response = buildResponseJSON(events, LCA_TOKEN_MODEL_ID) as {
+      const response = buildResponseJSON(events, LCA_CODEX_MODEL_ID) as {
         output: Array<{ type: string; phase?: string; content?: Array<{ text?: string }> }>;
       };
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
       expect(warning?.content?.[0]?.text).toContain("running in ChatGPT mode");
       expect(warning?.content?.[0]?.text).toContain("web search remain available");
-      expect(warning?.content?.[0]?.text).toContain("configure MCP in the Lca Token launcher");
+      expect(warning?.content?.[0]?.text).toContain("configure MCP in the LCA Codex launcher");
       expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
       expect(response.output.filter(item => item.type === "reasoning")).toHaveLength(2);
 
@@ -1538,7 +1538,7 @@ describe("ChatGPT outer-native harness v3", () => {
       cwd: process.cwd(),
       stderr: "pipe",
     });
-    const client = new Client({ name: "lca-token-harness-test", version: "1.0.0" });
+    const client = new Client({ name: "lca-codex-harness-test", version: "1.0.0" });
     const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
 
     try {
@@ -1612,7 +1612,7 @@ describe("ChatGPT outer-native harness v3", () => {
       cwd: process.cwd(),
       stderr: "pipe",
     });
-    const client = new Client({ name: "lca-token-harness-test", version: "1.0.0" });
+    const client = new Client({ name: "lca-codex-harness-test", version: "1.0.0" });
     const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
 
     try {

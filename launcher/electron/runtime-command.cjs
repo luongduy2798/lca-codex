@@ -15,7 +15,7 @@ function packagedRuntimePaths(resourcesPath, platform = process.platform) {
 
 function sourceRuntimeInvocation(sourceRoot, args) {
   return {
-    executable: process.env.LCA_TOKEN_BUN?.trim() || "bun",
+    executable: process.env.LCA_CODEX_BUN?.trim() || "bun",
     args: ["run", path.join(sourceRoot, "src", "cli.ts"), ...args],
     cwd: sourceRoot,
   };

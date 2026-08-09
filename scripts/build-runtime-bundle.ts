@@ -39,7 +39,7 @@ if (!build.success) {
 }
 
 const browserHelperBuild = await Bun.build({
-  entrypoints: [join(root, "src", "adapters", "lca-token", "browser-helper-main.ts")],
+  entrypoints: [join(root, "src", "adapters", "lca-codex", "browser-helper-main.ts")],
   target: "node",
   format: "cjs",
   minify: true,
@@ -66,12 +66,12 @@ const bunName = process.platform === "win32" ? "bun.exe" : "bun";
 cpSync(realpathSync(process.execPath), join(runtimeDir, bunName));
 if (process.platform !== "win32") chmodSync(join(runtimeDir, bunName), 0o755);
 
-const launcherName = process.platform === "win32" ? "lca-token.cmd" : "lca-token";
+const launcherName = process.platform === "win32" ? "lca-codex.cmd" : "lca-codex";
 const launcher = process.platform === "win32" ? `@echo off
 setlocal
 chcp 65001 >nul
 set "ROOT=%~dp0.."
-set "LCA_TOKEN_LAUNCHER=%~f0"
+set "LCA_CODEX_LAUNCHER=%~f0"
 "%ROOT%\\runtime\\bun.exe" "%ROOT%\\app\\cli.js" %*
 ` : `#!/bin/sh
 set -eu
@@ -90,7 +90,7 @@ while [ -L "$script" ]; do
 done
 bin_dir="$(CDPATH= cd -- "$(dirname "$script")" && pwd -P)"
 root="$(CDPATH= cd -- "$bin_dir/.." && pwd -P)"
-export LCA_TOKEN_LAUNCHER="$invoked"
+export LCA_CODEX_LAUNCHER="$invoked"
 exec "$root/runtime/bun" "$root/app/cli.js" "$@"
 `;
 writeFileSync(join(binDir, launcherName), launcher, process.platform === "win32" ? undefined : { mode: 0o755 });

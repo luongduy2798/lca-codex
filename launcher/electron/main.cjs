@@ -50,9 +50,9 @@ function resolveUserPath(value) {
   }
   return path.resolve(value);
 }
-const CORE_HOME = process.env.LCA_TOKEN_HOME?.trim()
-  ? resolveUserPath(process.env.LCA_TOKEN_HOME.trim())
-  : path.join(os.homedir(), ".lca-token");
+const CORE_HOME = process.env.LCA_CODEX_HOME?.trim()
+  ? resolveUserPath(process.env.LCA_CODEX_HOME.trim())
+  : path.join(os.homedir(), ".lca-codex");
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
@@ -64,12 +64,12 @@ const ALLOWED_EXTERNAL_URLS = new Set([CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
-app.setName("Lca Token");
-if (process.platform === "win32") app.setAppUserModelId("dev.lcatoken.launcher");
-const configuredUserData = process.env.LCA_TOKEN_LAUNCHER_DATA_DIR?.trim();
+app.setName("LCA Codex");
+if (process.platform === "win32") app.setAppUserModelId("dev.lcacodex.launcher");
+const configuredUserData = process.env.LCA_CODEX_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
   ? resolveUserPath(configuredUserData)
-  : path.join(app.getPath("appData"), "lca-token");
+  : path.join(app.getPath("appData"), "lca-codex");
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
@@ -427,9 +427,9 @@ function trayImage() {
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
-    tray.setToolTip("Lca Token");
+    tray.setToolTip("LCA Codex");
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open Lca Token", click: () => showMainWindow() },
+      { label: "Open LCA Codex", click: () => showMainWindow() },
       { type: "separator" },
       { label: "Quit", click: () => { void requestQuit(); } },
     ]));
@@ -495,7 +495,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       : {}),
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
-    title: "Lca Token",
+    title: "LCA Codex",
     icon: APP_ICON_PATH,
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
@@ -710,7 +710,7 @@ function registerIpc({ logger, stateStore }) {
       defaultId: 0,
       cancelId: 0,
       title: "Restore native Codex",
-      message: "Remove the Lca Token-managed models and restore Codex's previous native route?",
+      message: "Remove the LCA Codex-managed models and restore Codex's previous native route?",
       detail: "Unrelated Codex settings and the launcher's ChatGPT login profile are preserved. Restart Codex once after restoring.",
       noLink: true,
     });
@@ -931,7 +931,7 @@ function loggerForQuit() {
 
 async function start() {
   cdpPort = await findFreePort();
-  if (process.platform === "linux") app.commandLine.appendSwitch("class", "lca-token");
+  if (process.platform === "linux") app.commandLine.appendSwitch("class", "lca-codex");
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
@@ -1072,9 +1072,9 @@ async function start() {
         + ` stderr=${JSON.stringify(versionResult.stderr.trim())})`,
       );
     }
-    const markerPath = process.env.LCA_TOKEN_SMOKE_FILE?.trim();
+    const markerPath = process.env.LCA_CODEX_SMOKE_FILE?.trim();
     if (!markerPath || !path.isAbsolute(markerPath)) {
-      throw new Error("Packaged launcher smoke test requires an absolute LCA_TOKEN_SMOKE_FILE");
+      throw new Error("Packaged launcher smoke test requires an absolute LCA_CODEX_SMOKE_FILE");
     }
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
     fs.writeFileSync(markerPath, `${JSON.stringify({
@@ -1144,7 +1144,7 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("Lca Token could not start", message);
+    dialog.showErrorBox("LCA Codex could not start", message);
   } catch {}
   app.exit(1);
 });

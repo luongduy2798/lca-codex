@@ -75,7 +75,7 @@ test("proxy forwards args, stdin, stdout, stderr and child exit code without pol
     `);
     const interrupt = `${JSON.stringify({ id: 3, method: "turn/interrupt", params: { threadId: "thread-1", turnId: "turn-1" } })}\n`;
     const result = await runNode([proxyPath, fake, "app-server", "--analytics-default-enabled"], {
-      env: { LCA_CODEX_REAL_EXECUTABLE: process.execPath, LCA_TOKEN_HOME: root },
+      env: { LCA_CODEX_REAL_EXECUTABLE: process.execPath, LCA_CODEX_HOME: root },
       input: interrupt,
     });
 
@@ -111,7 +111,7 @@ test("lifecycle reporter authenticates to the local runtime control endpoint", a
     fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ host: "127.0.0.1", port: address.port, controlToken: token }));
     const ok = await postLifecycleEvent(
       { direction: "extension->codex", method: "turn/interrupt", threadId: "thread-a", turnId: "turn-a" },
-      { env: { ...process.env, LCA_TOKEN_HOME: home } },
+      { env: { ...process.env, LCA_CODEX_HOME: home } },
     );
     assert.equal(ok, true);
     assert.deepEqual(received, {

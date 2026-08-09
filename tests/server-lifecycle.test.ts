@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/lca-token/turn-execution";
-import { callTurnBroker, closeTurnBrokers } from "../src/adapters/lca-token/turn-broker";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/lca-codex/turn-execution";
+import { callTurnBroker, closeTurnBrokers } from "../src/adapters/lca-codex/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
 
@@ -231,7 +231,7 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
     expect(await models.json()).toMatchObject({
       error: {
         type: "server_error",
-        message: "lca-token is draining for a requested service operation",
+        message: "lca-codex is draining for a requested service operation",
       },
     });
 

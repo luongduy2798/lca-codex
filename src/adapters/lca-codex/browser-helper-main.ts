@@ -2,10 +2,10 @@ import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
-import { LcaTokenAdapterError } from "./adapter-error";
-import type { LcaTokenCapabilities } from "./model";
+import { LcaCodexAdapterError } from "./adapter-error";
+import type { LcaCodexCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
-import type { CompiledLcaTokenPrompt } from "./prompt";
+import type { CompiledLcaCodexPrompt } from "./prompt";
 
 interface RunMessage {
   type: "run";
@@ -20,8 +20,8 @@ interface RunMessage {
     traceId: string;
     modelId: string;
     reasoning?: string;
-    capabilities: LcaTokenCapabilities;
-    prepared: CompiledLcaTokenPrompt;
+    capabilities: LcaCodexCapabilities;
+    prepared: CompiledLcaCodexPrompt;
   };
 }
 
@@ -94,9 +94,9 @@ async function run(message: RunMessage): Promise<void> {
     throw new Error("Browser helper prompt is invalid");
   }
   const provider: CodexProviderConfig = {
-    adapter: "lca-token",
+    adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
-    lcaToken: {
+    lcaCodex: {
       appName: message.config.appName,
       browserHost: "launcher",
       browserHostDescriptorPath: message.config.browserHostDescriptorPath,
@@ -133,7 +133,7 @@ async function run(message: RunMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
-      ...(error instanceof LcaTokenAdapterError ? {
+      ...(error instanceof LcaCodexAdapterError ? {
         status: error.status,
         errorType: error.errorType,
         code: error.code,
@@ -155,9 +155,9 @@ async function verify(message: VerifyMessage): Promise<void> {
     throw new Error("Browser helper verification config is invalid");
   }
   const provider: CodexProviderConfig = {
-    adapter: "lca-token",
+    adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
-    lcaToken: {
+    lcaCodex: {
       appName,
       browserHost: "launcher",
       browserHostDescriptorPath,

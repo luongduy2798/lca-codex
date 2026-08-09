@@ -3,7 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
-const LINUX_DESKTOP_NAME = "dev.lcatoken.launcher.desktop";
+const LINUX_DESKTOP_NAME = "dev.lcacodex.launcher.desktop";
 
 function linuxDesktopPath() {
   const configHome = process.env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
@@ -17,9 +17,9 @@ function desktopExecArgument(value) {
 }
 
 function linuxExecutable(app) {
-  const stableLauncher = process.env.LCA_TOKEN_LAUNCHER_EXECUTABLE?.trim();
+  const stableLauncher = process.env.LCA_CODEX_LAUNCHER_EXECUTABLE?.trim();
   if (stableLauncher && path.isAbsolute(stableLauncher)) return stableLauncher;
-  const appImage = process.env.LCA_TOKEN_APPIMAGE?.trim() || process.env.APPIMAGE?.trim();
+  const appImage = process.env.LCA_CODEX_APPIMAGE?.trim() || process.env.APPIMAGE?.trim();
   if (appImage && path.isAbsolute(appImage)) return appImage;
   return app.getPath("exe");
 }
@@ -28,9 +28,9 @@ function linuxDesktopEntry(app, executable = linuxExecutable(app)) {
   return `[Desktop Entry]
 Type=Application
 Version=1.0
-Name=Lca Token
-Comment=Start the Lca Token launcher in the background
-Exec=/usr/bin/env APPIMAGE_EXTRACT_AND_RUN=1 LCA_TOKEN_APPIMAGE=${desktopExecArgument(executable)} ${desktopExecArgument(executable)} --hidden
+Name=LCA Codex
+Comment=Start the LCA Codex launcher in the background
+Exec=/usr/bin/env APPIMAGE_EXTRACT_AND_RUN=1 LCA_CODEX_APPIMAGE=${desktopExecArgument(executable)} ${desktopExecArgument(executable)} --hidden
 Terminal=false
 X-GNOME-Autostart-enabled=true
 `;

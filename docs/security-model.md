@@ -71,7 +71,7 @@ outer Codex task owns a fresh Temporary Chat document and an exact launcher surf
 never reused across tasks. Closing a running tab destroys its page and terminates that turn. The
 five-tab limit bounds parallel account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex
-`previous_response_id` replay. Lca Token context compaction remains inside the active browser
+`previous_response_id` replay. LCA Codex context compaction remains inside the active browser
 response; the bridge does not fabricate or install a Codex history checkpoint.
 
 ## Network exposure

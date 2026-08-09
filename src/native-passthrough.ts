@@ -34,7 +34,7 @@ function isBridgeReasoningItem(value: unknown): value is JsonObject {
 }
 
 /**
- * Response item ids are scoped to the backend that created them. A Lca Token response is
+ * Response item ids are scoped to the backend that created them. A LCA Codex response is
  * generated locally, so replaying its `rs_*` id after switching back to native Codex makes the
  * official backend try to load an item it has never stored. Once a Web reasoning item proves that
  * the history crossed providers, send the complete item content without any provider-local ids.

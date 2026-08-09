@@ -6,9 +6,9 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { pipeline } = require("node:stream/promises");
 
-const REPOSITORY = "luongduy2798/lca-token";
+const REPOSITORY = "luongduy2798/lca-codex";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
-const USER_AGENT = "lca-token-launcher-updater";
+const USER_AGENT = "lca-codex-launcher-updater";
 const MAX_REDIRECTS = 5;
 
 function parseVersion(value) {
@@ -43,13 +43,13 @@ function releaseVersion(tagName) {
 
 function releaseAssetName(version, platform = process.platform, arch = process.arch) {
   if (platform === "darwin" && ["arm64", "x64"].includes(arch)) {
-    return `lca-token-${version}-mac-${arch}.zip`;
+    return `lca-codex-${version}-mac-${arch}.zip`;
   }
   if (platform === "win32" && arch === "x64") {
-    return `lca-token-${version}-win-x64.exe`;
+    return `lca-codex-${version}-win-x64.exe`;
   }
   if (platform === "linux" && arch === "x64") {
-    return `lca-token-${version}-linux-x64.AppImage`;
+    return `lca-codex-${version}-linux-x64.AppImage`;
   }
   return null;
 }
@@ -150,7 +150,7 @@ function findMacApplication(root) {
   const appEntry = entries.find((entry) => entry.isDirectory() && entry.name.endsWith(".app"));
   if (!appEntry) throw new Error("The macOS update archive does not contain an application bundle");
   const application = path.join(root, appEntry.name);
-  const executable = path.join(application, "Contents", "MacOS", "Lca Token");
+  const executable = path.join(application, "Contents", "MacOS", "LCA Codex");
   if (!fs.existsSync(executable) || !fs.statSync(executable).isFile()) {
     throw new Error("The macOS update archive is incomplete");
   }
@@ -181,7 +181,7 @@ function buildJob({ version, platform, executablePath, assetPath, stagingRoot, t
     };
   }
   if (platform === "linux") {
-    const target = process.env.LCA_TOKEN_APPIMAGE?.trim()
+    const target = process.env.LCA_CODEX_APPIMAGE?.trim()
       || process.env.APPIMAGE?.trim();
     if (!target || !path.isAbsolute(target)) {
       throw new Error("The running Linux AppImage path is unavailable; reinstall with install-launcher.sh");
@@ -194,7 +194,7 @@ function buildJob({ version, platform, executablePath, assetPath, stagingRoot, t
       logPath,
       source: assetPath,
       target,
-      wrapper: process.env.LCA_TOKEN_LAUNCHER_EXECUTABLE?.trim() || null,
+      wrapper: process.env.LCA_CODEX_LAUNCHER_EXECUTABLE?.trim() || null,
     };
   }
   throw new Error(`Updates are not supported on ${platform}`);
@@ -290,7 +290,7 @@ function createUpdateController({
     const available = candidate;
     pending = (async () => {
       transition({ status: "downloading", version: available.version });
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-update-"));
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-update-"));
       try {
         const checksums = await deps.downloadText(available.checksumsUrl);
         const expected = expectedChecksum(checksums, available.assetName);

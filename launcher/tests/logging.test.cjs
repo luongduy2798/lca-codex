@@ -48,7 +48,7 @@ test("failed launcher IPC calls are written to runtime activity", async () => {
 });
 
 test("launcher activity restores valid records from the previous process", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-logging-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-logging-"));
   const filePath = path.join(root, "launcher.jsonl");
   try {
     fs.writeFileSync(filePath, [
@@ -64,7 +64,7 @@ test("launcher activity restores valid records from the previous process", () =>
 });
 
 test("a closed Windows diagnostic pipe is recorded without becoming an uncaught process error", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-process-pipe-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-process-pipe-"));
   const filePath = path.join(root, "process-stream-errors.log");
   const stream = new PassThrough();
   try {

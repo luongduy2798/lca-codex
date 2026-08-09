@@ -7,7 +7,7 @@ mkdirSync(dirname(output), { recursive: true });
 rmSync(output, { force: true });
 
 const build = await Bun.build({
-  entrypoints: [join(root, "src", "adapters", "lca-token", "browser-helper-main.ts")],
+  entrypoints: [join(root, "src", "adapters", "lca-codex", "browser-helper-main.ts")],
   target: "node",
   format: "cjs",
   minify: true,

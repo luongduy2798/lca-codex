@@ -26,9 +26,9 @@ test("the public source workflow is Electron-first without terminal lifecycle al
 });
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
-  assert.equal(manifest.build.appId, "dev.lcatoken.launcher");
-  assert.equal(manifest.build.productName, "Lca Token");
-  assert.equal(manifest.build.artifactName, "lca-token-${version}-${os}-${arch}.${ext}");
+  assert.equal(manifest.build.appId, "dev.lcacodex.launcher");
+  assert.equal(manifest.build.productName, "LCA Codex");
+  assert.equal(manifest.build.artifactName, "lca-codex-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
   assert.equal(manifest.build.win.icon, "assets/icon.ico");
@@ -51,7 +51,7 @@ test("release installers resolve checksummed native launcher assets", () => {
   }
   assert.match(shellInstaller, /PLATFORM="mac"/);
   assert.match(shellInstaller, /PLATFORM="linux"/);
-  assert.match(shellInstaller, /lca-token\.desktop/);
+  assert.match(shellInstaller, /lca-codex\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /process\.execPath/);
@@ -66,7 +66,7 @@ test("release installers resolve checksummed native launcher assets", () => {
       < shellInstaller.indexOf('"$TEMP_DIR/$ASSET" --appimage-extract'),
     "the downloaded AppImage must be executable before it is inspected",
   );
-  assert.match(windowsInstaller, /lca-token-\$Version-win-\$Arch\.exe/);
+  assert.match(windowsInstaller, /lca-codex-\$Version-win-\$Arch\.exe/);
   assert.match(windowsInstaller, /\[Environment\]::Is64BitOperatingSystem/);
   assert.doesNotMatch(windowsInstaller, /RuntimeInformation/);
   const expectedWindowsExecutable = `Programs\\${manifest.name}\\${manifest.build.productName}.exe`;
@@ -102,7 +102,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /launcher\/build\/runtime/);
   assert.match(release, /bun run app:smoke/);
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
-  assert.match(release, /Lca Token\.app/);
+  assert.match(release, /LCA Codex\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);
 });
 
@@ -114,5 +114,5 @@ test("packaged smoke executes the relocated runtime instead of only checking cop
   assert.match(smoke, /marker\.runtimeVerified\s*!==\s*true/);
   assert.match(smoke, /launcherManifest\.name/);
   assert.match(smoke, /launcherManifest\.build\.productName/);
-  assert.doesNotMatch(smoke, /"Programs",\s*"lca-token"/);
+  assert.doesNotMatch(smoke, /"Programs",\s*"lca-codex"/);
 });

@@ -47,8 +47,8 @@ export function expandUserPath(value: string): string {
 }
 
 export function getConfigDir(): string {
-  const configured = process.env.LCA_TOKEN_HOME?.trim();
-  return resolve(expandUserPath(configured || join(homedir(), ".lca-token")));
+  const configured = process.env.LCA_CODEX_HOME?.trim();
+  return resolve(expandUserPath(configured || join(homedir(), ".lca-codex")));
 }
 
 export function getConfigPath(): string {
@@ -62,7 +62,7 @@ export function isWindowsPipeEndpoint(value: string): boolean {
 export function defaultBrokerEndpoint(home = getConfigDir(), platform = process.platform): string {
   if (platform !== "win32") return join(home, "runtime", "turn-broker.sock");
   const identity = createHash("sha256").update(resolve(home).toLowerCase()).digest("hex").slice(0, 20);
-  return `\\\\.\\pipe\\lca-token-${identity}`;
+  return `\\\\.\\pipe\\lca-codex-${identity}`;
 }
 
 export function resolveBrokerEndpoint(value: string): string {
@@ -116,7 +116,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
-    appName: "lca-token",
+    appName: "lca-codex",
     browserHost: "managed-chrome",
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
@@ -135,7 +135,7 @@ export function currentRuntimeCommand(): string[] {
     ? installedBunExecutable()
     : undefined;
   return runtimeCommandForProcess({
-    launcher: process.env.LCA_TOKEN_LAUNCHER,
+    launcher: process.env.LCA_CODEX_LAUNCHER,
     executable: process.execPath,
     entry: typeof Bun !== "undefined" ? Bun.main : process.argv[1],
     bunExecutable,
@@ -159,7 +159,7 @@ export function installedBunExecutable({
     .filter(Boolean)
     .map(part => join(part, executableName));
   const discovered = [
-    process.env.LCA_TOKEN_BUN,
+    process.env.LCA_CODEX_BUN,
     ...candidates,
     ...pathCandidates,
     typeof Bun !== "undefined" ? Bun.which("bun") : undefined,
@@ -246,13 +246,13 @@ export function defaultChromeExecutable(
 
 export function loadConfig(): AppConfig {
   const path = getConfigPath();
-  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-token setup first.`);
+  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-codex setup first.`);
   return parseConfig(JSON.parse(readFileSync(path, "utf8")), path);
 }
 
 export function loadConfigForSetup(): AppConfig {
   const path = getConfigPath();
-  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-token setup first.`);
+  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-codex setup first.`);
   const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   if (raw.version === 1 && raw.mode === "pro-only") {
     raw.version = 2;
@@ -347,7 +347,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
   const models = ["gpt-5.6-sol"];
   const efforts = ["low", "medium", "high", ...(config.proAvailable ? ["xhigh", "max"] : [])];
   return {
-    adapter: "lca-token",
+    adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
     models,
     liveModels: false,
@@ -357,7 +357,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     modelReasoningEfforts: { "gpt-5.6-sol": efforts },
     modelDefaultReasoningEfforts: { "gpt-5.6-sol": "high" },
     noReasoningModels: [],
-    lcaToken: {
+    lcaCodex: {
       appName: config.appName,
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,

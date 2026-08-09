@@ -95,7 +95,7 @@ export interface RuntimeStatus {
     host: string;
     port: number | null;
     occupied: boolean;
-    identity: "lca-token" | "foreign" | "none";
+    identity: "lca-codex" | "foreign" | "none";
   };
 }
 

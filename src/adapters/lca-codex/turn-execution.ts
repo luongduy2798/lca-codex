@@ -143,18 +143,18 @@ function executionKey(parsed: CodexParsedRequest, payload: unknown): string {
 function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
   const body = parsed._rawBody;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("Lca Token compaction requires the complete native Codex request body");
+    throw new Error("LCA Codex compaction requires the complete native Codex request body");
   }
   const input = (body as { input?: unknown }).input;
   if (!Array.isArray(input)) {
-    throw new Error("Lca Token compaction requires the complete native Codex input history");
+    throw new Error("LCA Codex compaction requires the complete native Codex input history");
   }
   return input;
 }
 
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
-  if (!identity.turnId) throw new Error("Lca Token requires native Codex turn_id metadata for browser-session replay");
+  if (!identity.turnId) throw new Error("LCA Codex requires native Codex turn_id metadata for browser-session replay");
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,
@@ -168,7 +168,7 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
 /** Locate the browser response that a native mid-turn compaction replaces. */
 export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
-  if (!identity.turnId) throw new Error("Lca Token requires native Codex turn_id metadata for browser-session replay");
+  if (!identity.turnId) throw new Error("LCA Codex requires native Codex turn_id metadata for browser-session replay");
   const source = extractChatGptCompactionSourceRevision(parsed);
   return executionKey(parsed, {
     threadId: identity.threadId,
@@ -308,10 +308,10 @@ export class ChatGptTurnSessions {
     const active = [...this.entries.values()].filter(session => session.isActive()).length;
     if (active >= MAX_CHATGPT_BROWSER_TABS) {
       throw new Error(
-        `Lca Token supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+        `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
       );
     }
-    if (this.entries.size >= this.maxEntries) throw new Error(`Lca Token session registry is full (${this.maxEntries} entries)`);
+    if (this.entries.size >= this.maxEntries) throw new Error(`LCA Codex session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start(), scope);
     this.entries.set(key, session);
     return session;

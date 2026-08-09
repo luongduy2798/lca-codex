@@ -59,7 +59,7 @@ async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appNam
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
-      LCA_TOKEN_BROWSER_HELPER_PROCESS: "1",
+      LCA_CODEX_BROWSER_HELPER_PROCESS: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

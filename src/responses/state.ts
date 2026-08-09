@@ -149,7 +149,7 @@ function persistNow(path: string): void {
 
 function schedulePersist(): void {
   if (persistTimer) return;
-  // Resolve the target path now: tests may swap LCA_TOKEN_HOME before the
+  // Resolve the target path now: tests may swap LCA_CODEX_HOME before the
   // debounce fires, and a late write must land in the home that owned the recorded state.
   pendingPersistPath = snapshotPath();
   const path = pendingPersistPath;
@@ -160,7 +160,7 @@ function schedulePersist(): void {
 /** Flush any pending debounced snapshot write (graceful shutdown / deterministic tests). */
 export function flushResponseState(): void {
   if (!persistTimer) return;
-  // Use the path captured when the write was scheduled; LCA_TOKEN_HOME may have moved.
+  // Use the path captured when the write was scheduled; LCA_CODEX_HOME may have moved.
   persistNow(pendingPersistPath ?? snapshotPath());
 }
 

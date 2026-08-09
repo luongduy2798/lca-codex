@@ -10,7 +10,7 @@ function run(args: string[], cwd: string): void {
     cwd,
     env: {
       ...process.env,
-      LCA_TOKEN_BUN: bunExecutable,
+      LCA_CODEX_BUN: bunExecutable,
     },
     stdin: "inherit",
     stdout: "inherit",

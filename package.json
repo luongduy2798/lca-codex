@@ -1,5 +1,5 @@
 {
-  "name": "lca-token",
+  "name": "lca-codex",
   "version": "2.0.0",
   "private": true,
   "author": "thayduytrutri",
@@ -7,7 +7,7 @@
   "packageManager": "bun@1.3.14",
   "type": "module",
   "bin": {
-    "lca-token": "./src/cli.ts"
+    "lca-codex": "./src/cli.ts"
   },
   "files": [
     "dist",

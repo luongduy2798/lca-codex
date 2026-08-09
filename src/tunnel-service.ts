@@ -5,7 +5,7 @@ import type { AppConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 
-const LABEL = "io.github.luongduy2798.lca-token.tunnel";
+const LABEL = "io.github.luongduy2798.lca-codex.tunnel";
 
 export interface TunnelServiceStatus {
   supported: boolean;
@@ -64,7 +64,7 @@ ${args.map(arg => `    <string>${xml(arg)}</string>`).join("\n")}
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>LCA_TOKEN_HOME</key>
+    <key>LCA_CODEX_HOME</key>
     <string>${xml(getConfigDir())}</string>
   </dict>
   <key>RunAtLoad</key>

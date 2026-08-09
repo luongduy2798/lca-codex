@@ -1,17 +1,17 @@
 import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
-  availableLcaTokenReasoningModes,
-  LCA_TOKEN_MODEL,
-  LCA_TOKEN_MODEL_PREFIX,
-  LCA_TOKEN_MODEL_SLUG,
-  resolveLcaTokenContextLimits,
-} from "./lca-token-models";
+  availableLcaCodexReasoningModes,
+  LCA_CODEX_MODEL,
+  LCA_CODEX_MODEL_PREFIX,
+  LCA_CODEX_MODEL_SLUG,
+  resolveLcaCodexContextLimits,
+} from "./lca-codex-models";
 
 type JsonObject = Record<string, unknown>;
 
-/** Keep the routed Lca Token model at the front of Codex's spawn-agent override registry. */
-export const LCA_TOKEN_MODEL_PRIORITY = 0;
+/** Keep the routed LCA Codex model at the front of Codex's spawn-agent override registry. */
+export const LCA_CODEX_MODEL_PRIORITY = 0;
 
 function object(value: unknown, label: string): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -34,15 +34,15 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
   return { ...(source ? structuredClone(source) : {}), effort, description };
 }
 
-function isOwnedLcaTokenSlug(modelSlug: string | undefined): boolean {
-  return modelSlug === LCA_TOKEN_MODEL_SLUG || modelSlug?.startsWith(LCA_TOKEN_MODEL_PREFIX) === true;
+function isOwnedLcaCodexSlug(modelSlug: string | undefined): boolean {
+  return modelSlug === LCA_CODEX_MODEL_SLUG || modelSlug?.startsWith(LCA_CODEX_MODEL_PREFIX) === true;
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const model = value as JsonObject;
   const modelSlug = slug(model);
-  if (!modelSlug || isOwnedLcaTokenSlug(modelSlug)) return false;
+  if (!modelSlug || isOwnedLcaCodexSlug(modelSlug)) return false;
   if (model.visibility !== "list" || model.supported_in_api !== true) return false;
   if (!Array.isArray(model.supported_reasoning_levels)) return false;
   return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
@@ -60,29 +60,29 @@ function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject 
   );
 }
 
-export function buildLcaTokenModel(
+export function buildLcaCodexModel(
   templateValue: unknown,
   config: AppConfig,
 ): JsonObject {
   const template = object(templateValue, "native Codex model template");
   const templateSlug = slug(template);
-  if (!templateSlug || isOwnedLcaTokenSlug(templateSlug)) {
-    throw new Error("Lca Token model template must be a native Codex model");
+  if (!templateSlug || isOwnedLcaCodexSlug(templateSlug)) {
+    throw new Error("LCA Codex model template must be a native Codex model");
   }
-  const reasoningModes = availableLcaTokenReasoningModes(config.proAvailable);
+  const reasoningModes = availableLcaCodexReasoningModes(config.proAvailable);
   // Codex exposes context size per model, not per reasoning level. Use the smallest supported
   // window in the catalog so Instant/Medium never overrun; the browser runtime still enforces the
   // exact 150k/185k/256k/272k limit for the reasoning mode selected on each turn.
-  const catalogLimits = resolveLcaTokenContextLimits("low");
+  const catalogLimits = resolveLcaCodexContextLimits("low");
   const model: JsonObject = {
     ...structuredClone(template),
-    slug: LCA_TOKEN_MODEL.slug,
-    display_name: LCA_TOKEN_MODEL.displayName,
-    description: LCA_TOKEN_MODEL.description,
+    slug: LCA_CODEX_MODEL.slug,
+    display_name: LCA_CODEX_MODEL.displayName,
+    description: LCA_CODEX_MODEL.description,
     input_modalities: ["text", "image"],
     visibility: "list",
     supported_in_api: true,
-    priority: LCA_TOKEN_MODEL_PRIORITY,
+    priority: LCA_CODEX_MODEL_PRIORITY,
     multi_agent_version: "v1",
     // Pro's lack of local computer tools is enforced by the adapter runtime after reasoning is
     // resolved; the shared model must remain tool-capable so other reasoning levels keep Codex tools.
@@ -95,7 +95,7 @@ export function buildLcaTokenModel(
     context_window: catalogLimits.contextWindow,
     max_context_window: catalogLimits.contextWindow,
     auto_compact_token_limit: catalogLimits.autoCompactTokenLimit,
-    // Lca Token has no Codex service tier. Never inherit the native template's Fast tiers.
+    // LCA Codex has no Codex service tier. Never inherit the native template's Fast tiers.
     additional_speed_tiers: [],
     service_tiers: [],
     default_service_tier: null,
@@ -115,12 +115,12 @@ export function augmentNativeModelCatalog(
     throw new Error("Native Codex models response is missing a models array");
   }
   const nativeModels = structuredClone(
-    catalog.models.filter(model => !isOwnedLcaTokenSlug(slug(model))),
+    catalog.models.filter(model => !isOwnedLcaCodexSlug(slug(model))),
   );
   const template = selectNativeTemplate(nativeModels, config);
   if (contextOverride) {
     // model_context_window is a single top-level Codex setting, not a per-model one. Apply it only
-    // to native models; the routed Lca Token model owns its conservative shared catalog window.
+    // to native models; the routed LCA Codex model owns its conservative shared catalog window.
     for (const candidate of nativeModels) {
       const modelSlug = slug(candidate);
       if (!modelSlug) continue;
@@ -137,6 +137,6 @@ export function augmentNativeModelCatalog(
   }
   return {
     ...structuredClone(catalog),
-    models: [...nativeModels, buildLcaTokenModel(template, config)],
+    models: [...nativeModels, buildLcaCodexModel(template, config)],
   };
 }

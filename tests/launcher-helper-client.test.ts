@@ -2,9 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LcaTokenAdapterError } from "../src/adapters/lca-token/adapter-error";
-import { LauncherBrowserHelperClient } from "../src/adapters/lca-token/launcher-helper-client";
-import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/lca-token/browser-worker";
+import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
+import { LauncherBrowserHelperClient } from "../src/adapters/lca-codex/launcher-helper-client";
+import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/lca-codex/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND } from "../src/launcher-browser-host";
 
 const roots: string[] = [];
@@ -41,13 +41,13 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
       token: "launcher-control-token-0123456789abcdefghijklmnop",
     },
     helper: { executable: process.execPath, script: helper },
-    partition: "persist:lca-token-chatgpt",
-    idleUrl: "about:blank#lca-token-browser-host",
+    partition: "persist:lca-codex-chatgpt",
+    idleUrl: "about:blank#lca-codex-browser-host",
     surfaceId: "launcher_surface_id_0123456789AB",
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
-    appName: "lca-token",
+    appName: "lca-codex",
     browserHost: "launcher",
     browserHostDescriptorPath: descriptorPath,
     storageStatePath: join(root, "unused-state.json"),
@@ -87,7 +87,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
   const messages: string[] = [];
   let released = false;
   const client = new LauncherBrowserHelperClient({
-    appName: "lca-token",
+    appName: "lca-codex",
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused-state.json",
@@ -108,7 +108,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     if (message.type === "abort" && message.id) {
       queueMicrotask(() => internal.finishWithError(
         message.id!,
-        new DOMException("Lca Token turn aborted", "AbortError"),
+        new DOMException("LCA Codex turn aborted", "AbortError"),
       ));
     }
   };
@@ -134,7 +134,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
 
 test("structured helper errors preserve the ChatGPT adapter failure contract", async () => {
   const client = new LauncherBrowserHelperClient({
-    appName: "lca-token",
+    appName: "lca-codex",
     browserHost: "launcher",
     browserHostDescriptorPath: "/durable/launcher.json",
     storageStatePath: "/durable/unused-state.json",
@@ -171,7 +171,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
   internal.handleLine(child, JSON.stringify({
     type: "error",
     id: "rate-limit-123",
-    name: "LcaTokenAdapterError",
+    name: "LcaCodexAdapterError",
     message: "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
     status: 429,
     errorType: "rate_limit_error",
@@ -180,7 +180,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
   }));
 
   const error = await result.then(() => undefined, failure => failure);
-  expect(error).toBeInstanceOf(LcaTokenAdapterError);
+  expect(error).toBeInstanceOf(LcaCodexAdapterError);
   expect(error).toMatchObject({
     status: 429,
     errorType: "rate_limit_error",

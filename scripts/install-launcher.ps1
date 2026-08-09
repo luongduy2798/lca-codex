@@ -22,11 +22,11 @@ function Invoke-WithRetry {
   }
 }
 
-$Repository = if ($env:LCA_TOKEN_REPOSITORY) { $env:LCA_TOKEN_REPOSITORY } else { "luongduy2798/lca-token" }
+$Repository = if ($env:LCA_CODEX_REPOSITORY) { $env:LCA_CODEX_REPOSITORY } else { "luongduy2798/lca-codex" }
 if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw "Invalid GitHub repository: $Repository"
 }
-$Version = $env:LCA_TOKEN_VERSION
+$Version = $env:LCA_CODEX_VERSION
 if (-not $Version) {
   $Release = Invoke-WithRetry -Label "Resolving the latest release" -Operation {
     Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 60
@@ -34,7 +34,7 @@ if (-not $Version) {
   $Version = [string]$Release.tag_name
 }
 if ($Version -and $Version.StartsWith("v")) { $Version = $Version.Substring(1) }
-if (-not $Version) { throw "Could not resolve the latest lca-token release" }
+if (-not $Version) { throw "Could not resolve the latest lca-codex release" }
 if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Invalid release version: $Version" }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
@@ -42,13 +42,13 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 }
 $Arch = "x64"
 
-$Asset = "lca-token-$Version-win-$Arch.exe"
+$Asset = "lca-codex-$Version-win-$Arch.exe"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
-$Temp = Join-Path ([System.IO.Path]::GetTempPath()) "lca-token-$([guid]::NewGuid().ToString('N'))"
+$Temp = Join-Path ([System.IO.Path]::GetTempPath()) "lca-codex-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $Temp | Out-Null
 try {
-  if (Get-Process -Name "Lca Token" -ErrorAction SilentlyContinue) {
-    throw "Quit Lca Token before updating it"
+  if (Get-Process -Name "LCA Codex" -ErrorAction SilentlyContinue) {
+    throw "Quit LCA Codex before updating it"
   }
   $Installer = Join-Path $Temp $Asset
   $Checksums = Join-Path $Temp "checksums.txt"
@@ -67,7 +67,7 @@ try {
   if ($Actual -ne $Expected) { throw "SHA-256 verification failed for $Asset" }
   $Process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
   if ($Process.ExitCode -ne 0) { throw "Installer exited with code $($Process.ExitCode)" }
-  $Executable = Join-Path $env:LOCALAPPDATA "Programs\lca-token-launcher\Lca Token.exe"
+  $Executable = Join-Path $env:LOCALAPPDATA "Programs\lca-codex-launcher\LCA Codex.exe"
   if (-not (Test-Path $Executable)) { throw "Installed launcher was not found at $Executable" }
   Start-Process $Executable
   Write-Host "Installed $Executable"

@@ -19,7 +19,7 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const IDLE_BROWSER_URL = "about:blank#lca-token-browser-host";
+const IDLE_BROWSER_URL = "about:blank#lca-codex-browser-host";
 const SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const SMOKE_EXPECTED = "CODEX WEB GPT READY";
 const SMOKE_SUBMISSION_TIMEOUT_MS = 15_000;
@@ -27,7 +27,7 @@ const SMOKE_RESPONSE_TIMEOUT_MS = 120_000;
 const SMOKE_COMPLETION_SETTLE_MS = 1_500;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
-const CHATGPT_PARTITION = "persist:lca-token-chatgpt";
+const CHATGPT_PARTITION = "persist:lca-codex-chatgpt";
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
@@ -251,14 +251,14 @@ class BrowserHost {
   createTurnTab(traceId, helperPid) {
     if (this.turnTabs.size >= MAX_BROWSER_TABS) {
       throw new Error(
-        `Lca Token already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
+        `LCA Codex already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
       );
     }
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
     const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
-    if (!ordinal) throw new Error("Lca Token browser tab allocation is inconsistent");
+    if (!ordinal) throw new Error("LCA Codex browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
         partition: CHATGPT_PARTITION,
@@ -320,7 +320,7 @@ class BrowserHost {
       void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
       const encoded = JSON.stringify(tab.surfaceId);
       void contents.executeJavaScript(`(() => {
-        Object.defineProperty(globalThis, "__LCA_TOKEN_SURFACE_ID__", {
+        Object.defineProperty(globalThis, "__LCA_CODEX_SURFACE_ID__", {
           value: ${encoded}, configurable: true, enumerable: false, writable: false,
         });
         document.documentElement.dataset.codexWebGptSurface = ${encoded};
@@ -705,7 +705,7 @@ class BrowserHost {
   async markOwnedSurface() {
     const surfaceId = JSON.stringify(this.surfaceId);
     await this.view.webContents.executeJavaScript(`(() => {
-      Object.defineProperty(globalThis, "__LCA_TOKEN_SURFACE_ID__", {
+      Object.defineProperty(globalThis, "__LCA_CODEX_SURFACE_ID__", {
         value: ${surfaceId},
         configurable: true,
         enumerable: false,
@@ -1620,12 +1620,12 @@ class BrowserHost {
   writeDescriptor() {
     const descriptor = {
       version: 1,
-      kind: "lca-token-launcher",
+      kind: "lca-codex-launcher",
       pid: process.pid,
       endpoint: `http://127.0.0.1:${this.cdpPort}`,
       control: this.control,
       helper: this.helper,
-      partition: "persist:lca-token-chatgpt",
+      partition: "persist:lca-codex-chatgpt",
       idleUrl: IDLE_BROWSER_URL,
       surfaceId: this.surfaceId,
       createdAt: new Date().toISOString(),

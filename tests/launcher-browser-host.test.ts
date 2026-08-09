@@ -38,8 +38,8 @@ function descriptorFile(controlEndpoint = "http://127.0.0.1:39111"): string {
       executable: process.execPath,
       script: import.meta.path,
     },
-    partition: "persist:lca-token-chatgpt",
-    idleUrl: "about:blank#lca-token-browser-host",
+    partition: "persist:lca-codex-chatgpt",
+    idleUrl: "about:blank#lca-codex-browser-host",
     surfaceId: "launcher_surface_id_0123456789AB",
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
@@ -180,7 +180,7 @@ test("launcher page selection uses the owned surface marker instead of URL order
     evaluate: async () => "another_surface_id_0123456789ABC",
   } as unknown as Page;
   const ownedPage = {
-    url: () => "about:blank#lca-token-browser-host",
+    url: () => "about:blank#lca-codex-browser-host",
     evaluate: async () => descriptor.surfaceId,
   } as unknown as Page;
   const context = {

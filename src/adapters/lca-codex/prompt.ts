@@ -3,9 +3,9 @@ import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexPa
 import { estimateTokens } from "../../lib/token-estimate";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import { extractTrustedCodexProjectInstructions } from "./environment";
-import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
+import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
 
-export interface LcaTokenPromptImage {
+export interface LcaCodexPromptImage {
   ref: string;
   imageUrl: string;
   detail?: string;
@@ -22,7 +22,7 @@ export interface ChatGptContextEntry {
   attachmentRefs: string[];
 }
 
-export interface ChatGptContextAttachment extends LcaTokenPromptImage {
+export interface ChatGptContextAttachment extends LcaCodexPromptImage {
   messageId: string;
 }
 
@@ -38,12 +38,12 @@ export interface ChatGptContextSnapshot {
   /** Historical image payloads. These are never attached to a fresh Temporary Chat automatically. */
   attachments: ChatGptContextAttachment[];
   /** Bounded full-context image set used only by inline/read-only fallback. */
-  images: LcaTokenPromptImage[];
+  images: LcaCodexPromptImage[];
 }
 
-export interface CompiledLcaTokenPrompt {
+export interface CompiledLcaCodexPrompt {
   text: string;
-  images: LcaTokenPromptImage[];
+  images: LcaCodexPromptImage[];
   transport: ChatGptContextTransport;
   contextSnapshotId?: string;
   /** Effective model-input tokens carried through MCP rather than the visible composer. */
@@ -81,7 +81,7 @@ interface ImageBudget {
 
 function inputContent(
   content: string | CodexContentPart[],
-  images: LcaTokenPromptImage[],
+  images: LcaCodexPromptImage[],
   budget: ImageBudget,
 ): unknown {
   if (typeof content === "string") return content;
@@ -195,7 +195,7 @@ export function withoutSupersededModelSwitchContracts(messages: readonly CodexMe
 
 function messageEnvelope(
   message: CodexMessage,
-  images: LcaTokenPromptImage[],
+  images: LcaCodexPromptImage[],
   budget: ImageBudget,
 ): Record<string, unknown> {
   if (message.role === "toolResult") {
@@ -491,7 +491,7 @@ export function compileChatGptContextSnapshot(parsed: CodexParsedRequest): ChatG
   const trustedProjectInstructions = extractTrustedCodexProjectInstructions(parsed);
   const projectInstructionsIndex = latestProjectInstructionsIndex(normalized, trustedProjectInstructions);
 
-  const images: LcaTokenPromptImage[] = [];
+  const images: LcaCodexPromptImage[] = [];
   const budget: ImageBudget = {
     seen: 0,
     dropped: Math.max(0, countChatGptContextImages(normalized) - CHATGPT_MAX_INPUT_IMAGES),
@@ -537,11 +537,11 @@ export function compileChatGptContextSnapshot(parsed: CodexParsedRequest): ChatG
 
 export function chatGptReadOnlyContextWarning(
   parsed: CodexParsedRequest,
-  capabilities: LcaTokenCapabilities,
+  capabilities: LcaCodexCapabilities,
 ): string | undefined {
-  const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (mode.localTools) return undefined;
-  const label = mode.effort === "max" ? "Lca Token Pro" : `Lca Token ${mode.displayLabel}`;
+  const label = mode.effort === "max" ? "LCA Codex Pro" : `LCA Codex ${mode.displayLabel}`;
   const hasLocalEvidence = parsed.context.messages.some(message =>
     message.role === "toolResult"
     || (message.role === "user" && isReadableCompactionSummaryText(message.content))
@@ -550,25 +550,25 @@ export function chatGptReadOnlyContextWarning(
     ? "Workspace information already supplied by Codex remains available for this assistant to reason over."
     : "Codex has not supplied workspace contents to this conversation yet.";
   const nextStep = capabilities.localToolsEnabled
-    ? "Codex mode is configured, but this Lca Token mode is intentionally read-only for workspace access. Switch to a tool-capable Lca Token mode when you need the coding agent."
-    : "To enable Codex mode—the coding agent for files, terminal, code search and patches—configure MCP in the Lca Token launcher.";
+    ? "Codex mode is configured, but this LCA Codex mode is intentionally read-only for workspace access. Switch to a tool-capable LCA Codex mode when you need the coding agent."
+    : "To enable Codex mode—the coding agent for files, terminal, code search and patches—configure MCP in the LCA Codex launcher.";
   return `⚠️ ${label} is running in ChatGPT mode for this turn. ChatGPT mode is a general-purpose AI assistant: it can reason over conversation context, instructions and attachments, but it cannot independently inspect or modify your workspace with coding tools. ${contextNote} ChatGPT-native capabilities such as web search remain available when the product provides them. ${nextStep}`;
 }
 
-export function compileLcaTokenPrompt(
+export function compileLcaCodexPrompt(
   parsed: CodexParsedRequest,
-  capabilities: LcaTokenCapabilities,
+  capabilities: LcaCodexCapabilities,
   turnToken?: string,
   suppliedSnapshot?: ChatGptContextSnapshot,
-  connectorName = "lca-token",
-): CompiledLcaTokenPrompt {
-  const connectorLabel = connectorName.trim() || "lca-token";
-  const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  connectorName = "lca-codex",
+): CompiledLcaCodexPrompt {
+  const connectorLabel = connectorName.trim() || "lca-codex";
+  const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
   if (mode.localTools && !turnToken) {
-    throw new Error("Tool-capable Lca Token mode requires a broker turn token");
+    throw new Error("Tool-capable LCA Codex mode requires a broker turn token");
   }
   if (!mode.localTools && turnToken !== undefined) {
-    throw new Error("A read-only Lca Token effort must not receive a local-tool capability token");
+    throw new Error("A read-only LCA Codex effort must not receive a local-tool capability token");
   }
   const snapshot = suppliedSnapshot ?? compileChatGptContextSnapshot(parsed);
   const mcpLazy = mode.localTools && !parsed._compactionRequest;
@@ -576,7 +576,7 @@ export function compileLcaTokenPrompt(
   const latestUserIndex = latestUserMessageIndex(normalizedMessages);
   const trustedProjectInstructions = extractTrustedCodexProjectInstructions(parsed);
   const projectInstructionsIndex = latestProjectInstructionsIndex(normalizedMessages, trustedProjectInstructions);
-  const activeImages: LcaTokenPromptImage[] = [];
+  const activeImages: LcaCodexPromptImage[] = [];
   const latestUser = latestUserIndex >= 0 ? normalizedMessages[latestUserIndex] : undefined;
   const projectInstructions = projectInstructionsIndex >= 0 ? trustedProjectInstructions : undefined;
   const developerOverrides = normalizedMessages
@@ -632,7 +632,7 @@ export function compileLcaTokenPrompt(
       "Native connector tools bridge synchronously into the exact active outer Codex tool registry. Make real calls, wait for real results, and continue until the requested work is complete.",
     ]
     : [
-      `This is Lca Token ${mode.displayLabel} with no lca-token bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
+      `This is LCA Codex ${mode.displayLabel} with no lca-codex bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
       "Use any ChatGPT-native capabilities available in this chat—including web search, browsing, research, and other first-party tools—whenever they help complete the request. The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available.",
       "The task history below already contains everything Codex collected from the user's local workspace. Treat prior local tool results as authoritative snapshots of that earlier work.",
       "Do not claim a new local inspection, command, edit, or verification unless it actually appears in the task history. If the latest request requires fresh local-computer access or a local mutation, state only that exact limitation instead of inventing success.",

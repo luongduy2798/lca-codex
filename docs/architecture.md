@@ -4,8 +4,8 @@
 Codex app / CLI
       │ Responses API on loopback
       ▼
-launcher-owned lca-token daemon
-  ├─ official /models passthrough + fixed Lca Token models
+launcher-owned lca-codex daemon
+  ├─ official /models passthrough + fixed LCA Codex models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
   ├─ capability broker (full mode only)
@@ -20,7 +20,7 @@ launcher-owned lca-token daemon
 
 ### `browser-only`
 
-- Exposes one `lca-token` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
+- Exposes one `lca-codex` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
   matching ChatGPT browser mode; Extra High and Pro are advertised only when the authenticated
   account exposes Pro.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat. Because this mode has no connector, the context remains an inline composer payload.
@@ -65,7 +65,7 @@ read-only `codex_context` tool exposes `instructions` for Codex capability guida
 `recent`, `search`, `get`, `full`, and `image` for deeper task state. A truncated working-memory entry
 can be expanded with `get`; historical images remain lazy. The model is explicitly told to resolve
 ordinary conversational references from the inline recent context first and bind only when the
-needed information is outside that working set or a native Codex tool is required. `lca-token` never
+needed information is outside that working set or a native Codex tool is required. `lca-codex` never
 discovers AGENTS.md or chooses a skill itself; it only projects and serves the exact instruction
 material already supplied by the outer Codex harness.
 
@@ -116,8 +116,8 @@ removed during an explicit launcher migration; launchd remains only for the adva
 mode.
 
 Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
-forwards the authenticated official model catalog and appends only the single routed `lca-token`
-model; stale `lca-token/*` routes are removed locally and no static catalog is installed.
+forwards the authenticated official model catalog and appends only the single routed `lca-codex`
+model; stale `lca-codex/*` routes are removed locally and no static catalog is installed.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky

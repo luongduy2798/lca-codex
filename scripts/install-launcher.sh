@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="${LCA_TOKEN_REPOSITORY:-luongduy2798/lca-token}"
-VERSION="${LCA_TOKEN_VERSION:-}"
+REPOSITORY="${LCA_CODEX_REPOSITORY:-luongduy2798/lca-codex}"
+VERSION="${LCA_CODEX_VERSION:-}"
 OS="$(uname -s)"
 MACHINE="$(uname -m)"
 
@@ -40,16 +40,16 @@ if [ -z "$VERSION" ]; then
 fi
 VERSION="${VERSION#v}"
 if [ -z "$VERSION" ]; then
-  echo "Could not resolve the latest lca-token release" >&2
+  echo "Could not resolve the latest lca-codex release" >&2
   exit 1
 fi
 case "$VERSION" in
   *[!A-Za-z0-9._-]*) echo "Invalid release version: $VERSION" >&2; exit 1 ;;
 esac
 
-ASSET="lca-token-$VERSION-$PLATFORM-$ARCH.$EXTENSION"
+ASSET="lca-codex-$VERSION-$PLATFORM-$ARCH.$EXTENSION"
 BASE_URL="https://github.com/$REPOSITORY/releases/download/v$VERSION"
-TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lca-token-launcher.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lca-codex-launcher.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
 curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
@@ -72,12 +72,12 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
 fi
 
 if [ "$OS" = "Darwin" ]; then
-  INSTALL_DIR="${LCA_TOKEN_APPLICATIONS_DIR:-/Applications}"
+  INSTALL_DIR="${LCA_CODEX_APPLICATIONS_DIR:-/Applications}"
   STAGE_DIR="$TEMP_DIR/stage"
   mkdir "$STAGE_DIR"
   ditto -x -k "$TEMP_DIR/$ASSET" "$STAGE_DIR"
-  SOURCE_APP="$STAGE_DIR/Lca Token.app"
-  if [ ! -d "$SOURCE_APP" ] || [ ! -x "$SOURCE_APP/Contents/MacOS/Lca Token" ]; then
+  SOURCE_APP="$STAGE_DIR/LCA Codex.app"
+  if [ ! -d "$SOURCE_APP" ] || [ ! -x "$SOURCE_APP/Contents/MacOS/LCA Codex" ]; then
     echo "Launcher archive is incomplete" >&2
     exit 1
   fi
@@ -85,12 +85,12 @@ if [ "$OS" = "Darwin" ]; then
     INSTALL_DIR="$HOME/Applications"
     mkdir -p "$INSTALL_DIR"
   fi
-  TARGET_APP="$INSTALL_DIR/Lca Token.app"
-  if pgrep -x "Lca Token" >/dev/null 2>&1; then
-    echo "Quit Lca Token before updating it" >&2
+  TARGET_APP="$INSTALL_DIR/LCA Codex.app"
+  if pgrep -x "LCA Codex" >/dev/null 2>&1; then
+    echo "Quit LCA Codex before updating it" >&2
     exit 1
   fi
-  BACKUP_APP="$TEMP_DIR/lca-token.previous.app"
+  BACKUP_APP="$TEMP_DIR/lca-codex.previous.app"
   if [ -e "$TARGET_APP" ]; then mv "$TARGET_APP" "$BACKUP_APP"; fi
   if ! ditto "$SOURCE_APP" "$TARGET_APP"; then
     rm -rf "$TARGET_APP"
@@ -102,20 +102,20 @@ if [ "$OS" = "Darwin" ]; then
   exit 0
 fi
 
-LIB_DIR="${LCA_TOKEN_LIB_DIR:-$HOME/.local/lib/lca-token}"
-BIN_DIR="${LCA_TOKEN_BIN_DIR:-$HOME/.local/bin}"
+LIB_DIR="${LCA_CODEX_LIB_DIR:-$HOME/.local/lib/lca-codex}"
+BIN_DIR="${LCA_CODEX_BIN_DIR:-$HOME/.local/bin}"
 TARGET_DIR="$LIB_DIR/$VERSION"
-TARGET="$TARGET_DIR/lca-token.AppImage"
-WRAPPER="$BIN_DIR/lca-token"
-CORE_HOME="${LCA_TOKEN_HOME:-$HOME/.lca-token}"
+TARGET="$TARGET_DIR/lca-codex.AppImage"
+WRAPPER="$BIN_DIR/lca-codex"
+CORE_HOME="${LCA_CODEX_HOME:-$HOME/.lca-codex}"
 DESCRIPTOR="$CORE_HOME/runtime/launcher-browser.json"
 RUNNING_PID=""
 if [ -f "$DESCRIPTOR" ]; then
   RUNNING_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$DESCRIPTOR" | head -n 1)"
 fi
 if { [ -n "$RUNNING_PID" ] && kill -0 "$RUNNING_PID" 2>/dev/null; } \
-  || pgrep -f "lca-token\\.AppImage" >/dev/null 2>&1; then
-  echo "Quit lca-token before updating it" >&2
+  || pgrep -f "lca-codex\\.AppImage" >/dev/null 2>&1; then
+  echo "Quit lca-codex before updating it" >&2
   exit 1
 fi
 EXTRACT_DIR="$TEMP_DIR/appimage"
@@ -151,8 +151,8 @@ TARGET_QUOTED="$(shell_quote "$TARGET")"
   printf '%s\n' '#!/bin/sh'
   printf '%s\n' 'set -eu'
   printf '%s\n' 'export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"'
-  printf 'export LCA_TOKEN_LAUNCHER_EXECUTABLE=%s\n' "$WRAPPER_QUOTED"
-  printf 'export LCA_TOKEN_APPIMAGE=%s\n' "$TARGET_QUOTED"
+  printf 'export LCA_CODEX_LAUNCHER_EXECUTABLE=%s\n' "$WRAPPER_QUOTED"
+  printf 'export LCA_CODEX_APPIMAGE=%s\n' "$TARGET_QUOTED"
   printf 'exec %s "$@"\n' "$TARGET_QUOTED"
 } > "$WRAPPER_NEXT"
 chmod 0755 "$WRAPPER_NEXT"
@@ -161,26 +161,26 @@ mv -f "$WRAPPER_NEXT" "$WRAPPER"
 APPLICATIONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
 mkdir -p "$APPLICATIONS_DIR" "$ICON_DIR"
-install -m 0644 "$ICON_SOURCE" "$ICON_DIR/lca-token.png"
+install -m 0644 "$ICON_SOURCE" "$ICON_DIR/lca-codex.png"
 DESKTOP_WRAPPER="$(printf '%s' "$WRAPPER" | sed \
   -e 's/\\/\\\\/g' \
   -e 's/"/\\"/g' \
   -e 's/`/\\`/g' \
   -e 's/\$/\\$/g' \
   -e 's/%/%%/g')"
-cat > "$APPLICATIONS_DIR/lca-token.desktop" <<EOF
+cat > "$APPLICATIONS_DIR/lca-codex.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=lca-token
-Comment=Lca Token models inside the native Codex harness
+Name=lca-codex
+Comment=LCA Codex models inside the native Codex harness
 Exec="$DESKTOP_WRAPPER"
-Icon=lca-token
+Icon=lca-codex
 Terminal=false
 Categories=Development;
-StartupWMClass=lca-token
+StartupWMClass=lca-codex
 EOF
-chmod 0644 "$APPLICATIONS_DIR/lca-token.desktop"
+chmod 0644 "$APPLICATIONS_DIR/lca-codex.desktop"
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$APPLICATIONS_DIR" >/dev/null 2>&1 || true
 fi

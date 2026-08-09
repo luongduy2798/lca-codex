@@ -38,7 +38,7 @@ export interface CodexParsedRequest {
   _contextCompactionBoundary?: boolean;
   /**
    * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
-   * Lca Token has no OpenAI backend key for that blob and must fail before opening the browser.
+   * LCA Codex has no OpenAI backend key for that blob and must fail before opening the browser.
    */
   _opaqueMultiAgentV2Payload?: boolean;
 }
@@ -289,7 +289,7 @@ export interface CodexUsage {
 
 /** The only provider configuration supported by this focused runtime. */
 export interface CodexProviderConfig {
-  adapter: "lca-token";
+  adapter: "lca-codex";
   baseUrl: string;
   defaultModel?: string;
   models?: string[];
@@ -300,7 +300,7 @@ export interface CodexProviderConfig {
   modelReasoningEfforts?: Record<string, string[]>;
   modelDefaultReasoningEfforts?: Record<string, string>;
   noReasoningModels?: string[];
-  lcaToken?: {
+  lcaCodex?: {
     /** ChatGPT custom connector attached to tool-capable temporary chats. */
     appName?: string;
     /** Explicit browser owner. Launcher mode attaches to the embedded Electron ChatGPT surface. */

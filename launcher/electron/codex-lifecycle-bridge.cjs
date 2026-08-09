@@ -8,7 +8,7 @@ const STATE_VERSION = 1;
 const SETTING_KEY = "chatgpt.cliExecutable";
 
 function resolveHome(value) {
-  return path.resolve(value || process.env.LCA_TOKEN_HOME?.trim() || path.join(os.homedir(), ".lca-token"));
+  return path.resolve(value || process.env.LCA_CODEX_HOME?.trim() || path.join(os.homedir(), ".lca-codex"));
 }
 
 function shellQuote(value) {

@@ -1,21 +1,21 @@
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
-import type { CompiledLcaTokenPrompt } from "./prompt";
-import { compileLcaTokenPrompt } from "./prompt";
-import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
+import type { CompiledLcaCodexPrompt } from "./prompt";
+import { compileLcaCodexPrompt } from "./prompt";
+import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
 import type { BrokerToolRequest } from "./turn-broker";
 
 // The real capability has the same length. Keeping it out of usage accounting would make
 // estimates differ slightly between the prepared browser prompt and later Codex tool rounds.
 const ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
 
-// ChatGPT's product system prompt and the fixed lca-token MCP schemas are not present in the
+// ChatGPT's product system prompt and the fixed lca-codex MCP schemas are not present in the
 // visible composer text. Reserve them explicitly; over-counting fails safe by compacting earlier.
 const CHATGPT_PLATFORM_RESERVE_TOKENS = 8_192;
 const CHATGPT_IMAGE_RESERVE_TOKENS = 4_096;
 const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
 
-export interface LcaTokenRoundEvidence {
+export interface LcaCodexRoundEvidence {
   answer?: string;
   reasoning?: string[];
   toolRequests?: BrokerToolRequest[];
@@ -25,8 +25,8 @@ function conservativeTextTokens(text: string, modelId: string): number {
   return estimateTokens(text, modelId);
 }
 
-export function estimateCompiledLcaTokenInputTokens(
-  compiled: CompiledLcaTokenPrompt,
+export function estimateCompiledLcaCodexInputTokens(
+  compiled: CompiledLcaCodexPrompt,
   modelId: string,
 ): number {
   const imageTokens = compiled.images.reduce(
@@ -41,20 +41,20 @@ export function estimateCompiledLcaTokenInputTokens(
     + imageTokens;
 }
 
-export function estimateLcaTokenInputTokens(
+export function estimateLcaCodexInputTokens(
   parsed: CodexParsedRequest,
-  capabilities: LcaTokenCapabilities,
+  capabilities: LcaCodexCapabilities,
 ): number {
-  const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  const compiled = compileLcaTokenPrompt(
+  const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const compiled = compileLcaCodexPrompt(
     parsed,
     capabilities,
     mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
   );
-  return estimateCompiledLcaTokenInputTokens(compiled, parsed.modelId);
+  return estimateCompiledLcaCodexInputTokens(compiled, parsed.modelId);
 }
 
-function roundEvidenceText(evidence: LcaTokenRoundEvidence): string {
+function roundEvidenceText(evidence: LcaCodexRoundEvidence): string {
   return JSON.stringify({
     reasoning: evidence.reasoning ?? [],
     ...(evidence.answer !== undefined ? { answer: evidence.answer } : {}),
@@ -70,12 +70,12 @@ function roundEvidenceText(evidence: LcaTokenRoundEvidence): string {
   });
 }
 
-export function estimateLcaTokenUsage(
+export function estimateLcaCodexUsage(
   parsed: CodexParsedRequest,
-  evidence: LcaTokenRoundEvidence,
-  capabilities: LcaTokenCapabilities,
+  evidence: LcaCodexRoundEvidence,
+  capabilities: LcaCodexCapabilities,
 ): CodexUsage {
-  const inputTokens = estimateLcaTokenInputTokens(parsed, capabilities);
+  const inputTokens = estimateLcaCodexInputTokens(parsed, capabilities);
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,

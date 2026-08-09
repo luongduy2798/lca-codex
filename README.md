@@ -1,8 +1,8 @@
-<h1 align="center">lca-token</h1>
+<h1 align="center">LCA Codex</h1>
 
 <p align="center">
-  <strong>Use Lca Token (including Pro) as native Codex models.</strong><br>
-  Change the model tier, save your workflow.
+  <strong>Codex harness powered by ChatGPT Web</strong><br>
+  Use LCA Codex (including Pro) as native Codex models.
 </p>
 
 <p align="center">
@@ -13,19 +13,19 @@
   <img src="https://img.shields.io/badge/Free_AI-no_API_fees-10a37f" alt="Free AI with no API fees">
 </p>
 
-Pick the single **Lca Token** model in Codex's native model picker, then choose its reasoning level
+Pick the single **LCA Codex** model in Codex's native model picker, then choose its reasoning level
 to select Instant, Medium, High, Extra High, or Pro behavior. Every turn still uses a fresh ChatGPT
 Temporary Chat. In full mode, the composer receives only active instructions, the latest user
 request, and current-turn images. Older history/images stay in the immutable broker snapshot and are
-retrieved through the `lca-token` connector only when needed. Visible reasoning, native Codex tool
+retrieved through the `lca-codex` connector only when needed. Visible reasoning, native Codex tool
 activity, and Markdown stream back into the same Codex task.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Lca Token running inside the native Codex harness" width="960">
+  <img src="assets/demo.gif" alt="LCA Codex running inside the native Codex harness" width="960">
 </p>
 
 ```text
-Codex task ──Responses + SSE──▶ lca-token ──embedded browser──▶ ChatGPT
+Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──▶ ChatGPT
      ▲                                │                                      │
      └──────── native UI, context, images, tracing, and tool lifecycle ──────┘
 ```
@@ -74,7 +74,7 @@ Then complete the three checks in the app:
 
 1. Sign in to ChatGPT in the embedded browser.
 2. Run the browser smoke test.
-3. Press **Install models**, restart Codex once, and select a **Lca Token — …** model.
+3. Press **Install models**, restart Codex once, and select a **LCA Codex — …** model.
 
 Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
 guides the full-harness setup without terminal commands.

@@ -19,19 +19,19 @@ import { defaultConfig } from "../src/config";
 const roots: string[] = [];
 
 function fixture(): { root: string; codexHome: string; appHome: string } {
-  const root = join(tmpdir(), `lca-token-integration-${process.pid}-${Date.now()}-${Math.random()}`);
+  const root = join(tmpdir(), `lca-codex-integration-${process.pid}-${Date.now()}-${Math.random()}`);
   const codexHome = join(root, "codex");
   const appHome = join(root, "app");
   mkdirSync(codexHome, { recursive: true });
   roots.push(root);
   process.env.CODEX_HOME = codexHome;
-  process.env.LCA_TOKEN_HOME = appHome;
+  process.env.LCA_CODEX_HOME = appHome;
   return { root, codexHome, appHome };
 }
 
 afterEach(() => {
   delete process.env.CODEX_HOME;
-  delete process.env.LCA_TOKEN_HOME;
+  delete process.env.LCA_CODEX_HOME;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -64,14 +64,14 @@ describe("reversible native Codex route integration", () => {
     const installed = readFileSync(configPath, "utf8");
     expect(journal.version).toBe(6);
     expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
-    expect(installed).toContain("remote_compaction_v2 = false # Managed by lca-token");
-    expect(installed).toContain("multi_agent = true # Managed by lca-token");
-    expect(installed).toContain("multi_agent_v2 = false # Managed by lca-token");
+    expect(installed).toContain("remote_compaction_v2 = false # Managed by lca-codex");
+    expect(installed).toContain("multi_agent = true # Managed by lca-codex");
+    expect(installed).toContain("multi_agent_v2 = false # Managed by lca-codex");
     expect(installed).not.toContain("multi_agent = false");
     expect(installed).toContain("goals = true");
     expect(installed).not.toMatch(/^\s*model_provider\s*=/m);
     expect(installed).not.toMatch(/^\s*model_catalog_json\s*=/m);
-    expect(installed).not.toContain("[model_providers.lca-token]");
+    expect(installed).not.toContain("[model_providers.lca-codex]");
 
     expect(uninstallCodexIntegration()).toEqual({ changed: true });
     expect(readFileSync(configPath, "utf8")).toBe(original);
@@ -100,7 +100,7 @@ describe("reversible native Codex route integration", () => {
 
     installCodexIntegration(defaultConfig("browser-only"));
     const installed = readFileSync(configPath, "utf8");
-    expect(installed).toContain("remote_compaction_v2 = false # Managed by lca-token");
+    expect(installed).toContain("remote_compaction_v2 = false # Managed by lca-codex");
     expect(installed).not.toContain("remote_compaction_v2 = true");
 
     uninstallCodexIntegration();
@@ -115,7 +115,7 @@ describe("reversible native Codex route integration", () => {
 
     installCodexIntegration(defaultConfig("full"));
     const installed = readFileSync(configPath, "utf8");
-    expect(installed).toContain("multi_agent = true # Managed by lca-token");
+    expect(installed).toContain("multi_agent = true # Managed by lca-codex");
     expect(installed).not.toContain("multi_agent = false");
 
     uninstallCodexIntegration();
@@ -130,7 +130,7 @@ describe("reversible native Codex route integration", () => {
 
     installCodexIntegration(defaultConfig("full"));
     const installed = readFileSync(configPath, "utf8");
-    expect(installed).toContain("multi_agent_v2 = false # Managed by lca-token");
+    expect(installed).toContain("multi_agent_v2 = false # Managed by lca-codex");
     expect(installed).not.toContain("multi_agent_v2 = true");
 
     uninstallCodexIntegration();
@@ -157,7 +157,7 @@ describe("reversible native Codex route integration", () => {
     const installed = readFileSync(configPath, "utf8");
     expect(installed).not.toMatch(/^multi_agent_v2\s*=/m);
     expect(installed).toContain(
-      "enabled = false # Managed by lca-token: keeps routed Web subagent payloads readable.",
+      "enabled = false # Managed by lca-codex: keeps routed Web subagent payloads readable.",
     );
     expect(installed).toContain("hide_spawn_agent_metadata = true");
 
@@ -264,9 +264,9 @@ describe("reversible native Codex route integration", () => {
     expect(activateCodexIntegration()).toEqual({ changed: true, active: true });
     const reconnected = readFileSync(configPath, "utf8");
     expect(reconnected).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
-    expect(reconnected).toContain("remote_compaction_v2 = false # Managed by lca-token");
-    expect(reconnected).toContain("multi_agent = true # Managed by lca-token");
-    expect(reconnected).toContain("multi_agent_v2 = false # Managed by lca-token");
+    expect(reconnected).toContain("remote_compaction_v2 = false # Managed by lca-codex");
+    expect(reconnected).toContain("multi_agent = true # Managed by lca-codex");
+    expect(reconnected).toContain("multi_agent_v2 = false # Managed by lca-codex");
     expect(reconnected).toContain('approval_policy = "never"');
     expect(inspectCodexIntegration()).toMatchObject({ installed: true, active: true });
     expect(activateCodexIntegration()).toEqual({ changed: false, active: true });
@@ -341,13 +341,13 @@ describe("reversible native Codex route integration", () => {
     const upgraded = installCodexIntegration(defaultConfig("browser-only"));
     expect(upgraded.version).toBe(6);
     expect(readFileSync(configPath, "utf8")).toContain(
-      "remote_compaction_v2 = false # Managed by lca-token",
+      "remote_compaction_v2 = false # Managed by lca-codex",
     );
     expect(readFileSync(configPath, "utf8")).toContain(
-      "multi_agent = true # Managed by lca-token",
+      "multi_agent = true # Managed by lca-codex",
     );
     expect(readFileSync(configPath, "utf8")).toContain(
-      "multi_agent_v2 = false # Managed by lca-token",
+      "multi_agent_v2 = false # Managed by lca-codex",
     );
   });
 
@@ -373,7 +373,7 @@ describe("reversible native Codex route integration", () => {
     const upgraded = installCodexIntegration(defaultConfig("full"));
     expect(upgraded.version).toBe(6);
     expect(readFileSync(configPath, "utf8")).toContain(
-      "multi_agent_v2 = false # Managed by lca-token",
+      "multi_agent_v2 = false # Managed by lca-codex",
     );
 
     uninstallCodexIntegration();
@@ -443,15 +443,15 @@ describe("reversible native Codex route integration", () => {
     const managedCatalog = join(appHome, "codex", "model-catalog.json");
     mkdirSync(join(appHome, "codex"), { recursive: true });
     writeFileSync(managedCatalog, "managed\n");
-    const providerBlock = '# BEGIN lca-token provider\n[model_providers.lca-token]\nname = "Codex + Lca Token"\n# END lca-token provider';
-    writeFileSync(configPath, `model = "gpt-5.6-sol"\nmodel_catalog_json = ${JSON.stringify(managedCatalog)}\nmodel_provider = "lca-token"\n\n${providerBlock}\n`);
+    const providerBlock = '# BEGIN lca-codex provider\n[model_providers.lca-codex]\nname = "Codex + LCA Codex"\n# END lca-codex provider';
+    writeFileSync(configPath, `model = "gpt-5.6-sol"\nmodel_catalog_json = ${JSON.stringify(managedCatalog)}\nmodel_provider = "lca-codex"\n\n${providerBlock}\n`);
     writeFileSync(getCodexJournalPath(), JSON.stringify({
       version: 2,
       configPath,
       catalogPath: managedCatalog,
       catalogSha256: new Bun.CryptoHasher("sha256").update("managed\n").digest("hex"),
       providerBlock,
-      installed: { model_provider: "lca-token", model_catalog_json: managedCatalog },
+      installed: { model_provider: "lca-codex", model_catalog_json: managedCatalog },
       previous: {
         model_provider: { present: false },
         model_catalog_json: { present: true, rawLine: 'model_catalog_json = "/missing/opencodex-catalog.json"', value: "/missing/opencodex-catalog.json" },

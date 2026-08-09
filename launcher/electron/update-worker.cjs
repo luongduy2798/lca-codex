@@ -38,7 +38,7 @@ function requireFile(filePath, label) {
 }
 
 function updateMac(job) {
-  const sourceExecutable = path.join(job.source, "Contents", "MacOS", "Lca Token");
+  const sourceExecutable = path.join(job.source, "Contents", "MacOS", "LCA Codex");
   requireFile(sourceExecutable, "Staged macOS launcher");
   const next = `${job.target}.updating-${process.pid}`;
   const previous = `${job.target}.swap-${process.pid}`;
@@ -47,7 +47,7 @@ function updateMac(job) {
   const copied = spawnSync("/usr/bin/ditto", [job.source, next], { encoding: "utf8", timeout: 180_000 });
   if (copied.error) throw copied.error;
   if (copied.status !== 0) throw new Error(`Could not stage the macOS application: ${copied.stderr.trim()}`);
-  requireFile(path.join(next, "Contents", "MacOS", "Lca Token"), "Copied macOS launcher");
+  requireFile(path.join(next, "Contents", "MacOS", "LCA Codex"), "Copied macOS launcher");
 
   fs.renameSync(job.target, previous);
   try {
@@ -95,8 +95,8 @@ function updateLinux(job) {
       "#!/bin/sh",
       "set -eu",
       'export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"',
-      `export LCA_TOKEN_LAUNCHER_EXECUTABLE=${shellQuote(wrapper)}`,
-      `export LCA_TOKEN_APPIMAGE=${shellQuote(nextTarget)}`,
+      `export LCA_CODEX_LAUNCHER_EXECUTABLE=${shellQuote(wrapper)}`,
+      `export LCA_CODEX_APPIMAGE=${shellQuote(nextTarget)}`,
       `exec ${shellQuote(nextTarget)} "$@"`,
       "",
     ].join("\n"), { mode: 0o755 });

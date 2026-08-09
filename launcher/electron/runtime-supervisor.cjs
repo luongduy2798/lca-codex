@@ -442,7 +442,7 @@ class RuntimeSupervisor {
         lifecycle: stale ? "stale" : "stopped",
         owner: stale ? "stale-launcher" : "none",
         mode: null,
-        detail: stale ? "Previous Lca Token runtime ownership is still present without configuration" : null,
+        detail: stale ? "Previous LCA Codex runtime ownership is still present without configuration" : null,
         daemon: {
           pid: stateDaemonRunning ? ownershipState.daemonPid : null,
           healthy: false,
@@ -456,7 +456,7 @@ class RuntimeSupervisor {
     }
 
     const health = await this.proxyHealthPayload(config);
-    const daemonIsLca = health?.service === "lca-token" && Number.isInteger(health?.pid) && health.pid > 0;
+    const daemonIsLca = health?.service === "lca-codex" && Number.isInteger(health?.pid) && health.pid > 0;
     const daemonMatchesConfig = daemonIsLca
       && health.mode === config.mode
       && health.version === config.releaseVersion;
@@ -513,7 +513,7 @@ class RuntimeSupervisor {
         detail = `Port ${config.host}:${config.port} is occupied by another process`;
       } else if (owner === "stale-launcher" || owner === "compatible-runtime") {
         lifecycle = "stale";
-        detail = "Previous Lca Token runtime detected";
+        detail = "Previous LCA Codex runtime detected";
       } else if (currentDaemonPid || daemonMatchesConfig) {
         const daemonReady = daemonMatchesConfig
           && health?.status === "ok"
@@ -556,7 +556,7 @@ class RuntimeSupervisor {
         host: config.host,
         port: config.port,
         occupied,
-        identity: daemonIsLca ? "lca-token" : occupied ? "foreign" : "none",
+        identity: daemonIsLca ? "lca-codex" : occupied ? "foreign" : "none",
       },
     };
   }
@@ -657,7 +657,7 @@ class RuntimeSupervisor {
       detached: DETACH_OWNED_CHILD,
       env: {
         ...process.env,
-        LCA_TOKEN_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+        LCA_CODEX_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -745,7 +745,7 @@ class RuntimeSupervisor {
 
   async proxyHealth(config, timeoutMs = 2_000, expectedPid, requireAccepting = false) {
     const body = await this.proxyHealthPayload(config, timeoutMs);
-    return body?.service === "lca-token"
+    return body?.service === "lca-codex"
       && body?.status === "ok"
       && body?.mode === config.mode
       && body?.version === config.releaseVersion
@@ -1648,7 +1648,7 @@ class RuntimeSupervisor {
     const state = this.readState();
     if (!state) return false;
     const health = await this.proxyHealthPayload(config);
-    const daemonRunning = health?.service === "lca-token"
+    const daemonRunning = health?.service === "lca-codex"
       && health?.mode === config.mode
       && health?.version === config.releaseVersion;
     if (daemonRunning && health.pid !== state.daemonPid) {
@@ -1863,7 +1863,7 @@ class RuntimeSupervisor {
       const child = this.daemon;
       const childPid = Number.isInteger(child?.pid) && processRunning(child.pid) ? child.pid : null;
       const health = config ? await this.proxyHealthPayload(config) : null;
-      const healthPid = health?.service === "lca-token" && Number.isInteger(health?.pid) && health.pid > 0
+      const healthPid = health?.service === "lca-codex" && Number.isInteger(health?.pid) && health.pid > 0
         ? health.pid
         : null;
       let stoppedDaemonPid = null;
@@ -1934,7 +1934,7 @@ class RuntimeSupervisor {
         } else {
           this.logger.warn("runtime.stale_daemon_marker_discarded", {
             pid: unverifiedDaemonPid,
-            message: "PID is alive but cannot be verified as Lca Token; process was not terminated",
+            message: "PID is alive but cannot be verified as LCA Codex; process was not terminated",
           });
         }
       }

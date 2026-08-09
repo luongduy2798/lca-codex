@@ -8,7 +8,7 @@ const config = {
 
 test("setup accepts only a matching daemon that is ready for new Codex turns", () => {
   const ready = {
-    service: "lca-token",
+    service: "lca-codex",
     status: "ok",
     mode: "browser-only",
     version: "0.2.0",

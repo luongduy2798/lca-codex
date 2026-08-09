@@ -1,8 +1,8 @@
 {
-  "name": "lca-token-launcher",
+  "name": "lca-codex-launcher",
   "version": "2.0.0",
   "private": true,
-  "description": "Desktop control center for Lca Token",
+  "description": "Desktop control center for LCA Codex",
   "author": "thayduytrutri",
   "type": "module",
   "main": "electron/main.cjs",
@@ -39,9 +39,9 @@
     "vite": "^6.0.0"
   },
   "build": {
-    "appId": "dev.lcatoken.launcher",
-    "productName": "Lca Token",
-    "artifactName": "lca-token-${version}-${os}-${arch}.${ext}",
+    "appId": "dev.lcacodex.launcher",
+    "productName": "LCA Codex",
+    "artifactName": "lca-codex-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "directories": {
       "output": "release"

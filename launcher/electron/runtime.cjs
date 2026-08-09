@@ -142,7 +142,7 @@ class RuntimeHost {
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
     this.browserDescriptorPath = browserDescriptorPath;
-    this.coreHome = resolveUserPath(coreHome || process.env.LCA_TOKEN_HOME?.trim() || path.join(os.homedir(), ".lca-token"));
+    this.coreHome = resolveUserPath(coreHome || process.env.LCA_CODEX_HOME?.trim() || path.join(os.homedir(), ".lca-codex"));
     this.codexLifecycleProxySource = path.join(__dirname, "codex-cli-proxy.cjs");
     this.platform = platform;
     this.codexHome = codexHome
@@ -243,7 +243,7 @@ class RuntimeHost {
     if (descriptor?.pid !== process.pid || typeof token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(token)) {
       throw new Error("Launcher browser ownership descriptor does not belong to this launcher process");
     }
-    return { LCA_TOKEN_LAUNCHER_CONTROL_TOKEN: token };
+    return { LCA_CODEX_LAUNCHER_CONTROL_TOKEN: token };
   }
 
   runtimeConfigSnapshot() {
@@ -293,11 +293,11 @@ class RuntimeHost {
       path.join(this.codexHome, "config.toml"),
       path.join(this.codexHome, "models_cache.json"),
       path.join(coreHome, "secrets", "tunnel-runtime.key"),
-      path.join(coreHome, "tunnel", "profiles", "lca-token.yaml"),
+      path.join(coreHome, "tunnel", "profiles", "lca-codex.yaml"),
     ]);
     if (snapshot.owner === "external" && this.platform === "darwin") {
-      paths.add(path.join(this.launchAgentsDir, "io.github.luongduy2798.lca-token.daemon.plist"));
-      paths.add(path.join(this.launchAgentsDir, "io.github.luongduy2798.lca-token.tunnel.plist"));
+      paths.add(path.join(this.launchAgentsDir, "io.github.luongduy2798.lca-codex.daemon.plist"));
+      paths.add(path.join(this.launchAgentsDir, "io.github.luongduy2798.lca-codex.tunnel.plist"));
     }
     const tunnel = snapshot.config?.tunnel;
     if (tunnel && typeof tunnel === "object") {
@@ -429,7 +429,7 @@ class RuntimeHost {
           detached: DETACH_OWNED_CHILD,
           env: {
             ...process.env,
-            LCA_TOKEN_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+            LCA_CODEX_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
             ...(options.env || {}),
           },
           stdio: ["ignore", "pipe", "pipe"],
@@ -799,7 +799,7 @@ class RuntimeHost {
           embedded: true,
           env: this.launcherControlEnvironment(),
           message: "Restoring the previous Codex route",
-          successMessage: "Lca Token integration removed",
+          successMessage: "LCA Codex integration removed",
           timeoutMs: UNINSTALL_TIMEOUT_MS,
         });
       } catch (error) {
@@ -832,7 +832,7 @@ class RuntimeHost {
     ];
     if (replaceCodexRoute === true) args.push("--replace-codex-route");
     const result = await this.runSetup("core-setup", args, {
-      message: "Installing Lca Token models into Codex",
+      message: "Installing LCA Codex models into Codex",
       successMessage: "Codex integration installed",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
     });

@@ -146,7 +146,7 @@ export class TurnBroker {
   private constructor(readonly socketPath: string) {}
 
   /**
-   * A ChatGPT turn outlives the request that started it, and its lca-token calls arrive from a
+   * A ChatGPT turn outlives the request that started it, and its lca-codex calls arrive from a
    * separate MCP process. Creating the socket only once a turn registers leaves that process
    * connecting to a path that does not exist yet, so an in-flight turn reports a filesystem error
    * instead of the broker's own answer. The endpoint belongs to the runtime's lifetime.
@@ -164,7 +164,7 @@ export class TurnBroker {
     await this.start();
     this.prune();
     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
-      throw new Error("Lca Token turn broker TTL must be a positive finite number");
+      throw new Error("LCA Codex turn broker TTL must be a positive finite number");
     }
     const token = opaqueId("turn");
     const channel: TurnChannel = {
@@ -228,7 +228,7 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
-    console.info(`[lca-token] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
+    console.info(`[lca-codex] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
 
@@ -283,7 +283,7 @@ export class TurnBroker {
         server.once("error", rejectStart);
         server.on("error", error => {
           console.error(
-            `[lca-token] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
+            `[lca-codex] turn broker server error at ${this.socketPath}: ${errorOf(error).message}`,
           );
         });
         server.listen(this.socketPath, () => {
@@ -302,17 +302,17 @@ export class TurnBroker {
         return;
       }
       if (!lstatSync(this.socketPath).isSocket()) {
-        rejectStart(new Error(`Lca Token broker path exists and is not a socket: ${this.socketPath}`));
+        rejectStart(new Error(`LCA Codex broker path exists and is not a socket: ${this.socketPath}`));
         return;
       }
       const socketStat = lstatSync(this.socketPath);
       const getuid = process.getuid;
       if (typeof getuid === "function" && socketStat.uid !== getuid()) {
-        rejectStart(new Error(`Lca Token broker socket is not owned by the current user: ${this.socketPath}`));
+        rejectStart(new Error(`LCA Codex broker socket is not owned by the current user: ${this.socketPath}`));
         return;
       }
       if ((socketStat.mode & 0o077) !== 0) {
-        rejectStart(new Error(`Lca Token broker socket has unsafe permissions: ${this.socketPath}`));
+        rejectStart(new Error(`LCA Codex broker socket has unsafe permissions: ${this.socketPath}`));
         return;
       }
       const probe = createConnection(this.socketPath);
@@ -324,11 +324,11 @@ export class TurnBroker {
         action();
       };
       probe.setTimeout(2_000, () => finishProbe(() => {
-        rejectStart(new Error(`Timed out while checking existing Lca Token broker socket: ${this.socketPath}`));
+        rejectStart(new Error(`Timed out while checking existing LCA Codex broker socket: ${this.socketPath}`));
       }));
       probe.once("connect", () => {
         finishProbe(() => {
-          rejectStart(new Error(`Lca Token broker socket is already owned by another process: ${this.socketPath}`));
+          rejectStart(new Error(`LCA Codex broker socket is already owned by another process: ${this.socketPath}`));
         });
       });
       probe.once("error", error => {
@@ -336,7 +336,7 @@ export class TurnBroker {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "ECONNREFUSED" && code !== "ENOENT") {
             rejectStart(new Error(
-              `Could not verify existing Lca Token broker socket ${this.socketPath}: ${error.message}`,
+              `Could not verify existing LCA Codex broker socket ${this.socketPath}: ${error.message}`,
             ));
             return;
           }
@@ -415,7 +415,7 @@ export class TurnBroker {
       const channel = this.channels.get(token);
       const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
       console.error(
-        `[lca-token] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
+        `[lca-codex] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
         + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
       );
       if (!channel) {
@@ -444,7 +444,7 @@ export class TurnBroker {
     if (!binding) {
       const retiredTurn = this.retiredBindings.get(bindingId);
       console.error(
-        `[lca-token] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
+        `[lca-codex] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
         + ` retiredTurn=${retiredTurn ?? "unknown"})`,
       );
       throw new Error(retiredTurn !== undefined
@@ -575,7 +575,7 @@ export class TurnBroker {
       binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
       binding.channel.queuedCallIds.push(callId);
       console.info(
-        `[lca-token] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
+        `[lca-codex] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
       this.scheduleToolWaiters(binding.channel);
     });
@@ -599,7 +599,7 @@ export class TurnBroker {
     if (channel.queuedCallIds.length === 0 || channel.waiters.size === 0) return;
     const batch = this.takeQueued(channel);
     console.info(
-      `[lca-token] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
+      `[lca-codex] broker trace=${channel.traceId} delivered calls=${batch.length} tools=${batch.map(request => request.wireName).join(",")}`,
     );
     const waiters = [...channel.waiters];
     channel.waiters.clear();
@@ -661,16 +661,16 @@ export async function callTurnBroker<T>(
     };
     const timer = timeoutMs === null
       ? undefined
-      : setTimeout(() => finishError(new Error("Lca Token turn broker timed out")), timeoutMs);
+      : setTimeout(() => finishError(new Error("LCA Codex turn broker timed out")), timeoutMs);
     socket.setEncoding("utf8");
-    socket.once("error", error => finishError(new Error(`Lca Token turn broker unavailable: ${error.message}`)));
-    socket.once("close", () => finishError(new Error("Lca Token turn broker closed the connection")));
+    socket.once("error", error => finishError(new Error(`LCA Codex turn broker unavailable: ${error.message}`)));
+    socket.once("close", () => finishError(new Error("LCA Codex turn broker closed the connection")));
     socket.once("connect", () => socket.write(`${JSON.stringify({ id, ...request })}\n`));
     socket.on("data", chunk => {
       if (settled) return;
       buffered += chunk;
       if (buffered.length > MAX_BROKER_LINE_CHARS) {
-        finishError(new Error("Lca Token turn broker response exceeds size limit"));
+        finishError(new Error("LCA Codex turn broker response exceeds size limit"));
         return;
       }
       const newline = buffered.indexOf("\n");
@@ -679,11 +679,11 @@ export async function callTurnBroker<T>(
       try {
         response = JSON.parse(buffered.slice(0, newline)) as BrokerResponse;
       } catch (error) {
-        finishError(new Error(`Lca Token turn broker returned invalid JSON: ${errorOf(error).message}`));
+        finishError(new Error(`LCA Codex turn broker returned invalid JSON: ${errorOf(error).message}`));
         return;
       }
       if (response.id !== id) {
-        finishError(new Error("Lca Token turn broker response id mismatch"));
+        finishError(new Error("LCA Codex turn broker response id mismatch"));
         return;
       }
       settled = true;

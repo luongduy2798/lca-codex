@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, "..");
 const vitePackage = require.resolve("vite/package.json", { paths: [root] });
 const viteBin = path.join(path.dirname(vitePackage), "bin", "vite.js");
 const electronBin = require("electron");
-const bun = process.env.LCA_TOKEN_BUN || process.execPath;
+const bun = process.env.LCA_CODEX_BUN || process.execPath;
 
 const helperBuild = spawnSync(bun, ["run", "scripts/build-browser-helper.ts"], {
   cwd: path.resolve(root, ".."),
@@ -46,7 +46,7 @@ const spawnElectron = () => {
     env: {
       ...process.env,
       VITE_DEV_SERVER_URL: "http://127.0.0.1:4178",
-      LCA_TOKEN_BUN: bun,
+      LCA_CODEX_BUN: bun,
     },
   });
   electron.once("exit", (code) => {

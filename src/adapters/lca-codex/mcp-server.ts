@@ -255,7 +255,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ turn_token }, extra) => {
-      console.error(`[lca-token-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-codex-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
       const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, { method: "claim", token: turn_token });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
@@ -333,7 +333,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ binding_id, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => {
-      console.error(`[lca-token-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-codex-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
       const commandName = tool?.name ?? "exec_command";

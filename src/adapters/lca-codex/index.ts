@@ -4,18 +4,18 @@ import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "..
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { LcaTokenAdapterError } from "./adapter-error";
+import { LcaCodexAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
-import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaTokenPrompt } from "./prompt";
+import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
+import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "./prompt";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateLcaTokenUsage } from "./usage";
+import { estimateLcaCodexUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
-  const configured = provider.lcaToken?.brokerSocketPath?.trim();
+  const configured = provider.lcaCodex?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
 }
 
@@ -30,7 +30,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
 }
 
 function abortError(): DOMException {
-  return new DOMException("Lca Token turn aborted", "AbortError");
+  return new DOMException("LCA Codex turn aborted", "AbortError");
 }
 
 function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -120,7 +120,7 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
 
 function emitProContextWarning(
   parsed: CodexParsedRequest,
-  capabilities: LcaTokenCapabilities,
+  capabilities: LcaCodexCapabilities,
   emit: (event: AdapterEvent) => void,
 ): void {
   const warning = chatGptReadOnlyContextWarning(parsed, capabilities);
@@ -153,22 +153,22 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
-export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAdapter {
+export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = TurnBroker.forSocket(brokerSocketPath(provider));
-  const timeoutMs = provider.lcaToken?.turnTimeoutMs;
-  const connectorName = provider.lcaToken?.appName?.trim() || "lca-token";
-  const configuredCapabilities: LcaTokenCapabilities = {
-    localToolsEnabled: provider.lcaToken?.localToolsEnabled === true,
-    proAvailable: provider.lcaToken?.proAvailable === true,
+  const timeoutMs = provider.lcaCodex?.turnTimeoutMs;
+  const connectorName = provider.lcaCodex?.appName?.trim() || "lca-codex";
+  const configuredCapabilities: LcaCodexCapabilities = {
+    localToolsEnabled: provider.lcaCodex?.localToolsEnabled === true,
+    proAvailable: provider.lcaCodex?.proAvailable === true,
   };
   const executionNamespace = createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,
-    lcaToken: provider.lcaToken ?? {},
+    lcaCodex: provider.lcaCodex ?? {},
   })).digest("hex");
   const environmentStore = new ChatGptThreadEnvironmentStore(
-    provider.lcaToken?.threadEnvironmentStatePath
-      ? resolve(expandUserPath(provider.lcaToken.threadEnvironmentStatePath))
+    provider.lcaCodex?.threadEnvironmentStatePath
+      ? resolve(expandUserPath(provider.lcaCodex.threadEnvironmentStatePath))
       : undefined,
   );
 
@@ -176,9 +176,9 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
-    turnCapabilities: LcaTokenCapabilities,
+    turnCapabilities: LcaCodexCapabilities,
   ): ChatGptTurnRuntime => {
-    const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+    const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
@@ -188,7 +188,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
-        prepare: async () => ({ ...compileLcaTokenPrompt(parsed, turnCapabilities, undefined, undefined, connectorName), release: () => {} }),
+        prepare: async () => ({ ...compileLcaCodexPrompt(parsed, turnCapabilities, undefined, undefined, connectorName), release: () => {} }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
@@ -202,7 +202,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         cancel: () => browserAbort.abort(),
       };
     }
-    if (!environment) throw new Error("Tool-capable Lca Token mode requires a trusted Codex environment");
+    if (!environment) throw new Error("Tool-capable LCA Codex mode requires a trusted Codex environment");
     const token = deferred<string>();
     let tokenSettled = false;
     let activeToken: string | undefined;
@@ -223,7 +223,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileLcaTokenPrompt(parsed, turnCapabilities, turnToken, contextSnapshot, connectorName);
+          const compiled = compileLcaCodexPrompt(parsed, turnCapabilities, turnToken, contextSnapshot, connectorName);
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -255,12 +255,12 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
   };
 
   return {
-    name: "lca-token",
+    name: "lca-codex",
     async runTurn(parsed, incoming, emit) {
       if (parsed._opaqueMultiAgentV2Payload) {
         throw new Error(
-          "Lca Token subagents currently require a V1-rooted task. "
-          + "Start a new task with a Lca Token model before spawning Lca Token Pro. "
+          "LCA Codex subagents currently require a V1-rooted task. "
+          + "Start a new task with a LCA Codex model before spawning LCA Codex Pro. "
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
@@ -268,14 +268,14 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
       const identity = extractChatGptTurnIdentity(parsed);
-      const mode = resolveLcaTokenModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+      const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
           environment = environmentStore.resolve(parsed);
         } catch (error) {
           console.warn(
-            `[lca-token] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
+            `[lca-codex] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
           );
           throw error;
         }
@@ -327,14 +327,14 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateLcaTokenUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            emitBrowserCompletion(settled, estimateLcaCodexUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
             return;
           }
 
           let turnToken: string | undefined;
           if (session.runtime.mode === "tools") {
             turnToken = await withAbort(session.runtime.token, incoming.abortSignal);
-            if (!environment) throw new Error("Tool-capable Lca Token runtime lost its trusted environment");
+            if (!environment) throw new Error("Tool-capable LCA Codex runtime lost its trusted environment");
             broker.updateEnvironment(turnToken, environment);
 
             const outstanding = session.outstanding();
@@ -343,7 +343,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
               if (results.length === 0) {
                 const reasoning = session.reasoningForOutstandingReplay();
                 replayEvents(session.eventsForOutstandingReplay(), emit);
-                emitToolBatch(outstanding, estimateLcaTokenUsage(parsed, { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
+                emitToolBatch(outstanding, estimateLcaCodexUsage(parsed, { reasoning, toolRequests: outstanding }, turnCapabilities), emit);
                 return;
               }
               if (results.length !== outstanding.length) {
@@ -355,7 +355,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
               }
             }
           } else if (session.outstanding().length > 0) {
-            throw new Error("Read-only Lca Token runtime cannot own local tool calls");
+            throw new Error("Read-only LCA Codex runtime cannot own local tool calls");
           }
 
           const toolWaitAbort = new AbortController();
@@ -415,20 +415,20 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
                 }
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateLcaTokenUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
+                  estimateLcaCodexUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
                 return;
               }
               if (!turnToken || session.runtime.mode !== "tools") {
-                throw new Error("Read-only Lca Token runtime received a broker tool batch");
+                throw new Error("Read-only LCA Codex runtime received a broker tool batch");
               }
               if (next.requests.length === 0) throw new Error("ChatGPT tool bridge returned an empty batch");
               validateBatchTools(parsed, next.requests);
               session.setOutstanding(next.requests, roundReasoning, roundEvents);
               emitToolBatch(
                 next.requests,
-                estimateLcaTokenUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
+                estimateLcaCodexUsage(parsed, { reasoning: roundReasoning, toolRequests: next.requests }, turnCapabilities),
                 emit,
               );
               return;
@@ -438,7 +438,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
           }
         });
       } catch (error) {
-        if (error instanceof LcaTokenAdapterError && error.retryable) {
+        if (error instanceof LcaCodexAdapterError && error.retryable) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
@@ -449,7 +449,7 @@ export function createLcaTokenAdapter(provider: CodexProviderConfig): ProviderAd
         if (session.runtime.mode === "tools") {
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
         }
-        if (error instanceof LcaTokenAdapterError) {
+        if (error instanceof LcaCodexAdapterError) {
           emit({
             type: "error",
             message: error.message,

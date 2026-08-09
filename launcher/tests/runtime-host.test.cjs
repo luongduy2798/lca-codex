@@ -8,7 +8,7 @@ const { RuntimeHost } = require("../electron/runtime.cjs");
 function hostFor(existingConfig) {
   const host = new RuntimeHost({
     app: {
-      getPath: () => path.join(os.tmpdir(), "lca-token-runtime-host-test"),
+      getPath: () => path.join(os.tmpdir(), "lca-codex-runtime-host-test"),
       getVersion: () => "1.1.3",
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -28,7 +28,7 @@ function hostFor(existingConfig) {
 }
 
 test("manual Codex config save stays editable when route status is invalid", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-manual-codex-config-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-manual-codex-config-"));
   const codexHome = path.join(root, ".codex");
   const configPath = path.join(codexHome, "config.toml");
   fs.mkdirSync(codexHome, { recursive: true });
@@ -127,7 +127,7 @@ test("launcher update transaction leaves current and externally owned runtimes u
 });
 
 test("MCP setup reuses valid private credentials without exposing or rewriting them", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-saved-mcp-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-saved-mcp-"));
   const keyPath = path.join(root, "tunnel-runtime.key");
   fs.writeFileSync(keyPath, "saved-private-runtime-key\n", { mode: 0o600 });
   const fixture = hostFor({
@@ -193,7 +193,7 @@ function bridgeFixture({ active }) {
     readSetupConfig: () => ({ mode: "browser-only" }),
   };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "lca-token-bridge-test") },
+    app: { getPath: () => path.join(os.tmpdir(), "lca-codex-bridge-test") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -265,7 +265,7 @@ test("failed runtime cleanup during removal still restores the previous Codex ro
   const calls = [];
   const config = { mode: "full", browserHost: "launcher", releaseVersion: "1.1.2" };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "lca-token-uninstall-fail-safe") },
+    app: { getPath: () => path.join(os.tmpdir(), "lca-codex-uninstall-fail-safe") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -300,12 +300,12 @@ test("failed runtime cleanup during removal still restores the previous Codex ro
 test("connector verification uses the configured full-mode connector name", () => {
   const full = hostFor({ mode: "full", appName: "My Codex Connector" });
   assert.equal(full.host.mcpConnectorName(), "My Codex Connector");
-  const browserOnly = hostFor({ mode: "browser-only", appName: "lca-token" });
+  const browserOnly = hostFor({ mode: "browser-only", appName: "lca-codex" });
   assert.throws(() => browserOnly.host.mcpConnectorName(), /MCP runtime is not configured/);
 });
 
 test("launcher-controlled CLI operations use the live descriptor token", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-control-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-control-"));
   const descriptorPath = path.join(root, "launcher-browser.json");
   fs.writeFileSync(descriptorPath, `${JSON.stringify({
     pid: process.pid,
@@ -320,7 +320,7 @@ test("launcher-controlled CLI operations use the live descriptor token", () => {
   });
   try {
     assert.deepEqual(host.launcherControlEnvironment(), {
-      LCA_TOKEN_LAUNCHER_CONTROL_TOKEN: "launcher-live-control-token-0123456789abcdefghijkl",
+      LCA_CODEX_LAUNCHER_CONTROL_TOKEN: "launcher-live-control-token-0123456789abcdefghijkl",
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -328,7 +328,7 @@ test("launcher-controlled CLI operations use the live descriptor token", () => {
 });
 
 test("failed first-time setup removes its route before restoring the unconfigured state", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-first-setup-rollback-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-first-setup-rollback-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const journalPath = path.join(coreHome, "codex", "integration-journal.json");
@@ -396,7 +396,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
   let config = { mode: "full", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   let prepared = 0;
   let launcherStops = 0;
-  const coreHome = path.join(os.tmpdir(), "lca-token-runtime-host-migration-core");
+  const coreHome = path.join(os.tmpdir(), "lca-codex-runtime-host-migration-core");
   const supervisor = {
     coreHome,
     configPath: path.join(coreHome, "config.json"),
@@ -410,7 +410,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
     startIfConfigured: async () => ({ status: "ready" }),
   };
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "lca-token-runtime-host-migration") },
+    app: { getPath: () => path.join(os.tmpdir(), "lca-codex-runtime-host-migration") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -431,9 +431,9 @@ test("launcher delegates an existing terminal-managed installation to the migrat
 test("failed terminal migration verifies the unchanged previous runtime instead of claiming recovery", async () => {
   const config = { mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   const calls = [];
-  const coreHome = path.join(os.tmpdir(), "lca-token-runtime-host-migration-failure-core");
+  const coreHome = path.join(os.tmpdir(), "lca-codex-runtime-host-migration-failure-core");
   const host = new RuntimeHost({
-    app: { getPath: () => path.join(os.tmpdir(), "lca-token-runtime-host-migration-failure") },
+    app: { getPath: () => path.join(os.tmpdir(), "lca-codex-runtime-host-migration-failure") },
     logger: { info() {}, warn() {}, error() {} },
     sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
@@ -461,7 +461,7 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
 });
 
 test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-setup-checkpoint-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const configPath = path.join(coreHome, "config.json");
@@ -544,13 +544,13 @@ test("failed launcher update restores every mutable setup file before restarting
 });
 
 test("failed terminal migration restores removed launchd ownership before verifying the old runtime", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-terminal-checkpoint-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-terminal-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
   const launchAgentsDir = path.join(root, "LaunchAgents");
   const configPath = path.join(coreHome, "config.json");
-  const daemonPlist = path.join(launchAgentsDir, "io.github.luongduy2798.lca-token.daemon.plist");
-  const tunnelPlist = path.join(launchAgentsDir, "io.github.luongduy2798.lca-token.tunnel.plist");
+  const daemonPlist = path.join(launchAgentsDir, "io.github.luongduy2798.lca-codex.daemon.plist");
+  const tunnelPlist = path.join(launchAgentsDir, "io.github.luongduy2798.lca-codex.tunnel.plist");
   const oldConfig = {
     mode: "full",
     browserHost: "managed-chrome",

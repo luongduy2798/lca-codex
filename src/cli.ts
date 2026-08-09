@@ -14,7 +14,7 @@ import {
   uninstallCodexIntegration,
 } from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
-import { runChatGptMcpMain } from "./adapters/lca-token/mcp-main";
+import { runChatGptMcpMain } from "./adapters/lca-codex/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
@@ -23,23 +23,23 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 
-const HELP = `lca-token ${VERSION}
+const HELP = `lca-codex ${VERSION}
 
-Focused Lca Token models for the native Codex harness.
+Focused LCA Codex models for the native Codex harness.
 
 Usage:
-  lca-token setup --browser-only [options]
-  lca-token setup --full --tunnel-id ID --runtime-key-file PATH [options]
-  lca-token login
-  lca-token doctor [--json]
-  lca-token route <status|connect|disconnect>
-  lca-token browser check
-  lca-token serve
-  lca-token mcp [--broker-socket PATH]
-  lca-token service <status|install|start|restart|stop|cancel-turns>
-  lca-token tunnel <status|start|restart|stop|key-import>
-  lca-token open <tunnels|runtime-keys|connectors>
-  lca-token uninstall --yes
+  lca-codex setup --browser-only [options]
+  lca-codex setup --full --tunnel-id ID --runtime-key-file PATH [options]
+  lca-codex login
+  lca-codex doctor [--json]
+  lca-codex route <status|connect|disconnect>
+  lca-codex browser check
+  lca-codex serve
+  lca-codex mcp [--broker-socket PATH]
+  lca-codex service <status|install|start|restart|stop|cancel-turns>
+  lca-codex tunnel <status|start|restart|stop|key-import>
+  lca-codex open <tunnels|runtime-keys|connectors>
+  lca-codex uninstall --yes
 
 Setup options:
   --browser-only               Account-eligible Web models, full context/images, no local tools or tunnel
@@ -48,7 +48,7 @@ Setup options:
   --chrome PATH                Google Chrome executable
   --browser-host-descriptor PATH
                                Use the embedded launcher browser described by this owner-only file
-  --app-name NAME              ChatGPT connector name (default: lca-token)
+  --app-name NAME              ChatGPT connector name (default: lca-codex)
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
   --replace-codex-route        Reversibly replace an existing openai_base_url
@@ -58,7 +58,7 @@ Setup options:
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
 
 Global:
-  --home PATH                  Override ~/.lca-token
+  --home PATH                  Override ~/.lca-codex
   -h, --help
   -v, --version
 `;
@@ -282,8 +282,8 @@ async function uninstallCommand(args: string[]): Promise<void> {
   const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
   if (launcherControl) {
-    const descriptorPath = process.env.LCA_TOKEN_BROWSER_HOST_DESCRIPTOR?.trim();
-    const supplied = process.env.LCA_TOKEN_LAUNCHER_CONTROL_TOKEN?.trim();
+    const descriptorPath = process.env.LCA_CODEX_BROWSER_HOST_DESCRIPTOR?.trim();
+    const supplied = process.env.LCA_CODEX_LAUNCHER_CONTROL_TOKEN?.trim();
     if (!descriptorPath || !supplied) {
       throw new Error("Launcher-controlled uninstall requires a live launcher authorization");
     }
@@ -293,7 +293,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
     if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
       throw new Error("Launcher-controlled uninstall authorization is invalid");
     }
-    delete process.env.LCA_TOKEN_LAUNCHER_CONTROL_TOKEN;
+    delete process.env.LCA_CODEX_LAUNCHER_CONTROL_TOKEN;
   }
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
     throw new Error("Uninstall cancelled");
@@ -301,7 +301,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
   if (config?.browserHost === "launcher" && !launcherControl) {
     throw new Error(
-      "Launcher-owned integration must be removed from lca-token Settings so the active runtime can be drained safely.",
+      "Launcher-owned integration must be removed from lca-codex Settings so the active runtime can be drained safely.",
     );
   }
   if (!config && process.platform === "darwin" && getServiceStatus().installed) {
@@ -322,7 +322,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const home = takeOption(args, "--home");
-  if (home) process.env.LCA_TOKEN_HOME = home;
+  if (home) process.env.LCA_CODEX_HOME = home;
   if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
     stdout.write(HELP);
     return;
@@ -338,7 +338,7 @@ async function main(): Promise<void> {
     assertNoArgs(args);
     const config = loadConfig();
     if (config.browserHost === "launcher") {
-      throw new Error("ChatGPT login is owned by the launcher; open lca-token and use its Sign in step");
+      throw new Error("ChatGPT login is owned by the launcher; open lca-codex and use its Sign in step");
     }
     const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
@@ -360,7 +360,7 @@ async function main(): Promise<void> {
     assertNoArgs(args);
     const config = loadConfig();
     const server = startServer(config);
-    stdout.write(`lca-token ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
+    stdout.write(`lca-codex ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "mcp") await runChatGptMcpMain(args);
   else if (command === "service") await serviceCommand(args);
@@ -371,6 +371,6 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-  process.stderr.write(`lca-token: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`lca-codex: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

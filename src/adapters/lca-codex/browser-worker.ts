@@ -6,9 +6,9 @@ import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir 
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import { ChatGptMarkdownBuffer, type ChatGptMarkdownRoot } from "./markdown";
-import { resolveLcaTokenModelMode, type LcaTokenCapabilities, type LcaTokenModelMode } from "./model";
-import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaTokenPrompt, type LcaTokenPromptImage } from "./prompt";
-import { estimateCompiledLcaTokenInputTokens } from "./usage";
+import { resolveLcaCodexModelMode, type LcaCodexCapabilities, type LcaCodexModelMode } from "./model";
+import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaCodexPrompt, type LcaCodexPromptImage } from "./prompt";
+import { estimateCompiledLcaCodexInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
@@ -25,10 +25,10 @@ import {
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
-import { resolveLcaTokenContextLimits } from "../../lca-token-models";
+import { resolveLcaCodexContextLimits } from "../../lca-codex-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
-import { LcaTokenAdapterError } from "./adapter-error";
+import { LcaCodexAdapterError } from "./adapter-error";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -69,13 +69,13 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
     try {
       await acknowledge.press("Enter");
     } catch (error) {
-      throw new LcaTokenAdapterError(
+      throw new LcaCodexAdapterError(
         `ChatGPT rate-limit dialog is open, but its acknowledgement failed: ${error instanceof Error ? error.message : String(error)}`,
         { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
       );
     }
   }
-  throw new LcaTokenAdapterError(
+  throw new LcaCodexAdapterError(
     "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
   );
@@ -90,7 +90,7 @@ const chatGptSessionFailureAlert = (page: Page): Locator => page
 
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
   if (!await chatGptSessionFailureAlert(page).isVisible().catch(() => false)) return;
-  throw new LcaTokenAdapterError(
+  throw new LcaCodexAdapterError(
     "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
     { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true },
   );
@@ -102,7 +102,7 @@ const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
 
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
   if (!await chatGptTerminalErrorAlert(scope).isVisible().catch(() => false)) return;
-  throw new LcaTokenAdapterError(
+  throw new LcaCodexAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
     { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
   );
@@ -131,7 +131,7 @@ export async function resolveChatGptToolConfirmation(
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (signal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
+    if (signal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     if (!await dialog.isVisible().catch(() => false)) return true;
     await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
   }
@@ -144,14 +144,14 @@ export async function resolveChatGptToolConfirmation(
   return true;
 }
 
-export function assertLcaTokenInputWithinContextWindow(
+export function assertLcaCodexInputWithinContextWindow(
   estimatedInputTokens: number,
-  effort: LcaTokenModelMode["effort"],
+  effort: LcaCodexModelMode["effort"],
 ): void {
-  const { contextWindow } = resolveLcaTokenContextLimits(effort);
+  const { contextWindow } = resolveLcaCodexContextLimits(effort);
   if (estimatedInputTokens < contextWindow) return;
-  throw new LcaTokenAdapterError(
-    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this Lca Token model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
+  throw new LcaCodexAdapterError(
+    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this LCA Codex model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -192,8 +192,8 @@ export interface BrowserTurn {
   traceId: string;
   modelId: string;
   reasoning?: string;
-  capabilities: LcaTokenCapabilities;
-  prepare: () => Promise<CompiledLcaTokenPrompt & { release: () => void }>;
+  capabilities: LcaCodexCapabilities;
+  prepare: () => Promise<CompiledLcaCodexPrompt & { release: () => void }>;
   abortSignal?: AbortSignal;
   onHeartbeat?: () => void;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -567,7 +567,7 @@ class ChatGptBrowserDiagnostics {
     // Keep them opt-in for normal turns, while still capturing failures and genuinely stalled turns.
     if (error === undefined
       && checkpoint !== "response-stalled-30s"
-      && process.env.LCA_TOKEN_BROWSER_DIAGNOSTICS !== "1") return;
+      && process.env.LCA_CODEX_BROWSER_DIAGNOSTICS !== "1") return;
     try {
       if (!this.initialized) {
         privateDirectory(this.root);
@@ -614,8 +614,8 @@ class ChatGptBrowserDiagnostics {
           return {
             url: location.href,
             title: document.title,
-            surfaceId: (globalThis as typeof globalThis & { __LCA_TOKEN_SURFACE_ID__?: unknown })
-              .__LCA_TOKEN_SURFACE_ID__ ?? null,
+            surfaceId: (globalThis as typeof globalThis & { __LCA_CODEX_SURFACE_ID__?: unknown })
+              .__LCA_CODEX_SURFACE_ID__ ?? null,
             bodyTextChars: document.body?.innerText.length ?? 0,
             composer: {
               visibleCount: composers.length,
@@ -654,10 +654,10 @@ class ChatGptBrowserDiagnostics {
         } : {}),
         state,
       }, null, 2)}\n`);
-      console.info(`[lca-token] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
+      console.info(`[lca-codex] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
     } catch (captureError) {
       console.warn(
-        `[lca-token] browser diagnostic capture failed trace=${this.traceId}`
+        `[lca-codex] browser diagnostic capture failed trace=${this.traceId}`
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
         + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
       );
@@ -666,19 +666,19 @@ class ChatGptBrowserDiagnostics {
 }
 
 export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
-  const configured = provider.lcaToken ?? {};
+  const configured = provider.lcaCodex ?? {};
   const browserHost = configured.browserHost ?? "managed-chrome";
   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
   const turnTimeoutMs = configured.turnTimeoutMs;
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
-    throw new Error("Launcher browser host requires lcaToken.browserHostDescriptorPath");
+    throw new Error("Launcher browser host requires lcaCodex.browserHostDescriptorPath");
   }
   if (turnTimeoutMs !== undefined
     && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
-    throw new Error("Lca Token turnTimeoutMs must be a positive finite number");
+    throw new Error("LCA Codex turnTimeoutMs must be a positive finite number");
   }
   return {
-    appName: configured.appName?.trim() || "lca-token",
+    appName: configured.appName?.trim() || "lca-codex",
     browserHost,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
@@ -696,30 +696,30 @@ const imageExtensions = new Map([
   ["image/webp", "webp"],
 ]);
 
-export function chatGptImageFilePayloads(images: LcaTokenPromptImage[]): Array<{ name: string; mimeType: string; buffer: Buffer }> {
+export function chatGptImageFilePayloads(images: LcaCodexPromptImage[]): Array<{ name: string; mimeType: string; buffer: Buffer }> {
   if (images.length > CHATGPT_MAX_INPUT_IMAGES) {
-    throw new Error(`Lca Token accepts at most ${CHATGPT_MAX_INPUT_IMAGES} input images per Codex turn`);
+    throw new Error(`LCA Codex accepts at most ${CHATGPT_MAX_INPUT_IMAGES} input images per Codex turn`);
   }
   let totalBytes = 0;
   return images.map(image => {
     const parsed = parseDataUrl(image.imageUrl);
-    if (!parsed) throw new Error(`Lca Token input image ${image.ref} must be an inline base64 data URL`);
+    if (!parsed) throw new Error(`LCA Codex input image ${image.ref} must be an inline base64 data URL`);
     const extension = imageExtensions.get(parsed.mediaType.toLowerCase());
-    if (!extension) throw new Error(`Lca Token input image ${image.ref} has unsupported media type: ${parsed.mediaType}`);
+    if (!extension) throw new Error(`LCA Codex input image ${image.ref} has unsupported media type: ${parsed.mediaType}`);
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(parsed.base64) || parsed.base64.length % 4 !== 0) {
-      throw new Error(`Lca Token input image ${image.ref} contains invalid base64 data`);
+      throw new Error(`LCA Codex input image ${image.ref} contains invalid base64 data`);
     }
     const buffer = Buffer.from(parsed.base64, "base64");
-    if (buffer.length === 0) throw new Error(`Lca Token input image ${image.ref} is empty`);
-    if (buffer.length > 20_000_000) throw new Error(`Lca Token input image ${image.ref} exceeds 20 MB`);
+    if (buffer.length === 0) throw new Error(`LCA Codex input image ${image.ref} is empty`);
+    if (buffer.length > 20_000_000) throw new Error(`LCA Codex input image ${image.ref} exceeds 20 MB`);
     totalBytes += buffer.length;
-    if (totalBytes > 50_000_000) throw new Error("Lca Token input images exceed the 50 MB per-turn limit");
+    if (totalBytes > 50_000_000) throw new Error("LCA Codex input images exceed the 50 MB per-turn limit");
     return { name: `${image.ref}.${extension}`, mimeType: parsed.mediaType.toLowerCase(), buffer };
   });
 }
 
 export function chatGptPromptFilePayloads(
-  prompt: CompiledLcaTokenPrompt,
+  prompt: CompiledLcaCodexPrompt,
 ): Array<{ name: string; mimeType: string; buffer: Buffer }> {
   return chatGptImageFilePayloads(prompt.images);
 }
@@ -748,14 +748,14 @@ export class ChatGptBrowserWorker {
 
   run(turn: BrowserTurn): Promise<string> {
     if (this.activeRuns.has(turn.traceId)) {
-      return Promise.reject(new Error(`Duplicate Lca Token browser turn: ${turn.traceId}`));
+      return Promise.reject(new Error(`Duplicate LCA Codex browser turn: ${turn.traceId}`));
     }
     if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
       return Promise.reject(new Error(
-        `Lca Token supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+        `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
       ));
     }
-    const useHelper = this.config.browserHost === "launcher" && process.env.LCA_TOKEN_BROWSER_HELPER_PROCESS !== "1";
+    const useHelper = this.config.browserHost === "launcher" && process.env.LCA_CODEX_BROWSER_HELPER_PROCESS !== "1";
     if (useHelper) {
       this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
     }
@@ -804,9 +804,9 @@ export class ChatGptBrowserWorker {
     action: (abortSignal: AbortSignal) => Promise<T>,
     turnAbortSignal?: AbortSignal,
   ): Promise<T> {
-    if (turnAbortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
+    if (turnAbortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     const startedAt = performance.now();
-    console.info(`[lca-token] browser turn ${traceId} stage=${stage} started`);
+    console.info(`[lca-codex] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let turnAbortListener: (() => void) | undefined;
@@ -820,7 +820,7 @@ export class ChatGptBrowserWorker {
       const turnAbort = turnAbortSignal
         ? new Promise<never>((_, rejectAbort) => {
             turnAbortListener = () => {
-              rejectAbort(new DOMException("Lca Token turn aborted", "AbortError"));
+              rejectAbort(new DOMException("LCA Codex turn aborted", "AbortError"));
               controller.abort();
             };
             turnAbortSignal.addEventListener("abort", turnAbortListener, { once: true });
@@ -832,10 +832,10 @@ export class ChatGptBrowserWorker {
         timeout,
         ...(turnAbort ? [turnAbort] : []),
       ]);
-      console.info(`[lca-token] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
+      console.info(`[lca-codex] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
-      console.error(`[lca-token] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[lca-codex] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
@@ -853,7 +853,7 @@ export class ChatGptBrowserWorker {
       return this.page;
     }
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-      throw new Error(`Lca Token login state is missing: ${this.config.storageStatePath}`);
+      throw new Error(`LCA Codex login state is missing: ${this.config.storageStatePath}`);
     }
     if (!existsSync(this.config.chromeExecutablePath)) {
       throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
@@ -871,7 +871,7 @@ export class ChatGptBrowserWorker {
     if (this.managedBrowserReady) return this.managedBrowserReady;
     const opening = (async () => {
       if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-        throw new Error(`Lca Token login state is missing: ${this.config.storageStatePath}`);
+        throw new Error(`LCA Codex login state is missing: ${this.config.storageStatePath}`);
       }
       if (!existsSync(this.config.chromeExecutablePath)) {
         throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
@@ -911,10 +911,10 @@ export class ChatGptBrowserWorker {
     page: Page,
     modelId: string,
     reasoning: string | undefined,
-    capabilities: LcaTokenCapabilities,
+    capabilities: LcaCodexCapabilities,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
-  ): Promise<LcaTokenModelMode> {
-    const mode = resolveLcaTokenModelMode(modelId, reasoning, capabilities);
+  ): Promise<LcaCodexModelMode> {
+    const mode = resolveLcaCodexModelMode(modelId, reasoning, capabilities);
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
@@ -972,7 +972,7 @@ export class ChatGptBrowserWorker {
           confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
         }
         if (confirmed !== target) {
-          throw new LcaTokenAdapterError(
+          throw new LcaCodexAdapterError(
             `ChatGPT effort slider did not confirm ${mode.displayLabel}`
             + ` (target=${target}; aria-valuenow=${JSON.stringify(Number.isFinite(confirmed) ? confirmed : null)})`,
             { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
@@ -995,12 +995,12 @@ export class ChatGptBrowserWorker {
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
       await captureDiagnostic?.("effort-choice-visible");
     } catch (error) {
-      if (error instanceof LcaTokenAdapterError) throw error;
+      if (error instanceof LcaCodexAdapterError) throw error;
       await throwIfChatGptRateLimitDialog(page);
       const sliderRange = sliderReady
         ? `${await effortSlider.getAttribute("aria-valuemin").catch(() => null) ?? "?"}-${await effortSlider.getAttribute("aria-valuemax").catch(() => null) ?? "?"}`
         : "none";
-      throw new LcaTokenAdapterError(
+      throw new LcaCodexAdapterError(
         `ChatGPT effort UI does not expose ${mode.displayLabel}`
         + ` (sliderRange=${sliderRange}; legacyItemCount=${await effortChoices.count().catch(() => 0)})`,
         { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
@@ -1073,10 +1073,10 @@ export class ChatGptBrowserWorker {
     initialResponseTurnCount: number,
     signal?: AbortSignal,
   ): Promise<ChatGptSubmissionEvidence> {
-    if (signal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
+    if (signal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     const visibleStopButtons = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
     for (;;) {
-      if (signal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
+      if (signal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptTerminalErrorAlert(responseTurn);
       const [userTurnCount, assistantTurnCount, visibleStopButtonCount] = await Promise.all([
@@ -1345,7 +1345,7 @@ export class ChatGptBrowserWorker {
     try {
       await this.activeComposer(page);
     } catch {
-      throw new Error("Lca Token login is expired or the Temporary Chat surface is unavailable");
+      throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
     }
     await assertAuthenticatedChatGptPage(page);
     await assertTemporaryChatPage(page);
@@ -1353,7 +1353,7 @@ export class ChatGptBrowserWorker {
     return this.config.appName;
   }
 
-  private async attachFiles(page: Page, prompt: CompiledLcaTokenPrompt): Promise<void> {
+  private async attachFiles(page: Page, prompt: CompiledLcaCodexPrompt): Promise<void> {
     const files = chatGptPromptFilePayloads(prompt);
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
@@ -1576,7 +1576,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
-    if (turn.abortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
+    if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
@@ -1608,24 +1608,24 @@ export class ChatGptBrowserWorker {
       } catch (controlError) {
         if (!originalError) throw controlError;
         console.error(
-          `[lca-token] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+          `[lca-codex] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
         );
       }
     }
   }
 
   private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
-    if (turn.abortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
-    const requestedMode = resolveLcaTokenModelMode(turn.modelId, turn.reasoning, turn.capabilities);
+    if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
+    const requestedMode = resolveLcaCodexModelMode(turn.modelId, turn.reasoning, turn.capabilities);
     const prepared = await turn.prepare();
     const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
     try {
-      if (turn.abortSignal?.aborted) throw new DOMException("Lca Token turn aborted", "AbortError");
-      const estimatedInputTokens = estimateCompiledLcaTokenInputTokens(prepared, turn.modelId);
-      assertLcaTokenInputWithinContextWindow(
+      if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
+      const estimatedInputTokens = estimateCompiledLcaCodexInputTokens(prepared, turn.modelId);
+      assertLcaCodexInputWithinContextWindow(
         estimatedInputTokens,
         requestedMode.effort,
       );
@@ -1658,7 +1658,7 @@ export class ChatGptBrowserWorker {
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
-        `[lca-token] browser turn ${turn.traceId} opened (transport=${prepared.transport}, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
+        `[lca-codex] browser turn ${turn.traceId} opened (transport=${prepared.transport}, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
       await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
@@ -1669,7 +1669,7 @@ export class ChatGptBrowserWorker {
           this.activeComposer(page)
         ), turn.abortSignal);
       } catch {
-        throw new Error("Lca Token login is expired or the Temporary Chat surface is unavailable");
+        throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
       }
       await diagnostics.capture(page, "composer-ready");
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
@@ -1722,7 +1722,7 @@ export class ChatGptBrowserWorker {
           initialResponseTurnCount,
           stageSignal,
         );
-        console.info(`[lca-token] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
+        console.info(`[lca-codex] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
       }, turn.abortSignal);
       await diagnostics.capture(page, "send-accepted");
 
@@ -1753,10 +1753,10 @@ export class ChatGptBrowserWorker {
         if (turn.abortSignal?.aborted) {
           const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
           if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
-          throw new DOMException("Lca Token turn aborted", "AbortError");
+          throw new DOMException("LCA Codex turn aborted", "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
-          throw new Error("Lca Token turn timed out");
+          throw new Error("LCA Codex turn timed out");
         }
         if (Date.now() - lastHeartbeat >= 10_000) {
           turn.onHeartbeat?.();
@@ -1843,7 +1843,7 @@ export class ChatGptBrowserWorker {
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
             console.warn(
-              `[lca-token] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+              `[lca-codex] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
             );
           }
         } else {
@@ -1863,7 +1863,7 @@ export class ChatGptBrowserWorker {
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
       await diagnostics.capture(page, "turn-completed");
-      console.info(`[lca-token] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
+      console.info(`[lca-codex] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;
     } catch (error) {
       if (diagnosticPage && !diagnosticPage.isClosed()) {
@@ -1875,13 +1875,13 @@ export class ChatGptBrowserWorker {
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(
-            `[lca-token] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[lca-codex] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
       } else if (managedPage && !managedPage.isClosed()) {
         await managedPage.close().catch(error => {
           console.error(
-            `[lca-token] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[lca-codex] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
       }

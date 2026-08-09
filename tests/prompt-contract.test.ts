@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET, compileChatGptContextSnapshot, compileLcaTokenPrompt } from "../src/adapters/lca-token/prompt";
+import { CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "../src/adapters/lca-codex/prompt";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
-import { LCA_TOKEN_MODEL_ID } from "../src/adapters/lca-token/model";
+import { LCA_CODEX_MODEL_ID } from "../src/adapters/lca-codex/model";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "high" | "max"): CodexParsedRequest {
   return {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
       messages: [
@@ -53,7 +53,7 @@ test("tool-capable prompts expose active and recent context immediately while ke
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("high");
   const snapshot = compileChatGptContextSnapshot(parsed);
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     token,
@@ -98,7 +98,7 @@ test("fresh Temporary Chats inline the previous user and assistant exchange for 
       },
       { role: "user", content: followUp, timestamp: 3 },
     ];
-    const compiled = compileLcaTokenPrompt(
+    const compiled = compileLcaCodexPrompt(
       parsed,
       { localToolsEnabled: true, proAvailable: true },
       `turn_${"f".repeat(32)}`,
@@ -143,7 +143,7 @@ test("recent working context drops older tool-heavy exchanges instead of filling
     { role: "user", content: "còn gì nữa", timestamp: 14 },
   ];
 
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     `turn_${"r".repeat(32)}`,
@@ -185,7 +185,7 @@ test("tool evidence is retained when it belongs to a selected recent exchange", 
     { role: "user", content: "làm tiếp đi", timestamp: 5 },
   ];
 
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     `turn_${"t".repeat(32)}`,
@@ -212,7 +212,7 @@ test("recent working context is token bounded and leaves deep history lazy", () 
     );
   }
   parsed.context.messages.push({ role: "user", content: "continue", timestamp: 100 });
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     `turn_${"b".repeat(32)}`,
@@ -238,7 +238,7 @@ test("latest readable Codex compaction is promoted as checkpoint with post-compa
     },
     { role: "user", content: "fix that", timestamp: 4 },
   ];
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     `turn_${"c".repeat(32)}`,
@@ -266,7 +266,7 @@ test("tool-capable prompts inline Codex-resolved AGENTS guidance and keep standa
   attachTrustedProjectWire(parsed, agents, "fix the current task");
 
   const snapshot = compileChatGptContextSnapshot(parsed);
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     token,
@@ -293,7 +293,7 @@ test("tool-capable prompts recognize multi-environment AGENTS fragments without 
     { role: "user", content: "continue", timestamp: 2 },
   ];
   attachTrustedProjectWire(parsed, agents, "continue");
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     "turn_12345678901234567890123456789012",
@@ -315,7 +315,7 @@ test("AGENTS-looking text from the human is never promoted to Codex project inst
     }],
   };
 
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: true, proAvailable: true },
     "turn_12345678901234567890123456789012",
@@ -326,7 +326,7 @@ test("AGENTS-looking text from the human is never promoted to Codex project inst
 });
 
 test("read-only prompts resume without exposing a bind capability", () => {
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     request("max"),
     { localToolsEnabled: true, proAvailable: true },
   );
@@ -345,7 +345,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
 test("compaction prompts are isolated summarization turns without local or native tool instructions", () => {
   const compact = request("high");
   compact._compactionRequest = true;
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     compact,
     { localToolsEnabled: false, proAvailable: true },
   );
@@ -372,7 +372,7 @@ test("assigns prior assistant output to the model and never attributes Codex con
       timestamp: 3,
     },
   ];
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     attributed,
     { localToolsEnabled: true, proAvailable: true },
   );
@@ -394,7 +394,7 @@ test("a long task keeps the newest images and drops the overflow instead of fail
   });
   const markers = Array.from({ length: 13 }, (_unused, index) => `IMG${index + 1}`);
   const replayed: CodexParsedRequest = {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
       messages: markers.map((marker, index) => ({
@@ -407,7 +407,7 @@ test("a long task keeps the newest images and drops the overflow instead of fail
     options: { reasoning: "high" },
   };
 
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     replayed,
     { localToolsEnabled: true, proAvailable: true },
     "turn_12345678901234567890123456789012",
@@ -433,7 +433,7 @@ test("Web compaction attaches the newest ten images as files and never embeds th
   const imagePayloads = Array.from({ length: 13 }, (_unused, index) =>
     Buffer.from(`compaction-image-${index + 1}`).toString("base64"));
   const parsed: CodexParsedRequest = {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
       messages: imagePayloads.map((payload, index) => ({
@@ -450,7 +450,7 @@ test("Web compaction attaches the newest ten images as files and never embeds th
     _compactionRequest: true,
   };
 
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     parsed,
     { localToolsEnabled: false, proAvailable: true },
   );
@@ -467,7 +467,7 @@ test("Web compaction attaches the newest ten images as files and never embeds th
 test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {
   const placeholder = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const parsed: CodexParsedRequest = {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     context: {
       messages: [{
         role: "user",
@@ -483,7 +483,7 @@ test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {
     options: { reasoning: "high" },
   };
 
-  const compiled = compileLcaTokenPrompt(parsed, { localToolsEnabled: false, proAvailable: true });
+  const compiled = compileLcaCodexPrompt(parsed, { localToolsEnabled: false, proAvailable: true });
 
   expect(compiled.images.map(image => image.imageUrl)).toEqual(["data:image/png;base64,real-image"]);
   expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(1);
@@ -495,7 +495,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
   const staleBinding = "binding_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
   const token = "turn_12345678901234567890123456789012";
   const replayed: CodexParsedRequest = {
-    modelId: LCA_TOKEN_MODEL_ID,
+    modelId: LCA_CODEX_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
       messages: [
@@ -519,7 +519,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
     options: { reasoning: "high" },
   };
 
-  const compiled = compileLcaTokenPrompt(replayed, { localToolsEnabled: true, proAvailable: true }, token);
+  const compiled = compileLcaCodexPrompt(replayed, { localToolsEnabled: true, proAvailable: true }, token);
 
   const snapshot = compileChatGptContextSnapshot(replayed);
   expect(snapshot.serialized).not.toContain(staleToken);
@@ -537,7 +537,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
 });
 
 test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     request("max"),
     { localToolsEnabled: true, proAvailable: true },
   );
@@ -547,12 +547,12 @@ test("requires ChatGPT-native rich results to include a safe Markdown answer for
 });
 
 test("uses the public Instant name without leaking the browser menu alias into the prompt", () => {
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     request("low"),
     { localToolsEnabled: false, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("This is Lca Token Instant with no lca-token bridge to the user's local computer");
+  expect(compiled.text).toContain("This is LCA Codex Instant with no lca-codex bridge to the user's local computer");
   expect(compiled.text).not.toContain("Instant 5.5");
 });
 
@@ -569,7 +569,7 @@ test("keeps large tool-capable history in the lazy snapshot instead of composer 
     timestamp: 3,
   });
   const snapshot = compileChatGptContextSnapshot(large);
-  const compiled = compileLcaTokenPrompt(
+  const compiled = compileLcaCodexPrompt(
     large,
     { localToolsEnabled: true, proAvailable: true },
     token,

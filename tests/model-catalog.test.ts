@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
-import { resolveLcaTokenContextLimits } from "../src/lca-token-models";
+import { resolveLcaCodexContextLimits } from "../src/lca-codex-models";
 import {
   augmentNativeModelCatalog,
-  LCA_TOKEN_MODEL_PRIORITY,
+  LCA_CODEX_MODEL_PRIORITY,
 } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
@@ -41,7 +41,7 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
-  test("preserves every native model in order and appends one Lca Token model with reasoning choices", () => {
+  test("preserves every native model in order and appends one LCA Codex model with reasoning choices", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
@@ -53,10 +53,10 @@ describe("native /models augmentation", () => {
     expect(models.slice(0, 3)).toEqual(nativeSnapshot.models as Array<Record<string, unknown>>);
     expect(models).toHaveLength(4);
     const routed = models[3]!;
-    const limits = resolveLcaTokenContextLimits("low");
+    const limits = resolveLcaCodexContextLimits("low");
     expect(routed).toMatchObject({
-      slug: "lca-token",
-      display_name: "Lca Token",
+      slug: "lca-codex",
+      display_name: "LCA Codex",
       tool_mode: "code_mode_only",
       default_reasoning_level: "high",
       supported_reasoning_levels: [
@@ -68,7 +68,7 @@ describe("native /models augmentation", () => {
       ],
       multi_agent_version: "v1",
       supported_in_api: true,
-      priority: LCA_TOKEN_MODEL_PRIORITY,
+      priority: LCA_CODEX_MODEL_PRIORITY,
       context_window: limits.contextWindow,
       max_context_window: limits.contextWindow,
       auto_compact_token_limit: limits.autoCompactTokenLimit,
@@ -79,7 +79,7 @@ describe("native /models augmentation", () => {
     expect(routed).not.toHaveProperty("comp_hash");
   });
 
-  test("keeps the shared Lca Token model in Codex's V1 spawn-agent model registry", () => {
+  test("keeps the shared LCA Codex model in Codex's V1 spawn-agent model registry", () => {
     const config = defaultConfig("full");
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
@@ -89,7 +89,7 @@ describe("native /models augmentation", () => {
       .slice(0, 5)
       .map(model => model.slug);
 
-    expect(spawnOverrides).toEqual(["lca-token", "gpt-5.6-sol"]);
+    expect(spawnOverrides).toEqual(["lca-codex", "gpt-5.6-sol"]);
   });
 
   test("is idempotent, removes stale routed slugs, and hides Pro-only reasoning when unavailable", () => {
@@ -98,13 +98,13 @@ describe("native /models augmentation", () => {
     const polluted = source();
     (polluted.models as unknown[]).push(
       { slug: "foreign/gpt-5.6-sol", display_name: "foreign generic route" },
-      { slug: "lca-token/pro", display_name: "stale Pro route" },
-      { slug: "lca-token", display_name: "stale shared route" },
+      { slug: "lca-codex/pro", display_name: "stale Pro route" },
+      { slug: "lca-codex", display_name: "stale shared route" },
     );
     const first = augmentNativeModelCatalog(polluted, config);
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
-    const routed = models.filter(model => model.slug === "lca-token");
+    const routed = models.filter(model => model.slug === "lca-codex");
     expect(routed).toHaveLength(1);
     expect(routed[0]!.tool_mode).toBeNull();
     expect(routed[0]!.multi_agent_version).toBe("v1");
@@ -117,14 +117,14 @@ describe("native /models augmentation", () => {
       context_window: 150_000,
       auto_compact_token_limit: 135_000,
     });
-    expect(models.some(model => model.slug === "lca-token/pro")).toBe(false);
+    expect(models.some(model => model.slug === "lca-codex/pro")).toBe(false);
   });
 
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
-      model: "lca-token",
+      model: "lca-codex",
       contextWindow: 371_851,
     });
     const models = result.models as Array<Record<string, unknown>>;
@@ -138,7 +138,7 @@ describe("native /models augmentation", () => {
     ]);
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[3]).toMatchObject({
-      slug: "lca-token",
+      slug: "lca-codex",
       context_window: 150_000,
       max_context_window: 150_000,
       auto_compact_token_limit: 135_000,
@@ -171,7 +171,7 @@ describe("native /models augmentation", () => {
 
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
     const routed = (result.models as Array<Record<string, unknown>>)
-      .find(model => model.slug === "lca-token");
+      .find(model => model.slug === "lca-codex");
     expect(routed?.shell_type).toBe("shell_command");
     expect(routed?.tool_mode).toBe("code_mode_only");
   });
@@ -190,7 +190,7 @@ describe("native /models augmentation", () => {
 
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
     const routed = (result.models as Array<Record<string, unknown>>)
-      .find(model => model.slug === "lca-token");
+      .find(model => model.slug === "lca-codex");
     expect(routed?.shell_type).toBe("terra-shell");
   });
 

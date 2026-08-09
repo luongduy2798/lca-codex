@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, CHATGPT_TEXT_DELTA_COALESCE_MS, CHATGPT_TEXT_DELTA_MIN_CHARS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTextDeltaCoalescer, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaTokenInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-token/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, CHATGPT_TEXT_DELTA_COALESCE_MS, CHATGPT_TEXT_DELTA_MIN_CHARS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTextDeltaCoalescer, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-codex/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('composer.fill("")');
   expect(workerSource).toContain("this.insertPromptText(page, prompt)");
   expect(workerSource).toContain("this.insertPromptText(page, ` ${prompt}`)");
@@ -13,7 +13,7 @@ test("Codex context uses the owned CDP composer transport, never the operating-s
 });
 
 test("completed prompts activate the scoped semantic send control", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('.getByTestId("send-button")');
   expect(workerSource).toContain('await sendButton.press("Enter")');
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
@@ -54,15 +54,15 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
 });
 
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {
-  const provider = { adapter: "lca-token" as const, baseUrl: "browser://chatgpt" };
+  const provider = { adapter: "lca-codex" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).turnTimeoutMs).toBeUndefined();
   expect(resolveBrowserConfig({
     ...provider,
-    lcaToken: { turnTimeoutMs: 123_000 },
+    lcaCodex: { turnTimeoutMs: 123_000 },
   }).turnTimeoutMs).toBe(123_000);
   expect(() => resolveBrowserConfig({
     ...provider,
-    lcaToken: { turnTimeoutMs: 0 },
+    lcaCodex: { turnTimeoutMs: 0 },
   })).toThrow("turnTimeoutMs must be a positive finite number");
 });
 
@@ -72,7 +72,7 @@ test("managed Chrome defaults follow the host platform", () => {
   expect(defaultChromeExecutable("win32", "D:\\Program Files")).toBe(
     "D:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   );
-  const provider = { adapter: "lca-token" as const, baseUrl: "browser://chatgpt" };
+  const provider = { adapter: "lca-codex" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
 });
 
@@ -119,7 +119,7 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 });
 
 test("connector verification and real tool turns share one Playwright selector", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource).toContain('await page.keyboard.type("@");');
   expect(workerSource).toContain("for (const character of this.config.appName)");
@@ -197,8 +197,8 @@ test("large read-only context is inserted in bounded edits before exact verifica
 test("duplicate DOM representations of one selected connector are treated as one logical selection", async () => {
   const selected = {
     evaluateAll: async (callback: (elements: Array<{ getAttribute(name: string): string | null }>) => unknown) => callback([
-      { getAttribute: (name: string) => name === "data-keyword" ? "lca-token" : null },
-      { getAttribute: (name: string) => name === "data-keyword" ? "lca-token" : null },
+      { getAttribute: (name: string) => name === "data-keyword" ? "lca-codex" : null },
+      { getAttribute: (name: string) => name === "data-keyword" ? "lca-codex" : null },
     ]),
   };
   const connectorIsSelected = (ChatGptBrowserWorker.prototype as unknown as {
@@ -206,7 +206,7 @@ test("duplicate DOM representations of one selected connector are treated as one
   }).connectorIsSelected;
 
   expect(await connectorIsSelected.call({
-    config: { appName: "lca-token" },
+    config: { appName: "lca-codex" },
     selectedConnectorControl: () => selected,
   }, {})).toBeTrue();
 });
@@ -237,7 +237,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       expect(selector).toBe('[data-id^="plugin:"][data-keyword]');
       return {
         filter: (options: { hasText: string; visible: boolean }) => {
-          expect(options).toEqual({ hasText: "lca-token", visible: true });
+          expect(options).toEqual({ hasText: "lca-codex", visible: true });
           return selectedConnector;
         },
       };
@@ -249,7 +249,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   };
   const page = {
     getByText: (text: string, options: { exact: boolean }) => {
-      expect(text).toBe("lca-token");
+      expect(text).toBe("lca-codex");
       expect(options).toEqual({ exact: true });
       return { exactConnectorLabel: true };
     },
@@ -280,7 +280,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
 
   let activeComposerCalls = 0;
   const resolved = await selectConnector.call({
-    config: { appName: "lca-token" },
+    config: { appName: "lca-codex" },
     connectorIsSelected: async () => connectorSelected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -351,7 +351,7 @@ test("narrow composer connector selection uses a real mention key and stops at t
   }).selectConnector;
 
   const result = await selectConnector.call({
-    config: { appName: "lca-token" },
+    config: { appName: "lca-codex" },
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => selected ? selectedComposer : initialComposer,
@@ -420,7 +420,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
 
   let activeComposerCalls = 0;
   await selectConnector.call({
-    config: { appName: "lca-token" },
+    config: { appName: "lca-codex" },
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -432,8 +432,8 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   expect(calls).toEqual([
     "clear", "focus", "type:@", "menu:1",
     "type:l", "menu:2", "type:c", "menu:3", "type:a", "menu:4", "type:-", "menu:5",
-    "type:t", "menu:6", "type:o", "menu:7", "type:k", "menu:8", "type:e", "menu:9",
-    "type:n", "menu:10", "menu:11",
+    "type:c", "menu:6", "type:o", "menu:7", "type:d", "menu:8", "type:e", "menu:9",
+    "type:x", "menu:10", "menu:11",
     "escape", "clear",
     "escape", "clear", "focus", "type:@", "menu:12",
     "activate", "selected",
@@ -491,7 +491,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
 
   let activeComposerCalls = 0;
   await attachPrompt.call({
-    config: { appName: "lca-token" },
+    config: { appName: "lca-codex" },
     selectConnector,
     insertPromptText,
     connectorIsSelected: async () => selected,
@@ -580,12 +580,12 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     ["fileTile", "codex-input-image-1.png"],
     ["sendEnabled"],
   ]);
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).not.toContain('aria-label^="Remove file "');
 });
 
 test("effort selection uses structural menu indices instead of localized labels", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
@@ -604,7 +604,7 @@ test("effort selection uses structural menu indices instead of localized labels"
 });
 
 test("effort selection handles the known ChatGPT rate-limit dialog before trusted pointer activation", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
@@ -651,7 +651,7 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
 
   await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "LcaTokenAdapterError",
+    name: "LcaCodexAdapterError",
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
@@ -673,7 +673,7 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   );
 
   await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
-    name: "LcaTokenAdapterError",
+    name: "LcaCodexAdapterError",
     status: 502,
     errorType: "server_error",
     code: "upstream_server_error",
@@ -688,7 +688,7 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
   );
 
   await expect(throwIfChatGptSessionFailureAlert(fixture.page)).rejects.toMatchObject({
-    name: "LcaTokenAdapterError",
+    name: "LcaCodexAdapterError",
     status: 503,
     errorType: "server_error",
     code: "chatgpt_subscription_unavailable",
@@ -697,7 +697,7 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
 });
 
 test("terminal model errors are scoped to the new assistant turn instead of global page alerts", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn)");
   expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
 });
@@ -753,7 +753,7 @@ function toolConfirmationPage(options: { disappearAfterReads?: number } = {}): {
   });
   const dialog = {
     filter: ({ hasText }: { hasText: string }) => {
-      expect(hasText).toBe("Allow ChatGPT to use lca-token?");
+      expect(hasText).toBe("Allow ChatGPT to use lca-codex?");
       return dialog;
     },
     last: () => dialog,
@@ -777,34 +777,34 @@ function toolConfirmationPage(options: { disappearAfterReads?: number } = {}): {
 test("manual ChatGPT connector approval pauses and resumes the same browser turn", async () => {
   const fixture = toolConfirmationPage({ disappearAfterReads: 3 });
 
-  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-token", false, undefined, 100)).toBeTrue();
+  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-codex", false, undefined, 100)).toBeTrue();
   expect(fixture.pressed).toEqual([]);
 });
 
 test("an unanswered ChatGPT connector approval is denied instead of aborting the turn", async () => {
   const fixture = toolConfirmationPage();
 
-  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-token", false, undefined, 2)).toBeTrue();
+  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-codex", false, undefined, 2)).toBeTrue();
   expect(fixture.pressed).toEqual(["Deny:Enter"]);
 });
 
 test("explicit connector auto-approval still selects Allow once", async () => {
   const fixture = toolConfirmationPage();
 
-  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-token", true)).toBeTrue();
+  expect(await resolveChatGptToolConfirmation(fixture.page, "lca-codex", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
 test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertLcaTokenInputWithinContextWindow(150_000, "medium")).toThrow(
+  expect(() => assertLcaCodexInputWithinContextWindow(150_000, "medium")).toThrow(
     "150,000-token context window",
   );
   try {
-    assertLcaTokenInputWithinContextWindow(150_000, "medium");
+    assertLcaCodexInputWithinContextWindow(150_000, "medium");
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
-      name: "LcaTokenAdapterError",
+      name: "LcaCodexAdapterError",
       status: 400,
       errorType: "invalid_request_error",
       code: "context_length_exceeded",
@@ -813,13 +813,13 @@ test("browser preflight fails closed with Codex's native context-window error co
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertLcaTokenInputWithinContextWindow(149_999, "medium")).not.toThrow();
-  expect(() => assertLcaTokenInputWithinContextWindow(184_999, "high")).not.toThrow();
-  expect(() => assertLcaTokenInputWithinContextWindow(185_000, "high")).toThrow(
+  expect(() => assertLcaCodexInputWithinContextWindow(149_999, "medium")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(184_999, "high")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(185_000, "high")).toThrow(
     "185,000-token context window",
   );
-  expect(() => assertLcaTokenInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
-  expect(() => assertLcaTokenInputWithinContextWindow(255_999, "max")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(255_999, "max")).not.toThrow();
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {
@@ -838,7 +838,7 @@ test("browser stage diagnostics use safe bounded artifact names", () => {
 });
 
 test("browser stage diagnostics preserve every critical local checkpoint", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   for (const checkpoint of [
     "browser-page-acquired",
     "temporary-chat-navigation-complete",
@@ -867,7 +867,7 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain('page.screenshot({ animations: "disabled", caret: "hide"');
   expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
   expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
-  expect(workerSource).toContain('process.env.LCA_TOKEN_BROWSER_DIAGNOSTICS !== "1"');
+  expect(workerSource).toContain('process.env.LCA_CODEX_BROWSER_DIAGNOSTICS !== "1"');
   expect(workerSource).toContain('checkpoint !== "response-stalled-30s"');
 });
 
@@ -899,7 +899,7 @@ test("short completed answers flush to Codex before the full turn completion set
   expect(finalTracker.update(completedState, 1_250)).toBeFalse();
   expect(finalTracker.update(completedState, 3_000)).toBeTrue();
 
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("const displayCompletionTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS)");
   expect(workerSource).toContain("&& displayCompletionTracker.update(completionState)");
   expect(workerSource).toContain("const visibleFinal = markdownBuffer.flush()");
@@ -1029,9 +1029,9 @@ test("visible DOM trace emits a short-lived reasoning label on its first observa
 test("completed-turn evidence flushes a short-lived reasoning label immediately", () => {
   const tracker = new ChatGptVisibleTraceTracker(10_000);
   expect(tracker.observe([
-    { kind: "status", text: "Reviewing Lca Token Prompt and State Handling" },
+    { kind: "status", text: "Reviewing LCA Codex Prompt and State Handling" },
   ], true, 1_000)).toEqual([
-    { kind: "reasoning", text: "Reviewing Lca Token Prompt and State Handling" },
+    { kind: "reasoning", text: "Reviewing LCA Codex Prompt and State Handling" },
   ]);
 });
 
@@ -1059,7 +1059,7 @@ test("visible DOM trace emits one complete commentary paragraph before the next 
 });
 
 test("response DOM separates streaming commentary from the final Markdown answer", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource).toContain('const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
@@ -1165,7 +1165,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
 });
 
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async stalledTurnDiagnostic");
   const end = workerSource.indexOf("private async runExclusive", start);
   const diagnosticSource = workerSource.slice(start, end);
@@ -1176,7 +1176,7 @@ test("stalled-turn diagnostics record DOM metrics without response or overlay co
 });
 
 test("browser completion requires ChatGPT's response-scoped copy action", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(sessionSource).toContain('button[data-testid="copy-turn-action-button"]');
   expect(workerSource).toContain("CHATGPT_COMPLETION_ACTION_SELECTOR");
@@ -1184,7 +1184,7 @@ test("browser completion requires ChatGPT's response-scoped copy action", () => 
 });
 
 test("browser send accepts only conclusive ChatGPT submission evidence", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-token/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const idle = {
     initialUserTurnCount: 1,
     userTurnCount: 1,

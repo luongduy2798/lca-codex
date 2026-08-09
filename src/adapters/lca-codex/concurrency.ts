@@ -1,5 +1,5 @@
 /**
- * Lca Token concurrency is deliberately bounded. Every active Codex turn owns a real
+ * LCA Codex concurrency is deliberately bounded. Every active Codex turn owns a real
  * browser document in the signed-in account, so unbounded fan-out would create account-level
  * traffic that is indistinguishable from spam.
  */

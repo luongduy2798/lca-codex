@@ -156,8 +156,8 @@ export function createTunnelConfig(options: {
   alias?: string;
 }): TunnelConfig {
   if (!/^tunnel_[a-f0-9]{32}$/.test(options.tunnelId)) throw new Error("--tunnel-id must be tunnel_ followed by 32 lowercase hexadecimal characters");
-  const profileName = options.profileName ?? "lca-token";
-  const alias = options.alias ?? "lca-token";
+  const profileName = options.profileName ?? "lca-codex";
+  const alias = options.alias ?? "lca-codex";
   if (!/^[A-Za-z0-9._-]+$/.test(profileName) || !/^[A-Za-z0-9._-]+$/.test(alias)) {
     throw new Error("Tunnel profile and alias may contain only letters, digits, dot, underscore, and dash");
   }

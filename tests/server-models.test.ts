@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
-  LCA_TOKEN_MODEL_PRIORITY,
+  LCA_CODEX_MODEL_PRIORITY,
 } from "../src/model-catalog";
-import { resolveLcaTokenContextLimits } from "../src/lca-token-models";
+import { resolveLcaCodexContextLimits } from "../src/lca-codex-models";
 import { modelsRequest } from "../src/server";
 
-test("proxies official /models auth and query, then appends one Lca Token model", async () => {
+test("proxies official /models auth and query, then appends one LCA Codex model", async () => {
   const request = new Request("http://127.0.0.1:17841/v1/models?client_version=1.2.3", {
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
   });
@@ -45,11 +45,11 @@ test("proxies official /models auth and query, then appends one Lca Token model"
   };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
-    "lca-token",
+    "lca-codex",
   ]);
   expect(body.models[0]!.max_context_window).toBe(371_851);
   const model = body.models[1]!;
-  const limits = resolveLcaTokenContextLimits("low");
+  const limits = resolveLcaCodexContextLimits("low");
   expect(model.context_window).toBe(limits.contextWindow);
   expect(model.max_context_window).toBe(limits.contextWindow);
   expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
@@ -61,5 +61,5 @@ test("proxies official /models auth and query, then appends one Lca Token model"
     "ultra",
   ]);
   expect(model.supported_in_api).toBe(true);
-  expect(model.priority).toBe(LCA_TOKEN_MODEL_PRIORITY);
+  expect(model.priority).toBe(LCA_CODEX_MODEL_PRIORITY);
 });

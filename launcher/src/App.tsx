@@ -1264,7 +1264,7 @@ function VsCodeAdvancedSurface({
       : config?.state === "inconsistent"
         ? copy.vscodeAdvancedNeedsRepair
         : copy.vscodeAdvancedNotInstalled;
-  const proxyPath = config?.proxyPath ?? "~/.lca-token/bin/lca-codex-proxy";
+  const proxyPath = config?.proxyPath ?? "~/.lca-codex/bin/lca-codex-proxy";
   const settingsPath = config?.settingsPath || "VS Code settings.json";
   const manualSnippet = `"chatgpt.cliExecutable": ${JSON.stringify(proxyPath)}`;
 
@@ -2255,7 +2255,7 @@ function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Lca Token</h1>
+      <h1>LCA Codex</h1>
       <p>{message}</p>
     </main>
   );
@@ -2271,7 +2271,7 @@ function browserTone(browser: BrowserState | null): "idle" | "ready" | "busy" | 
 
 function browserTabTitleFromTitle(value: string | undefined, copy: Copy): string {
   const title = value?.trim();
-  if (!title || title === "about:blank" || title.includes("lca-token-browser-host")) return copy.temporaryChat;
+  if (!title || title === "about:blank" || title.includes("lca-codex-browser-host")) return copy.temporaryChat;
   return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.temporaryChat;
 }
 

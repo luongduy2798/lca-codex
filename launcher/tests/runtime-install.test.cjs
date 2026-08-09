@@ -26,7 +26,7 @@ function runtimeFixture(root, version = "0.2.0", bundleId = "a".repeat(64)) {
 }
 
 test("packaged runtime is installed once into a durable versioned directory", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-install-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-install-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
@@ -51,7 +51,7 @@ test("packaged runtime is installed once into a durable versioned directory", ()
 });
 
 test("packaged runtime installation rejects a platform or version mismatch", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-mismatch-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-mismatch-"));
   const resourcesPath = runtimeFixture(root, "0.1.0");
   try {
     assert.throws(
@@ -68,7 +68,7 @@ test("packaged runtime installation rejects a platform or version mismatch", () 
 });
 
 test("packaged runtime transactionally repairs an incomplete installed bundle", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-repair-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-repair-"));
   const resourcesPath = runtimeFixture(root);
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };
@@ -91,7 +91,7 @@ test("packaged runtime transactionally repairs an incomplete installed bundle", 
 });
 
 test("packaged runtime replaces stale files when a release is refreshed under the same version", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-token-runtime-refresh-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-refresh-"));
   const resourcesPath = runtimeFixture(root, "0.2.0", "a".repeat(64));
   const coreHome = path.join(root, "core-home");
   const app = { isPackaged: true, getVersion: () => "0.2.0" };

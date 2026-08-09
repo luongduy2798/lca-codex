@@ -5,7 +5,7 @@ const path = require("node:path");
 const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
 const output = path.join(launcherRoot, "build", "runtime");
-const bun = process.env.LCA_TOKEN_BUN || process.execPath;
+const bun = process.env.LCA_CODEX_BUN || process.execPath;
 
 const result = spawnSync(bun, ["run", "scripts/build-runtime-bundle.ts", output], {
   cwd: repositoryRoot,

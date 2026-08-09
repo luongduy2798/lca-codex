@@ -1,8 +1,8 @@
-import { createLcaTokenAdapter } from "./adapters/lca-token";
-import { closeChatGptBrowserWorkers } from "./adapters/lca-token/browser-worker";
-import { closeTurnBrokers, TurnBroker } from "./adapters/lca-token/turn-broker";
+import { createLcaCodexAdapter } from "./adapters/lca-codex";
+import { closeChatGptBrowserWorkers } from "./adapters/lca-codex/browser-worker";
+import { closeTurnBrokers, TurnBroker } from "./adapters/lca-codex/turn-broker";
 import { timingSafeEqual } from "node:crypto";
-import { chatGptTurnSessions } from "./adapters/lca-token/turn-execution";
+import { chatGptTurnSessions } from "./adapters/lca-codex/turn-execution";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -13,12 +13,12 @@ import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { readCodexModelContextOverride, type CodexModelContextOverride } from "./codex-integration";
 import {
-  LCA_TOKEN_BACKEND_MODEL,
-  isLcaTokenModelSlug,
-  requireLcaTokenModel,
-  resolveLcaTokenReasoningMode,
-  type LcaTokenModelDescriptor,
-} from "./lca-token-models";
+  LCA_CODEX_BACKEND_MODEL,
+  isLcaCodexModelSlug,
+  requireLcaCodexModel,
+  resolveLcaCodexReasoningMode,
+  type LcaCodexModelDescriptor,
+} from "./lca-codex-models";
 import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
 import {
   buildCompactV1Output,
@@ -144,12 +144,12 @@ export class HttpTurnCounter {
   }
 }
 
-type LcaTokenAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
+type LcaCodexAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
 
-export function routeLcaTokenRequest(parsed: CodexParsedRequest, config: AppConfig): LcaTokenModelDescriptor {
-  const model = requireLcaTokenModel(parsed.modelId);
-  const mode = resolveLcaTokenReasoningMode(parsed.options.reasoning, config.proAvailable);
-  parsed.modelId = LCA_TOKEN_BACKEND_MODEL;
+export function routeLcaCodexRequest(parsed: CodexParsedRequest, config: AppConfig): LcaCodexModelDescriptor {
+  const model = requireLcaCodexModel(parsed.modelId);
+  const mode = resolveLcaCodexReasoningMode(parsed.options.reasoning, config.proAvailable);
+  parsed.modelId = LCA_CODEX_BACKEND_MODEL;
   parsed.options.reasoning = mode.adapterEffort;
   return model;
 }
@@ -212,7 +212,7 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
 export async function responseRequest(
   req: Request,
   config: AppConfig,
-  adapterFactory: LcaTokenAdapterFactory = createLcaTokenAdapter,
+  adapterFactory: LcaCodexAdapterFactory = createLcaCodexAdapter,
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: unknown;
@@ -228,7 +228,7 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
-  if (typeof requestedModel === "string" && !isLcaTokenModelSlug(requestedModel)) {
+  if (typeof requestedModel === "string" && !isLcaCodexModelSlug(requestedModel)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -240,10 +240,10 @@ export async function responseRequest(
     : undefined;
   const expanded = expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
-  let route: LcaTokenModelDescriptor;
+  let route: LcaCodexModelDescriptor;
   try {
     parsed = parseRequest(expanded);
-    route = routeLcaTokenRequest(parsed, config);
+    route = routeLcaCodexRequest(parsed, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -251,7 +251,7 @@ export async function responseRequest(
     return formatErrorResponse(
       409,
       "invalid_request_error",
-      "Local continuation state for previous_response_id is unavailable; refusing to run Lca Token with partial Codex context. Compact the Codex task or start a new task before retrying.",
+      "Local continuation state for previous_response_id is unavailable; refusing to run LCA Codex with partial Codex context. Compact the Codex task or start a new task before retrying.",
     );
   }
 
@@ -326,7 +326,7 @@ export async function responseRequest(
 export async function compactRequest(
   req: Request,
   config: AppConfig,
-  adapterFactory: LcaTokenAdapterFactory = createLcaTokenAdapter,
+  adapterFactory: LcaCodexAdapterFactory = createLcaCodexAdapter,
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -360,7 +360,7 @@ export async function compactRequest(
   if (typeof raw.model !== "string" || !raw.model) {
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
-  if (!isLcaTokenModelSlug(raw.model)) {
+  if (!isLcaCodexModelSlug(raw.model)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -368,7 +368,7 @@ export async function compactRequest(
     }
   }
   try {
-    requireLcaTokenModel(raw.model);
+    requireLcaCodexModel(raw.model);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -431,7 +431,7 @@ export function startServer(
   if (config.mode === "full") {
     void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
       console.error(
-        `[lca-token] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        `[lca-codex] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
   }
@@ -459,7 +459,7 @@ export function startServer(
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
-          service: "lca-token",
+          service: "lca-codex",
           version: VERSION,
           mode: config.mode,
           pid: process.pid,
@@ -531,7 +531,7 @@ export function startServer(
           return formatErrorResponse(
             503,
             "server_error",
-            "lca-token is draining for a requested service operation",
+            "lca-codex is draining for a requested service operation",
           );
         }
         return httpTurns.track(async () => {
@@ -555,15 +555,15 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-token is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
         return httpTurns.track(() => responseRequest(req, config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-token is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
         return httpTurns.track(() => compactRequest(req, config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-token is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
         return httpTurns.track(() => nativeSearchRequest(req, dependencies.fetchUpstream), req.signal);
       }
       return new Response("Not found", { status: 404 });
@@ -585,13 +585,13 @@ export function startServer(
       if (failures.length > 0) {
         process.exitCode = 1;
         for (const failure of failures) {
-          console.error(`[lca-token] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+          console.error(`[lca-codex] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
         }
       }
       await server.stop(true);
     })().catch(error => {
       process.exitCode = 1;
-      console.error(`[lca-token] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[lca-codex] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
   process.once("SIGINT", shutdown);
