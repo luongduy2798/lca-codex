@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { estimateTokens } from "../../lib/token-estimate";
-import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
+import { isOnePixelPngDataUrl, isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import { extractTrustedCodexProjectInstructions } from "./environment";
 import { resolveLcaTokenModelMode, type LcaTokenCapabilities } from "./model";
 
@@ -263,6 +263,221 @@ function latestUserMessageIndex(messages: readonly CodexMessage[]): number {
   return -1;
 }
 
+/** Recent Codex working memory carried into every fresh tool-capable Temporary Chat. */
+export const CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET = 8_000;
+export const CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT = 4;
+const CHATGPT_RECENT_CONTEXT_OVERHEAD_TOKENS = 200;
+const CHATGPT_RECENT_CHECKPOINT_TOKEN_CAP = 3_000;
+const CHATGPT_RECENT_ASSISTANT_TOKEN_CAP = 2_500;
+const CHATGPT_RECENT_USER_TOKEN_CAP = 1_200;
+const CHATGPT_RECENT_ENTRY_TOKEN_CAP = 1_200;
+const CHATGPT_RECENT_TOOL_RESULT_TOKEN_CAP = 500;
+
+interface ProjectedContextEntry {
+  payload: Record<string, unknown>;
+  tokens: number;
+}
+
+interface RecentWorkingContext {
+  checkpoint?: Record<string, unknown>;
+  entries: Record<string, unknown>[];
+  estimatedTokens: number;
+  exchangeCount: number;
+}
+
+function sanitizeRecentContextPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(withoutRetiredTurnHandles(JSON.stringify(payload))) as Record<string, unknown>;
+}
+
+function recentContextEntryEnvelope(entry: ChatGptContextEntry): Record<string, unknown> {
+  return sanitizeRecentContextPayload({ id: entry.id, ...entry.payload });
+}
+
+function recentContextPreview(text: string, charBudget: number): string {
+  if (text.length <= charBudget) return text;
+  if (charBudget <= 24) return text.slice(0, charBudget);
+  const marker = "\n...[truncated]...\n";
+  const usable = Math.max(1, charBudget - marker.length);
+  const head = Math.ceil(usable * 0.65);
+  const tail = Math.max(0, usable - head);
+  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+function projectedRecentContextEntry(
+  entry: ChatGptContextEntry,
+  modelId: string,
+  tokenCap: number,
+): ProjectedContextEntry | undefined {
+  if (tokenCap <= 0) return undefined;
+  const exact = recentContextEntryEnvelope(entry);
+  const exactSerialized = withoutRetiredTurnHandles(JSON.stringify(exact));
+  const exactTokens = estimateTokens(exactSerialized, modelId);
+  if (exactTokens <= tokenCap) return { payload: exact, tokens: exactTokens };
+
+  const metadata: Record<string, unknown> = {};
+  for (const key of ["tool_call_id", "tool_name", "is_error"] as const) {
+    if (key in entry.payload) metadata[key] = entry.payload[key];
+  }
+  const candidate = (chars: number): ProjectedContextEntry => {
+    const payload = {
+      id: entry.id,
+      role: entry.role,
+      ...metadata,
+      content: recentContextPreview(withoutRetiredTurnHandles(entry.searchText), chars),
+      truncated: true,
+      history_ref: entry.id,
+      ...(entry.attachmentRefs.length > 0 ? { attachment_refs: entry.attachmentRefs } : {}),
+    };
+    const sanitized = sanitizeRecentContextPayload(payload);
+    return {
+      payload: sanitized,
+      tokens: estimateTokens(JSON.stringify(sanitized), modelId),
+    };
+  };
+
+  const minimal = candidate(0);
+  if (minimal.tokens > tokenCap) return undefined;
+  let low = 0;
+  let high = Math.min(entry.searchText.length, 20_000);
+  let best = minimal;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const projected = candidate(middle);
+    if (projected.tokens <= tokenCap) {
+      best = projected;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
+function recentContextEntryText(entry: ChatGptContextEntry): string {
+  return plainSearchText(entry.payload.content).trim();
+}
+
+function isReadableCheckpointEntry(entry: ChatGptContextEntry): boolean {
+  return entry.role === "user" && isReadableCompactionSummaryText(recentContextEntryText(entry));
+}
+
+function isRecentOperationalWrapper(entry: ChatGptContextEntry): boolean {
+  const text = recentContextEntryText(entry);
+  return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
+    || /^<turn_aborted>[\s\S]*<\/turn_aborted>$/.test(text)
+    || text === OPAQUE_COMPACTION_NOTE;
+}
+
+function recentConversationExchanges(entries: readonly ChatGptContextEntry[]): ChatGptContextEntry[][] {
+  const exchanges: ChatGptContextEntry[][] = [];
+  let current: ChatGptContextEntry[] | undefined;
+  for (const entry of entries) {
+    if (entry.role === "user") {
+      if (current?.length) exchanges.push(current);
+      current = [entry];
+      continue;
+    }
+    if (current) current.push(entry);
+  }
+  if (current?.length) exchanges.push(current);
+  return exchanges.slice(-CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT);
+}
+
+/**
+ * Project a bounded working-memory set from the authoritative outer Codex history. Deep history
+ * stays in the broker. Selection is deterministic: retain only the latest conversational exchanges,
+ * then apply token caps inside that structural window. No semantic/model pass is used here.
+ */
+function projectRecentWorkingContext(
+  snapshot: ChatGptContextSnapshot,
+  modelId: string,
+  latestUserIndex: number,
+): RecentWorkingContext {
+  let remaining = CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET - CHATGPT_RECENT_CONTEXT_OVERHEAD_TOKENS;
+  let estimatedTokens = 0;
+  const conversational = snapshot.history.filter(entry =>
+    entry.role !== "developer"
+    && !isRecentOperationalWrapper(entry)
+  );
+  const checkpointEntry = [...conversational].reverse().find(isReadableCheckpointEntry);
+  const candidates = conversational.filter(entry => !isReadableCheckpointEntry(entry));
+  const currentTurnEntries = candidates.filter(entry => latestUserIndex >= 0 && entry.index > latestUserIndex);
+  const priorEntries = candidates.filter(entry => latestUserIndex < 0 || entry.index < latestUserIndex);
+  const exchanges = recentConversationExchanges(priorEntries);
+  const selected = new Map<string, ProjectedContextEntry>();
+
+  let checkpoint: Record<string, unknown> | undefined;
+  if (checkpointEntry && remaining > 0) {
+    const projected = projectedRecentContextEntry(
+      checkpointEntry,
+      modelId,
+      Math.min(CHATGPT_RECENT_CHECKPOINT_TOKEN_CAP, remaining),
+    );
+    if (projected) {
+      checkpoint = projected.payload;
+      remaining -= projected.tokens;
+      estimatedTokens += projected.tokens;
+    }
+  }
+
+  const add = (entry: ChatGptContextEntry | undefined, cap: number): void => {
+    if (!entry || selected.has(entry.id) || remaining <= 0) return;
+    const projected = projectedRecentContextEntry(entry, modelId, Math.min(cap, remaining));
+    if (!projected) return;
+    selected.set(entry.id, projected);
+    remaining -= projected.tokens;
+    estimatedTokens += projected.tokens;
+  };
+
+  // Provider rounds within the same Codex turn can append assistant/tool items after latest_user.
+  // They form the current active exchange and must survive even though latest_user itself is carried
+  // separately in active_context.
+  add([...currentTurnEntries].reverse().find(entry => entry.role === "assistant"), CHATGPT_RECENT_ASSISTANT_TOKEN_CAP);
+  for (const entry of currentTurnEntries) {
+    add(
+      entry,
+      entry.role === "tool_result" ? CHATGPT_RECENT_TOOL_RESULT_TOKEN_CAP : CHATGPT_RECENT_ENTRY_TOKEN_CAP,
+    );
+    if (remaining <= 0) break;
+  }
+
+  // Preserve prior conversational anchors next, newest exchange first. This guarantees that a large
+  // older tool chain cannot evict the user question and final assistant answer that give it meaning.
+  for (let exchangeIndex = exchanges.length - 1; exchangeIndex >= 0 && remaining > 0; exchangeIndex -= 1) {
+    const exchange = exchanges[exchangeIndex]!;
+    add(exchange.find(entry => entry.role === "user"), CHATGPT_RECENT_USER_TOKEN_CAP);
+    add([...exchange].reverse().find(entry => entry.role === "assistant"), CHATGPT_RECENT_ASSISTANT_TOKEN_CAP);
+  }
+
+  // Fill remaining budget only with entries structurally owned by those retained exchanges. Tool
+  // calls/results from older exchanges never enter the bootstrap even when token budget remains.
+  for (let exchangeIndex = exchanges.length - 1; exchangeIndex >= 0 && remaining > 0; exchangeIndex -= 1) {
+    for (const entry of exchanges[exchangeIndex]!) {
+      add(
+        entry,
+        entry.role === "tool_result" ? CHATGPT_RECENT_TOOL_RESULT_TOKEN_CAP : CHATGPT_RECENT_ENTRY_TOKEN_CAP,
+      );
+      if (remaining <= 0) break;
+    }
+  }
+
+  const exchangeCount = exchanges.filter(exchange => exchange.some(entry => selected.has(entry.id))).length;
+  return {
+    ...(checkpoint ? { checkpoint } : {}),
+    entries: [...selected.values()]
+      .map(value => value.payload)
+      .sort((left, right) => {
+        const leftId = String(left.id ?? "");
+        const rightId = String(right.id ?? "");
+        const leftIndex = Number.parseInt(leftId.replace(/^history-/, ""), 10);
+        const rightIndex = Number.parseInt(rightId.replace(/^history-/, ""), 10);
+        return leftIndex - rightIndex;
+      }),
+    estimatedTokens,
+    exchangeCount,
+  };
+}
+
 /**
  * Freeze the exact effective Codex context for one browser turn. The full envelope remains available
  * for read-only fallback, while tool-capable turns expose older conversation state as indexed lazy
@@ -373,11 +588,16 @@ export function compileLcaTokenPrompt(
         dropped: Math.max(0, countChatGptContextImages([latestUser]) - CHATGPT_MAX_INPUT_IMAGES),
       }
     : { seen: 0, dropped: 0 };
+  const workingContext = mcpLazy
+    ? projectRecentWorkingContext(snapshot, parsed.modelId, latestUserIndex)
+    : { entries: [], estimatedTokens: 0, exchangeCount: 0 };
   const activeContext = {
-    version: 2,
+    version: 3,
     ...((parsed.context.systemPrompt?.length ?? 0) > 0 ? { system: parsed.context.systemPrompt } : {}),
     ...(developerOverrides.length > 0 ? { developer_overrides: developerOverrides } : {}),
     ...(projectInstructions ? { project_instructions: projectInstructions } : {}),
+    ...(workingContext.checkpoint ? { checkpoint: workingContext.checkpoint } : {}),
+    ...(workingContext.entries.length > 0 ? { recent_context: workingContext.entries } : {}),
     latest_user: latestUser
       ? messageEnvelope(latestUser, activeImages, activeImageBudget)
       : null,
@@ -385,8 +605,10 @@ export function compileLcaTokenPrompt(
   const sharedContract = mcpLazy
     ? [
       "Act as the model backend for this Codex turn. Honor system and developer_overrides first; project_instructions is Codex-resolved AGENTS guidance and direct latest_user instructions take precedence over it.",
+      "Treat checkpoint as the current compacted Codex task state and recent_context as authoritative immediate conversational continuity. Resolve follow-ups such as 'that', 'continue', 'why', or 'undo it' from recent_context before retrieving older history.",
       `Use only the active context below unless more is needed. Older history and Codex capability instructions are available on demand through ${JSON.stringify(connectorLabel)}; answer immediately with zero connector calls when the active context is sufficient.`,
-      "Treat project/environment/tool/transport blocks as Codex operational context, not human-authored chat. For questions about what the user said, use human user turns only.",
+      "If a recent_context or checkpoint entry has truncated=true, use its history_ref with codex_context get only when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image.",
+      "Treat project/environment/tool/transport blocks and checkpoint as Codex operational context, not human-authored chat. For questions about what the user said, use human user turns only.",
       "Return required rich results as ordinary Markdown too. Do not mention this bridge or capability routing unless the user asks about it.",
     ]
     : [
@@ -436,11 +658,20 @@ export function compileLcaTokenPrompt(
       "</codex_active_context>",
       "<codex_context_ref>",
       JSON.stringify({
-        version: 3,
+        version: 4,
         transport: "mcp-lazy",
         history: snapshot.history.filter(entry => entry.role !== "developer").length,
         instructions: snapshot.history.filter(entry => entry.role === "developer").length,
         attachments: snapshot.attachments.length,
+        recent_inline: workingContext.entries.length,
+        current_turn_inline: workingContext.entries.filter(entry => {
+          const id = String(entry.id ?? "");
+          const index = Number.parseInt(id.replace(/^history-/, ""), 10);
+          return latestUserIndex >= 0 && index > latestUserIndex;
+        }).length,
+        recent_exchanges: workingContext.exchangeCount,
+        recent_exchange_limit: CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT,
+        recent_token_budget: CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET,
       }),
       "</codex_context_ref>",
     ]

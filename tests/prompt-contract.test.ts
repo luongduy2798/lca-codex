@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { compileChatGptContextSnapshot, compileLcaTokenPrompt } from "../src/adapters/lca-token/prompt";
+import { CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET, compileChatGptContextSnapshot, compileLcaTokenPrompt } from "../src/adapters/lca-token/prompt";
+import { estimateTokens } from "../src/lib/token-estimate";
+import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import { LCA_TOKEN_MODEL_ID } from "../src/adapters/lca-token/model";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -41,7 +43,13 @@ function attachTrustedProjectWire(parsed: CodexParsedRequest, agents: string, la
   };
 }
 
-test("tool-capable prompts expose active context immediately and keep history lazy", () => {
+function activeContext(compiledText: string): Record<string, unknown> {
+  const encoded = compiledText.match(/<codex_active_context>\n(.+)\n<\/codex_active_context>/s)?.[1];
+  if (!encoded) throw new Error("compiled prompt did not contain codex_active_context");
+  return JSON.parse(encoded) as Record<string, unknown>;
+}
+
+test("tool-capable prompts expose active and recent context immediately while keeping deep history lazy", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("high");
   const snapshot = compileChatGptContextSnapshot(parsed);
@@ -69,11 +77,177 @@ test("tool-capable prompts expose active context immediately and keep history la
   expect(compiled.text).toContain("preserve-system");
   expect(compiled.text).toContain("preserve-developer");
   expect(compiled.text).toContain("perform the task");
+  expect(compiled.text).toContain("recent_context");
+  expect(compiled.text).toContain("authoritative immediate conversational continuity");
   expect(compiled.text).toContain("answer immediately with zero connector calls when the active context is sufficient");
   expect(snapshot.serialized).toContain("preserve-system");
   expect(compiled.text).toContain("Use codex_context selectively: instructions for Codex skill/capability guidance");
   expect(compiled.text).toContain("otherwise do not bind");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
+});
+
+test("fresh Temporary Chats inline the previous user and assistant exchange for ambiguous follow-ups", () => {
+  for (const followUp of ["cần gì ảnh", "làm tiếp đi", "undo cái vừa sửa", "phương án 2 thì sao"]) {
+    const parsed = request("high");
+    parsed.context.messages = [
+      { role: "user", content: "thầy có đẹp trai ko", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Có chứ 😎 Mà đẹp trai cỡ nào thì phải có ảnh thầy mới chấm điểm công tâm được." }],
+        timestamp: 2,
+      },
+      { role: "user", content: followUp, timestamp: 3 },
+    ];
+    const compiled = compileLcaTokenPrompt(
+      parsed,
+      { localToolsEnabled: true, proAvailable: true },
+      `turn_${"f".repeat(32)}`,
+    );
+    const active = activeContext(compiled.text) as {
+      recent_context?: Array<{ role?: string; content?: unknown }>;
+      latest_user?: { content?: unknown };
+    };
+    expect(JSON.stringify(active.recent_context)).toContain("thầy có đẹp trai ko");
+    expect(JSON.stringify(active.recent_context)).toContain("phải có ảnh thầy");
+    expect(JSON.stringify(active.latest_user)).toContain(followUp);
+  }
+});
+
+test("recent working context drops older tool-heavy exchanges instead of filling the whole token tail", () => {
+  const parsed = request("high");
+  parsed.context.messages = [
+    { role: "user", content: "inspect the old repo", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_old_repo", name: "exec_command", arguments: { cmd: "cat old-repo.html" } }],
+      timestamp: 2,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_old_repo",
+      toolName: "exec_command",
+      content: `OLD_REPO_LOG ${"x".repeat(2_000)}`,
+      isError: false,
+      timestamp: 3,
+    },
+    { role: "assistant", content: [{ type: "text", text: "old repo inspection summary" }], timestamp: 4 },
+    { role: "user", content: "alo", timestamp: 5 },
+    { role: "assistant", content: [{ type: "text", text: "alo thầy" }], timestamp: 6 },
+    { role: "user", content: "<turn_aborted>previous turn interrupted</turn_aborted>", timestamp: 7 },
+    { role: "user", content: "thầy có đẹp trai ko", timestamp: 8 },
+    { role: "assistant", content: [{ type: "text", text: "Có chứ, phải có ảnh thầy mới chấm điểm." }], timestamp: 9 },
+    { role: "user", content: "cần gì ảnh", timestamp: 10 },
+    { role: "assistant", content: [{ type: "text", text: "Nãy mình trả lời lệch context." }], timestamp: 11 },
+    { role: "user", content: "ngáo à", timestamp: 12 },
+    { role: "assistant", content: [{ type: "text", text: "Ừ, nãy mình ngáo thật. Thầy đẹp trai mặc định." }], timestamp: 13 },
+    { role: "user", content: "còn gì nữa", timestamp: 14 },
+  ];
+
+  const compiled = compileLcaTokenPrompt(
+    parsed,
+    { localToolsEnabled: true, proAvailable: true },
+    `turn_${"r".repeat(32)}`,
+  );
+  const active = activeContext(compiled.text) as { recent_context?: unknown[]; latest_user?: unknown };
+  const recent = JSON.stringify(active.recent_context);
+
+  expect(recent).toContain("alo thầy");
+  expect(recent).toContain("thầy có đẹp trai ko");
+  expect(recent).toContain("cần gì ảnh");
+  expect(recent).toContain("ngáo à");
+  expect(recent).not.toContain("OLD_REPO_LOG");
+  expect(recent).not.toContain("old repo inspection summary");
+  expect(recent).not.toContain("call_old_repo");
+  expect(recent).not.toContain("turn_aborted");
+  expect(JSON.stringify(active.latest_user)).toContain("còn gì nữa");
+  expect(compiled.text).toContain('"recent_exchanges":4');
+  expect(compiled.text).toContain('"recent_exchange_limit":4');
+});
+
+test("tool evidence is retained when it belongs to a selected recent exchange", () => {
+  const parsed = request("high");
+  parsed.context.messages = [
+    { role: "user", content: "fix the login bug", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_recent_fix", name: "exec_command", arguments: { cmd: "test -f login.ts" } }],
+      timestamp: 2,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_recent_fix",
+      toolName: "exec_command",
+      content: "recent login evidence",
+      isError: false,
+      timestamp: 3,
+    },
+    { role: "assistant", content: [{ type: "text", text: "Login bug is fixed." }], timestamp: 4 },
+    { role: "user", content: "làm tiếp đi", timestamp: 5 },
+  ];
+
+  const compiled = compileLcaTokenPrompt(
+    parsed,
+    { localToolsEnabled: true, proAvailable: true },
+    `turn_${"t".repeat(32)}`,
+  );
+  const recent = JSON.stringify((activeContext(compiled.text) as { recent_context?: unknown[] }).recent_context);
+
+  expect(recent).toContain("fix the login bug");
+  expect(recent).toContain("call_recent_fix");
+  expect(recent).toContain("recent login evidence");
+  expect(recent).toContain("Login bug is fixed.");
+});
+
+test("recent working context is token bounded and leaves deep history lazy", () => {
+  const parsed = request("high");
+  parsed.context.messages = [];
+  for (let index = 0; index < 24; index += 1) {
+    parsed.context.messages.push(
+      { role: "user", content: `old-user-${index} ${"u".repeat(3_000)}`, timestamp: index * 2 + 1 },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: `old-assistant-${index} ${"a".repeat(3_000)}` }],
+        timestamp: index * 2 + 2,
+      },
+    );
+  }
+  parsed.context.messages.push({ role: "user", content: "continue", timestamp: 100 });
+  const compiled = compileLcaTokenPrompt(
+    parsed,
+    { localToolsEnabled: true, proAvailable: true },
+    `turn_${"b".repeat(32)}`,
+  );
+  const active = activeContext(compiled.text) as { checkpoint?: unknown; recent_context?: unknown[] };
+  const workingJson = JSON.stringify({ checkpoint: active.checkpoint, recent_context: active.recent_context });
+  expect(estimateTokens(workingJson, parsed.modelId)).toBeLessThanOrEqual(CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET);
+  expect(compiled.text).toContain("old-assistant-23");
+  expect(compiled.text).not.toContain("old-assistant-0");
+  expect(compiled.text).toContain('"history":48');
+});
+
+test("latest readable Codex compaction is promoted as checkpoint with post-compaction continuity", () => {
+  const parsed = request("high");
+  const summary = `${SUMMARY_PREFIX}\n\nThe settings flow was fixed; continue from the runtime context propagation bug.`;
+  parsed.context.messages = [
+    { role: "user", content: summary, timestamp: 1 },
+    { role: "user", content: "check the context bug", timestamp: 2 },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "The current bug is that each Temporary Chat only receives latest_user." }],
+      timestamp: 3,
+    },
+    { role: "user", content: "fix that", timestamp: 4 },
+  ];
+  const compiled = compileLcaTokenPrompt(
+    parsed,
+    { localToolsEnabled: true, proAvailable: true },
+    `turn_${"c".repeat(32)}`,
+  );
+  const active = activeContext(compiled.text) as { checkpoint?: unknown; recent_context?: unknown[] };
+  expect(JSON.stringify(active.checkpoint)).toContain("settings flow was fixed");
+  expect(JSON.stringify(active.recent_context)).toContain("check the context bug");
+  expect(JSON.stringify(active.recent_context)).toContain("only receives latest_user");
+  expect(JSON.stringify(active.recent_context)).not.toContain(SUMMARY_PREFIX);
 });
 
 test("tool-capable prompts inline Codex-resolved AGENTS guidance and keep standard Codex scaffolding lazy", () => {
@@ -244,7 +418,11 @@ test("a long task keeps the newest images and drops the overflow instead of fail
   ]);
   const snapshot = compileChatGptContextSnapshot(replayed);
   expect(compiled.text).not.toContain('"text":"step 1"');
+  expect(compiled.text).toContain('"text":"step 9"');
   expect(compiled.text).toContain('"text":"step 13"');
+  expect(compiled.text).not.toContain('"attachment_ref":"ctx-image-1"');
+  expect(compiled.text).toContain('"attachment_ref":"ctx-image-9"');
+  expect(compiled.text).not.toContain(`data:image/png;base64,${markers[0]}`);
   expect(snapshot.attachments).toHaveLength(12);
   expect(snapshot.serialized).toContain("older image not attached");
   expect(snapshot.serialized).toContain("step 1");
@@ -351,6 +529,10 @@ test("the replayed context never carries a finished turn's broker handles", () =
   expect(snapshot.serialized).toContain("keep working");
   expect(compiled.text).toContain(token);
   expect(compiled.text).toContain("keep working");
+  expect(compiled.text).not.toContain(staleToken);
+  expect(compiled.text).not.toContain(staleBinding);
+  expect(compiled.text).toContain("[retired turn handle]");
+  expect(compiled.text).toContain("[retired binding handle]");
   expect(() => JSON.parse(snapshot.serialized) as unknown).not.toThrow();
 });
 

@@ -46,17 +46,28 @@ closed. Closing a running tab destroys its page and terminates that browser turn
 turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
 controls.
 
-In full mode, tool-capable turns no longer carry the accumulated Codex history through the visible
-composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective Codex
-context into an immutable per-turn broker snapshot and sends only a projected active bootstrap:
-active system instructions, unknown/custom developer overrides, the Codex-resolved AGENTS/project
-instruction fragment, the latest user request, and current-turn images. Standard Codex base-model,
-skill, permission, app, and plugin developer scaffolding stays in the broker instead of being replayed
-into every Temporary Chat. One read-only `codex_context` tool exposes `instructions` for that Codex
-capability guidance plus `recent`, `search`, `get`, `full`, and `image` for older task state. The model
-is explicitly told not to bind or retrieve either history or instruction catalogs when the active
-bootstrap is sufficient. `lca-token` never discovers AGENTS.md or chooses a skill itself; it only
-projects and serves the exact instruction material already supplied by the outer Codex harness.
+In full mode, tool-capable turns do not replay the entire accumulated Codex history through the
+visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
+Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory
+bootstrap: active system instructions, unknown/custom developer overrides, the Codex-resolved
+AGENTS/project instruction fragment, the latest readable compaction checkpoint, a recent
+conversation tail, the latest user request, and current-turn images. The recent tail is selected
+structurally rather than semantically: each human user turn starts an exchange, its following
+assistant/tool events belong to that exchange until the next user turn, and only the latest four
+exchanges are eligible for the bootstrap. The 8k token budget remains a hard cap inside that window;
+user/final-assistant anchors are admitted before bounded tool evidence, so an old tool-heavy exchange
+cannot consume the bootstrap. Oversized retained entries use bounded previews with stable
+`history_ref` values instead of replaying full logs.
+
+Standard Codex base-model, skill, permission, app, and plugin developer scaffolding plus older/deeper
+conversation state stays in the broker instead of being replayed into every Temporary Chat. One
+read-only `codex_context` tool exposes `instructions` for Codex capability guidance plus
+`recent`, `search`, `get`, `full`, and `image` for deeper task state. A truncated working-memory entry
+can be expanded with `get`; historical images remain lazy. The model is explicitly told to resolve
+ordinary conversational references from the inline recent context first and bind only when the
+needed information is outside that working set or a native Codex tool is required. `lca-token` never
+discovers AGENTS.md or chooses a skill itself; it only projects and serves the exact instruction
+material already supplied by the outer Codex harness.
 
 `codex_bind_turn` is therefore on demand. A direct answer can finish with zero connector calls. If
 history or a native tool is needed, binding still scopes every later request to the exact outer Codex

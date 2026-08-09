@@ -598,6 +598,9 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(compiled.text).not.toContain(largeHistory);
     expect(compiled.text).toContain("Inspect the attached current image");
     expect(compiled.text).toContain("<codex_context_ref>");
+    expect(compiled.text).toContain('"history_ref":"history-1"');
+    expect(compiled.text).toContain('"truncated":true');
+    expect(compiled.text.length).toBeLessThan(45_000);
     expect(snapshot.serialized).toContain(largeHistory);
     expect(files.map(file => file.name)).toEqual(["codex-input-image-1.png"]);
     expect(files[0]!.mimeType).toBe("image/png");
@@ -1018,7 +1021,9 @@ describe("ChatGPT outer-native harness v3", () => {
     const snapshot = compileChatGptContextSnapshot(request);
     const compiled = compileLcaTokenPrompt(request, toolCapabilities, "turn_123456789012345678901234", snapshot);
     expect(compiled.transport).toBe("mcp-lazy");
-    expect(compiled.text).not.toContain("first request");
+    expect(compiled.text).toContain("first request");
+    expect(compiled.text).toContain("Inspected files");
+    expect(compiled.text).toContain("call_prior");
     expect(compiled.text).toContain("continue");
     const envelope = JSON.parse(snapshot.serialized) as { version: number; system: string[]; messages: Array<Record<string, unknown>> };
     expect(envelope.version).toBe(5);
