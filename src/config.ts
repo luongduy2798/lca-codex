@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
 
-export type RuntimeMode = "browser-only" | "full";
+export type RuntimeMode = "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
 
 export interface TunnelConfig {
@@ -107,12 +107,12 @@ export function atomicWriteFile(path: string, data: string | Uint8Array): void {
   try { chmodSync(path, 0o600); } catch { /* Windows ACLs are managed by the installer. */ }
 }
 
-export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
+export function defaultConfig(_legacyMode?: string): AppConfig {
   const home = getConfigDir();
   return {
     version: 3,
     releaseVersion: VERSION,
-    mode,
+    mode: "full",
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
@@ -256,21 +256,22 @@ export function loadConfigForSetup(): AppConfig {
   const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   if (raw.version === 1 && raw.mode === "pro-only") {
     raw.version = 2;
-    raw.mode = "browser-only";
+    raw.mode = "full";
   }
+  if (raw.mode === "browser-only") raw.mode = "full";
   if (raw.version === 2) {
     raw.version = 3;
     raw.browserHost = "managed-chrome";
   }
-  return parseConfig(raw, path);
+  return parseConfig(raw, path, true);
 }
 
-function parseConfig(value: unknown, path: string): AppConfig {
+function parseConfig(value: unknown, path: string, allowIncompleteTunnel = false): AppConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid configuration object in ${path}`);
   const parsed = value as Partial<AppConfig>;
   if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
-  if (parsed.mode !== "browser-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
+  if (parsed.mode !== "full") throw new Error(`LCA Codex requires the full harness runtime in ${path}`);
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
   if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
@@ -307,8 +308,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`brokerSocketPath must be an absolute Unix socket path in ${path}`);
   }
   if (!/^[A-Za-z0-9_-]{40,}$/.test(parsed.controlToken!)) throw new Error(`Invalid controlToken in ${path}`);
-  if (parsed.mode === "full") {
-    if (!parsed.tunnel || typeof parsed.tunnel !== "object") throw new Error("Full mode requires tunnel configuration");
+  if (!parsed.tunnel || typeof parsed.tunnel !== "object") {
+    if (!allowIncompleteTunnel) throw new Error("Full harness requires tunnel configuration");
+  } else {
     for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"] as const) {
       if (typeof parsed.tunnel[key] !== "string" || !parsed.tunnel[key].trim()) {
         throw new Error(`Missing tunnel.${key} in ${path}`);
@@ -366,7 +368,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       headed: config.headed,
-      localToolsEnabled: config.mode === "full",
+      localToolsEnabled: true,
       proAvailable: config.proAvailable,
       autoApproveToolCalls: config.autoApproveToolCalls,
     },

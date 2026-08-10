@@ -186,8 +186,8 @@ function managedTunnelConnectArgs(config, invocation) {
 
 function validateConfig(config, descriptorPath, platform = process.platform) {
   if (!config || config.version !== 3) throw new Error("Runtime configuration is missing or unsupported");
-  if (config.mode !== "browser-only" && config.mode !== "full") {
-    throw new Error("Runtime configuration has an invalid mode");
+  if (config.mode !== "full") {
+    throw new Error("Runtime configuration must use the full harness");
   }
   if (typeof config.releaseVersion !== "string" || !config.releaseVersion.trim()) {
     throw new Error("Runtime configuration has no release version");
@@ -234,26 +234,26 @@ function validateConfig(config, descriptorPath, platform = process.platform) {
     || config.runtimeCommand.some(part => typeof part !== "string" || !part.trim())) {
     throw new Error("Runtime configuration has an invalid runtime command");
   }
-  if (config.mode === "full") {
+  {
     if (!config.tunnel || typeof config.tunnel !== "object") {
-      throw new Error("Full mode is missing tunnel configuration");
+      throw new Error("Full harness is missing tunnel configuration");
     }
     for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"]) {
       if (typeof config.tunnel[key] !== "string" || !config.tunnel[key].trim()) {
-        throw new Error(`Full mode is missing tunnel.${key}`);
+        throw new Error(`Full harness is missing tunnel.${key}`);
       }
     }
     if (!/^tunnel_[a-f0-9]{32}$/.test(config.tunnel.tunnelId)) {
-      throw new Error("Full mode has an invalid tunnel id");
+      throw new Error("Full harness has an invalid tunnel id");
     }
     for (const key of ["profileName", "alias"]) {
       if (!/^[A-Za-z0-9._-]+$/.test(config.tunnel[key])) {
-        throw new Error(`Full mode has an invalid tunnel.${key}`);
+        throw new Error(`Full harness has an invalid tunnel.${key}`);
       }
     }
     for (const key of ["binaryPath", "runtimeKeyFile", "profileDir"]) {
       if (!absolutePath(config.tunnel[key], platform)) {
-        throw new Error(`Full mode requires an absolute tunnel.${key}`);
+        throw new Error(`Full harness requires an absolute tunnel.${key}`);
       }
     }
   }
@@ -314,11 +314,10 @@ class RuntimeSupervisor {
     if (!config || typeof config !== "object" || Array.isArray(config)) {
       throw new Error("Runtime configuration is not an object");
     }
-    const mode = config.mode === "pro-only" ? "browser-only" : config.mode;
-    if (mode !== "browser-only" && mode !== "full") {
-      throw new Error("Runtime configuration has an invalid setup mode");
+    if (config.mode !== "full" && config.mode !== "browser-only" && config.mode !== "pro-only") {
+      throw new Error("Runtime configuration must use the full harness");
     }
-    return { ...config, mode };
+    return config;
   }
 
   readState() {
@@ -432,7 +431,7 @@ class RuntimeSupervisor {
         mode: config?.mode ?? null,
         detail: errorMessage(error),
         daemon: { pid: null, healthy: false, acceptingTurns: null },
-        tunnel: config?.mode === "full" ? { pid: null, state: null, ready: false } : null,
+        tunnel: { pid: null, state: null, ready: false },
         port: {
           host: config?.host ?? "127.0.0.1",
           port: config?.port ?? null,
@@ -487,29 +486,27 @@ class RuntimeSupervisor {
     else if (occupied) owner = "foreign";
 
     let tunnelHealth = null;
-    if (config.mode === "full") {
-      const shouldInspectTunnel = Boolean(this.tunnel) || stateTunnelRunning || daemonIsLca;
-      if (shouldInspectTunnel) {
-        try {
-          tunnelHealth = await this.observeTunnelForMonitor(config);
-        } catch (error) {
-          tunnelHealth = {
-            pid: this.tunnel?.pid ?? (stateTunnelRunning ? ownershipState.tunnelPid : null),
-            state: "unknown",
-            ready: false,
-            processRunning: Boolean(this.tunnel || stateTunnelRunning),
-            detail: errorMessage(error),
-          };
-        }
-      } else {
+    const shouldInspectTunnel = Boolean(this.tunnel) || stateTunnelRunning || daemonIsLca;
+    if (shouldInspectTunnel) {
+      try {
+        tunnelHealth = await this.observeTunnelForMonitor(config);
+      } catch (error) {
         tunnelHealth = {
-          pid: null,
-          state: "stopped",
+          pid: this.tunnel?.pid ?? (stateTunnelRunning ? ownershipState.tunnelPid : null),
+          state: "unknown",
           ready: false,
-          processRunning: false,
-          detail: "tunnel is not running",
+          processRunning: Boolean(this.tunnel || stateTunnelRunning),
+          detail: errorMessage(error),
         };
       }
+    } else {
+      tunnelHealth = {
+        pid: null,
+        state: "stopped",
+        ready: false,
+        processRunning: false,
+        detail: "tunnel is not running",
+      };
     }
 
     let lifecycle = this.lifecyclePhase;
@@ -528,7 +525,7 @@ class RuntimeSupervisor {
         const daemonReady = daemonMatchesConfig
           && health?.status === "ok"
           && health?.accepting_turns !== false;
-        const tunnelReady = config.mode !== "full" || tunnelHealth?.ready === true;
+        const tunnelReady = tunnelHealth?.ready === true;
         lifecycle = daemonReady && tunnelReady ? "ready" : "degraded";
         if (lifecycle === "degraded") {
           detail = this.lastChildFailure.daemon
@@ -555,13 +552,11 @@ class RuntimeSupervisor {
         healthy: daemonMatchesConfig && health?.status === "ok",
         acceptingTurns: typeof health?.accepting_turns === "boolean" ? health.accepting_turns : null,
       },
-      tunnel: config.mode === "full"
-        ? {
-            pid: tunnelHealth?.pid ?? null,
-            state: typeof tunnelHealth?.state === "string" ? tunnelHealth.state : null,
-            ready: tunnelHealth?.ready === true,
-          }
-        : null,
+      tunnel: {
+        pid: tunnelHealth?.pid ?? null,
+        state: typeof tunnelHealth?.state === "string" ? tunnelHealth.state : null,
+        ready: tunnelHealth?.ready === true,
+      },
       port: {
         host: config.host,
         port: config.port,
@@ -1029,7 +1024,6 @@ class RuntimeSupervisor {
   }
 
   async startTunnel(config, operationName = "runtime-start") {
-    if (config.mode !== "full") return;
     this.assertTunnelClientReady(config);
     try {
       const existing = await this.waitForKnownTunnelStatus(config);
@@ -1505,7 +1499,7 @@ class RuntimeSupervisor {
   }
 
   async adoptConfiguredTunnelForStop(config) {
-    if (config.mode !== "full" || this.tunnel) return;
+    if (this.tunnel) return;
     const health = await this.waitForKnownTunnelStatus(config);
     if (tunnelRuntimeStopped(health)) {
       return;
@@ -1670,25 +1664,18 @@ class RuntimeSupervisor {
       );
     }
     let managedTunnelRunning = false;
-    if (config.mode === "full") {
-      const tunnelHealth = await this.waitForKnownTunnelStatus(config);
-      managedTunnelRunning = !tunnelRuntimeStopped(tunnelHealth);
-      if (managedTunnelRunning
-        && tunnelHealth.processRunning !== true
-        && tunnelHealth.pid === null
-        && typeof tunnelHealth.state !== "string") {
-        throw new Error(`The stale tunnel runtime state is ambiguous: ${tunnelHealth.detail}`);
-      }
-      if (!managedTunnelRunning && processRunning(state.tunnelPid)) {
-        throw new Error(
-          `The stale tunnel PID ${state.tunnelPid} is still alive but the native runtime manager`
-          + " does not recognize it; refusing to terminate an unverified process",
-        );
-      }
-    } else if (processRunning(state.tunnelPid)) {
+    const tunnelHealth = await this.waitForKnownTunnelStatus(config);
+    managedTunnelRunning = !tunnelRuntimeStopped(tunnelHealth);
+    if (managedTunnelRunning
+      && tunnelHealth.processRunning !== true
+      && tunnelHealth.pid === null
+      && typeof tunnelHealth.state !== "string") {
+      throw new Error(`The stale tunnel runtime state is ambiguous: ${tunnelHealth.detail}`);
+    }
+    if (!managedTunnelRunning && processRunning(state.tunnelPid)) {
       throw new Error(
-        `The stale tunnel PID ${state.tunnelPid} is still alive but browser-only configuration`
-        + " has no tunnel identity with which to verify it",
+        `The stale tunnel PID ${state.tunnelPid} is still alive but the native runtime manager`
+        + " does not recognize it; refusing to terminate an unverified process",
       );
     }
     if (!daemonRunning && !managedTunnelRunning) {
@@ -1906,7 +1893,7 @@ class RuntimeSupervisor {
       }
       this.daemon = null;
 
-      if (config?.mode === "full") {
+      if (config) {
         let tunnelHealth = null;
         try {
           tunnelHealth = await this.readTunnelHealth(config);
@@ -1949,7 +1936,7 @@ class RuntimeSupervisor {
         }
       }
       const unverifiedTunnelPid = ownershipState?.tunnelPid;
-      if (config?.mode !== "full" && processRunning(unverifiedTunnelPid)) {
+      if (!config && processRunning(unverifiedTunnelPid)) {
         this.logger.warn("runtime.stale_tunnel_marker_discarded", {
           pid: unverifiedTunnelPid,
           message: "PID is alive but no tunnel identity is available; process was not terminated",
@@ -1985,7 +1972,7 @@ class RuntimeSupervisor {
         this.logger.warn("runtime.start_failed_before_stop", { message: errorMessage(error) });
       }
     }
-    const config = this.readConfig();
+    const config = this.readSetupConfig();
     this.stopping = true;
     this.stopTunnelMonitor();
     let drained = false;

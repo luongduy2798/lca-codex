@@ -84,7 +84,7 @@ test("user-home expansion accepts native Unix and Windows separators", () => {
   expect(expandUserPath("~\\runtime")).toBe(join(homedir(), "runtime"));
 });
 
-test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", () => {
+test("setup explicitly migrates v1 pro-only config to the v3 full harness schema", () => {
   const root = join(tmpdir(), `lca-codex-config-migration-${process.pid}-${Date.now()}`);
   roots.push(root);
   process.env.LCA_CODEX_HOME = root;
@@ -108,7 +108,7 @@ test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", 
   })}\n`);
 
   expect(() => loadConfig()).toThrow("rerun setup to migrate");
-  expect(loadConfigForSetup()).toMatchObject({ version: 3, mode: "browser-only", browserHost: "managed-chrome" });
+  expect(loadConfigForSetup()).toMatchObject({ version: 3, mode: "full", browserHost: "managed-chrome" });
 });
 
 test("legacy temp-path wrapper and vendor are removed only after runtime ownership changes", () => {
@@ -122,7 +122,7 @@ test("legacy temp-path wrapper and vendor are removed only after runtime ownersh
   writeFileSync(wrapper, "#!/bin/sh\n");
   writeFileSync(vendorFile, "{}\n");
 
-  const config = defaultConfig("browser-only");
+  const config = defaultConfig();
   config.runtimeCommand = [wrapper];
   expect(() => removeLegacyRuntimeArtifacts(config)).toThrow("still references");
   expect(existsSync(wrapper)).toBe(true);
@@ -133,7 +133,7 @@ test("legacy temp-path wrapper and vendor are removed only after runtime ownersh
 });
 
 test("launcher browser ownership is explicit in provider configuration", () => {
-  const config = defaultConfig("browser-only");
+  const config = defaultConfig();
   config.browserHost = "launcher";
   config.browserHostDescriptorPath = "/Users/example/.lca-codex/runtime/launcher-browser.json";
   expect(providerConfig(config).lcaCodex).toMatchObject({

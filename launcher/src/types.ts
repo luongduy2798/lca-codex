@@ -104,7 +104,7 @@ export interface DoctorCheck {
 
 export interface DoctorReport {
   ok: boolean;
-  mode?: "browser-only" | "full";
+  mode?: "full";
   checks: DoctorCheck[];
 }
 
@@ -118,7 +118,7 @@ export interface RuntimeStatus {
   configured: boolean;
   lifecycle: "stopped" | "starting" | "ready" | "stopping" | "degraded" | "error" | "stale" | "foreign";
   owner: "current-launcher" | "stale-launcher" | "compatible-runtime" | "foreign" | "none";
-  mode: "browser-only" | "full" | null;
+  mode: "full" | null;
   detail: string | null;
   daemon: {
     pid: number | null;
@@ -242,6 +242,7 @@ export interface LauncherApi {
   saveCodexConfig(content: string): Promise<{ config: CodexConfigSnapshot; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
+  restoreNativeCodex(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {
     tunnelId?: string;

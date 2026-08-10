@@ -27,7 +27,6 @@ test("setup validates the port before performing runtime work", async () => {
   try {
     const result = await runCli([
       "setup",
-      "--browser-only",
       "--port",
       "0",
       "--acknowledge-unofficial",
@@ -53,7 +52,7 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
   writeFileSync(configPath, `${JSON.stringify({
     version: 3,
     releaseVersion: "0.2.0",
-    mode: "browser-only",
+    mode: "full",
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
@@ -68,6 +67,14 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
     autoApproveToolCalls: false,
     controlToken: "launcher-uninstall-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
+    tunnel: {
+      binaryPath: process.execPath,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: join(appHome, "runtime.key"),
+      profileDir: join(appHome, "profiles"),
+      profileName: "lca-codex",
+      alias: "lca-codex",
+    },
   })}\n`);
   try {
     const result = await runCli([

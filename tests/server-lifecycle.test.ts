@@ -112,7 +112,7 @@ test("HTTP turn tracking releases a stream requested by an already disconnected 
 });
 
 test("authenticated lifecycle control cancels orphaned browser turns", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config);
   let cancelled = 0;
   chatGptTurnSessions.clear();
@@ -152,7 +152,7 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
 });
 
 test("authenticated Codex lifecycle interrupt cancels only the matching browser turn", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config);
   const cancelled: string[] = [];
   chatGptTurnSessions.clear();
@@ -215,7 +215,7 @@ test("a full-mode runtime exposes its broker endpoint before any turn registers"
 });
 
 test("a drained runtime rejects new model-catalog work before shutdown", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config);
   const endpoint = `http://127.0.0.1:${server.port}`;
   const authorization = { authorization: `Bearer ${config.controlToken}` };
@@ -246,7 +246,7 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
 });
 
 test("health proves that Codex received a successful augmented model catalog", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config, {
     fetchUpstream: async () => Response.json({
       models: [{
@@ -280,7 +280,7 @@ test("health proves that Codex received a successful augmented model catalog", a
 });
 
 test("server exposes authenticated standalone Web Search on the routed v1 base URL", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   let upstreamRequest: Request | undefined;
   const server = startServer(config, {
     fetchUpstream: async request => {
@@ -310,7 +310,7 @@ test("server exposes authenticated standalone Web Search on the routed v1 base U
 });
 
 test("authenticated shutdown requires a verified idle drain", async () => {
-  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config);
   const endpoint = `http://127.0.0.1:${server.port}`;
   const authorization = { authorization: `Bearer ${config.controlToken}` };

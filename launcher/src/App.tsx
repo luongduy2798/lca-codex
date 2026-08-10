@@ -30,11 +30,6 @@ import type {
 
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
-const MCP_GUIDE_MEDIA = [
-  new URL("./assets/mcp-create-tunnel.gif", import.meta.url).href,
-  new URL("./assets/mcp-connect-connector.gif", import.meta.url).href,
-  new URL("./assets/mcp-connect-connector.gif", import.meta.url).href,
-] as const;
 
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
@@ -155,7 +150,11 @@ function LauncherShell({
   updateState: (state: LauncherState) => void;
 }) {
   const [surface, setSurface] = useState<Surface>(
-    snapshot.state.coreSetupComplete && snapshot.state.codexCatalogVerified ? "browser" : "setup",
+    snapshot.state.coreSetupComplete
+      && snapshot.state.codexCatalogVerified
+      && snapshot.state.mcpSetupComplete
+      ? "browser"
+      : "setup",
   );
   const [codexRootRequest, setCodexRootRequest] = useState(0);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
@@ -164,19 +163,13 @@ function LauncherShell({
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser";
   const needsBrowser = browser?.authenticated !== true;
-  const needsSetup = !needsBrowser
-    && (snapshot.state.coreSetupComplete !== true || snapshot.state.codexCatalogVerified !== true);
-  const mcpOptional = snapshot.state.codexCatalogVerified === true && snapshot.state.mcpSetupComplete !== true;
-  const runtimeModeLabel = snapshot.runtime.mode === "full"
-    ? copy.codexMode
-    : snapshot.runtime.mode === "browser-only"
-      ? copy.chatgptMode
-      : copy.modeNotConfigured;
-  const runtimeModeDescription = snapshot.runtime.mode === "full"
-    ? copy.codexModeBody
-    : snapshot.runtime.mode === "browser-only"
-      ? copy.chatgptModeBody
-      : copy.modeNotConfiguredBody;
+  const setupComplete = snapshot.state.coreSetupComplete === true
+    && snapshot.state.codexCatalogVerified === true
+    && snapshot.state.mcpSetupComplete === true;
+  const needsSetup = !needsBrowser && !setupComplete;
+  const mcpNeedsSetup = !needsBrowser && snapshot.state.mcpSetupComplete !== true;
+  const mcpRuntimeNeedsAttention = snapshot.state.mcpRuntimeInstalled === true
+    && ["degraded", "error", "stale", "foreign"].includes(snapshot.runtime.lifecycle);
   const updateVisible = ["available", "downloading", "installing"].includes(snapshot.update.status);
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
@@ -304,17 +297,13 @@ function LauncherShell({
               </div>
             </div>
 
-            <div className={`sidebar-runtime-card is-${snapshot.runtime.lifecycle}${snapshot.runtime.mode === "full" ? " is-codex" : ""}`}>
+            <div className={`sidebar-runtime-card is-${snapshot.runtime.lifecycle} is-codex`}>
               <button
                 className="sidebar-runtime-overview"
                 onClick={() => navigateSurface("runtime")}
-                title={runtimeModeDescription}
+                title={snapshot.runtime.detail || copy.runtimeServiceSubtitle}
                 type="button"
               >
-                <span className="sidebar-runtime-mode-line">
-                  <span>{copy.runtimeMode}</span>
-                  <strong>{runtimeModeLabel}</strong>
-                </span>
                 <strong className="sidebar-runtime-lifecycle">
                   <StateDot state={runtimeDotState(snapshot.runtime)} />
                   {runtimeLifecycleLabel(copy, snapshot.runtime)}
@@ -359,7 +348,11 @@ function LauncherShell({
                 />
                 <SidebarItem
                   active={surface === "mcp"}
-                  badge={mcpOptional ? <ActionDot tone="optional" /> : null}
+                  badge={mcpRuntimeNeedsAttention
+                    ? <ActionDot tone="error" />
+                    : mcpNeedsSetup
+                      ? <ActionDot pulse tone="required" />
+                      : null}
                   icon="mcp"
                   label="MCP"
                   onClick={() => navigateSurface("mcp")}
@@ -446,7 +439,7 @@ function LauncherShell({
             {surface === "mcp" ? (
               <McpSurface
                 copy={copy}
-                onDone={() => setSurface("browser")}
+                onDone={() => setSurface("setup")}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -457,7 +450,6 @@ function LauncherShell({
               <RuntimeServiceSurface
                 copy={copy}
                 setError={setError}
-                showMcp={() => setSurface("mcp")}
                 snapshot={snapshot}
                 updateState={updateState}
               />
@@ -786,7 +778,6 @@ function SetupSurface({
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
   });
-
   return (
     <ContentSurface
       eyebrow={copy.required}
@@ -818,37 +809,34 @@ function SetupSurface({
           title={copy.stepSmoke}
         />
         <SetupRow
-          action={snapshot.state.codexCatalogVerified
+          action={snapshot.state.coreSetupComplete
             ? copy.installed
-            : snapshot.state.coreSetupComplete
-              ? copy.awaitingCodex
-              : activeAction === "install" ? copy.installingModels : copy.install}
-          complete={snapshot.state.codexCatalogVerified === true}
+            : activeAction === "install" ? copy.installingModels : copy.install}
+          complete={snapshot.state.coreSetupComplete === true}
           description={copy.stepInstallBody}
-          disabled={busy
-            || !snapshot.smokePassed
-            || (snapshot.state.coreSetupComplete === true && snapshot.state.codexCatalogVerified !== true)}
+          disabled={busy || !snapshot.smokePassed}
           index={3}
           loading={activeAction === "install"}
           onAction={install}
           title={copy.stepInstall}
         />
+        <SetupRow
+          action={snapshot.state.mcpSetupComplete
+            ? copy.mcpReady
+            : snapshot.state.mcpRuntimeInstalled ? copy.finishMcpSetup : copy.configureMcp}
+          complete={snapshot.state.mcpSetupComplete === true}
+          description={copy.stepMcpBody}
+          disabled={busy || snapshot.state.coreSetupComplete !== true}
+          index={4}
+          onAction={showMcp}
+          title={copy.stepMcp}
+        />
       </div>
 
-      {snapshot.state.codexRestartRequired ? (
+      {snapshot.state.codexRestartRequired && snapshot.state.mcpSetupComplete ? (
         <CodexRestartGuide copy={copy} disabled={busy} setError={setError} snapshot={snapshot} />
       ) : null}
 
-      <SectionHeading label="MCP" meta={copy.optional} spaced />
-      <button className="next-surface-row" disabled={!snapshot.state.codexCatalogVerified} onClick={showMcp} type="button">
-        <Icon name="mcp" />
-        <span>
-          <strong>{copy.mcpTitle}</strong>
-          <small>{copy.mcpBody}</small>
-        </span>
-        <em>{snapshot.state.mcpSetupComplete ? copy.mcpReady : copy.configureMcp}</em>
-        <Icon name="chevron" />
-      </button>
     </ContentSurface>
   );
 }
@@ -1028,7 +1016,7 @@ function CodexConfigSurface({
     }
   };
   const restoreNative = () => run("restore", async () => {
-    const result = await api!.uninstallIntegration();
+    const result = await api!.restoreNativeCodex();
     if (!result.cancelled) updateState(result.state);
   });
   const saveManual = async () => {
@@ -1534,7 +1522,7 @@ function McpSurface({
     }
   };
   const verify = async () => {
-    if (busy) return;
+    if (busy || snapshot.runtime.lifecycle !== "ready") return;
     setActiveAction("verify");
     setError(null);
     setDoctor(null);
@@ -1550,7 +1538,7 @@ function McpSurface({
 
   return (
     <ContentSurface fit subtitle={copy.mcpSubtitle} title="MCP">
-      {!snapshot.state.codexCatalogVerified ? (
+      {snapshot.state.coreSetupComplete !== true ? (
         <NoticeRow icon="setup" tone="warning">{copy.stepInstallBody}</NoticeRow>
       ) : null}
 
@@ -1570,10 +1558,6 @@ function McpSurface({
       </div>
 
       <div className="mcp-stage">
-        <div className="guide-media">
-          <img alt={`${copy.guideVideo}: ${steps[step]!.title}`} src={MCP_GUIDE_MEDIA[step]} />
-        </div>
-
         <AnimatePresence mode="wait" initial={false}>
           <motion.section
             animate={{ opacity: 1, x: 0 }}
@@ -1712,7 +1696,7 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || !snapshot.state.codexCatalogVerified
+              || snapshot.state.coreSetupComplete !== true
               || !connectorName.trim()
               || connectorName.trim().length > 80
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
@@ -1725,7 +1709,7 @@ function McpSurface({
         ) : null}
         {step === 2 ? (
           <PrimaryButton
-            disabled={busy}
+            disabled={busy || snapshot.runtime.lifecycle !== "ready"}
             loading={activeAction === "verify"}
             onClick={() => void (doctor?.ok ? onDone() : verify())}
           >
@@ -1744,13 +1728,11 @@ function McpSurface({
 function RuntimeServiceSurface({
   copy,
   setError,
-  showMcp,
   snapshot,
   updateState,
 }: {
   copy: Copy;
   setError: (error: string | null) => void;
-  showMcp: () => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
 }) {
@@ -1775,32 +1757,16 @@ function RuntimeServiceSurface({
 
       <SectionHeading label={copy.runtimeDetails} spaced />
       <div className="runtime-detail-list">
-        <RuntimeDetail
-          description={runtime.mode === "full" ? copy.codexModeBody : runtime.mode === "browser-only" ? copy.chatgptModeBody : copy.modeNotConfiguredBody}
-          label={copy.runtimeMode}
-          value={runtime.mode === "full" ? copy.codexMode : runtime.mode === "browser-only" ? copy.chatgptMode : copy.modeNotConfigured}
-        />
-        {runtime.mode === "browser-only" ? (
-          <div className="runtime-mode-suggestion">
-            <div>
-              <strong>{copy.switchToCodexMode}</strong>
-              <small>{copy.switchToCodexModeBody}</small>
-            </div>
-            <SecondaryButton icon="chevron" onClick={showMcp}>{copy.configureMcp}</SecondaryButton>
-          </div>
-        ) : null}
         <RuntimeDetail label={copy.runtimeEndpoint} value={endpoint} />
         <RuntimeDetail label={copy.runtimeResponses} value={runtime.daemon.pid ? `PID ${runtime.daemon.pid} · ${runtime.daemon.healthy ? copy.healthy : copy.needsAttention}` : copy.runtimeStopped} />
-        {runtime.mode === "full" ? (
-          <RuntimeDetail
-            label={copy.runtimeTunnel}
-            value={runtime.tunnel?.ready
-              ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${copy.runtimeReady}`
-              : runtime.tunnel?.state && runtime.tunnel.state !== "stopped"
-                ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${runtime.tunnel.state}`
-                : copy.runtimeStopped}
-          />
-        ) : null}
+        <RuntimeDetail
+          label={copy.runtimeTunnel}
+          value={runtime.tunnel?.ready
+            ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${copy.runtimeReady}`
+            : runtime.tunnel?.state && runtime.tunnel.state !== "stopped"
+              ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${runtime.tunnel.state}`
+              : copy.runtimeStopped}
+        />
         <RuntimeDetail label={copy.runtimeOwner} value={runtime.owner} />
       </div>
 

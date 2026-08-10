@@ -93,7 +93,7 @@ describe("native /models augmentation", () => {
   });
 
   test("is idempotent, removes stale routed slugs, and hides Pro-only reasoning when unavailable", () => {
-    const config = defaultConfig("browser-only");
+    const config = defaultConfig();
     config.proAvailable = false;
     const polluted = source();
     (polluted.models as unknown[]).push(
@@ -106,7 +106,7 @@ describe("native /models augmentation", () => {
     const models = second.models as Array<Record<string, unknown>>;
     const routed = models.filter(model => model.slug === "lca-codex");
     expect(routed).toHaveLength(1);
-    expect(routed[0]!.tool_mode).toBeNull();
+    expect(routed[0]!.tool_mode).toBe("code_mode_only");
     expect(routed[0]!.multi_agent_version).toBe("v1");
     expect(routed[0]!.supported_reasoning_levels).toEqual([
       { effort: "low", description: "Instant" },

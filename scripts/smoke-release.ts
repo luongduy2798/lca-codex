@@ -49,7 +49,7 @@ portServer.stop();
 const config = {
   version: 3,
   releaseVersion: VERSION,
-  mode: "browser-only",
+  mode: "full",
   host: "127.0.0.1",
   port,
   contextWindow: 256_000,
@@ -64,6 +64,14 @@ const config = {
   controlToken: "release-smoke-control-token-0123456789abcdef",
   runtimeCommand,
   acknowledgedUnofficialAt: new Date().toISOString(),
+  tunnel: {
+    binaryPath: join(root, "tunnel-client"),
+    tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    runtimeKeyFile: join(root, "runtime-key"),
+    profileDir: join(root, "tunnel-profile"),
+    profileName: "release-smoke",
+    alias: "release-smoke",
+  },
 };
 writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
@@ -83,7 +91,7 @@ try {
   }
   if (!health?.ok) throw new Error("relocated daemon did not become healthy");
   const payload = await health.json() as Record<string, unknown>;
-  if (payload.service !== "lca-codex" || payload.mode !== "browser-only") {
+  if (payload.service !== "lca-codex" || payload.mode !== "full") {
     throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
   }
 

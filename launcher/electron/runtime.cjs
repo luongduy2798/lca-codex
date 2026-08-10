@@ -20,8 +20,7 @@ const {
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
-const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
-const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
+const CORE_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const CODEX_TOOL_HEALTH_TIMEOUT_MS = 90_000;
@@ -378,16 +377,16 @@ class RuntimeHost {
       return {
         configured: false,
         owner: "none",
-        mode: "browser-only",
+        mode: "full",
         serialized: null,
       };
     }
     const launcherOwned = setupConfig.browserHost === "launcher";
-    const config = launcherOwned ? this.supervisor.readConfig() : setupConfig;
+    const config = setupConfig;
     return {
       configured: true,
       owner: launcherOwned ? "launcher" : "external",
-      mode: config.mode === "full" ? "full" : "browser-only",
+      mode: "full",
       serialized: JSON.stringify(config),
       config: structuredClone(config),
     };
@@ -395,7 +394,7 @@ class RuntimeHost {
 
   mcpCredentialsConfigured() {
     const config = this.runtimeConfigSnapshot().config;
-    const tunnel = config?.mode === "full" ? config.tunnel : null;
+    const tunnel = config?.tunnel ?? null;
     return Boolean(
       tunnel
       && /^tunnel_[a-f0-9]{32}$/.test(tunnel.tunnelId)
@@ -475,14 +474,12 @@ class RuntimeHost {
           successMessage: "Previous terminal-managed daemon restored",
           timeoutMs: 75_000,
         });
-        if (snapshot.mode === "full") {
-          await this.run(operationName, ["tunnel", "start"], {
-            embedded: true,
-            message: "Restoring the previous terminal-managed tunnel",
-            successMessage: "Previous terminal-managed tunnel restored",
-            timeoutMs: 75_000,
-          });
-        }
+        await this.run(operationName, ["tunnel", "start"], {
+          embedded: true,
+          message: "Restoring the previous terminal-managed tunnel",
+          successMessage: "Previous terminal-managed tunnel restored",
+          timeoutMs: 75_000,
+        });
       }
       await this.run(operationName, ["doctor", "--json"], {
         message: "Verifying the previous terminal-managed runtime",
@@ -791,9 +788,6 @@ class RuntimeHost {
   }
 
   startCodexToolHealthProbe(config) {
-    if (config.mode !== "full") {
-      throw new Error("Codex native tools require the Full runtime mode");
-    }
     const probeDir = path.join(this.coreHome, "runtime", "codex-tool-health-probe");
     fs.mkdirSync(probeDir, { recursive: true, mode: 0o700 });
     const executable = findCodexExecutable({ env: process.env });
@@ -856,8 +850,8 @@ class RuntimeHost {
     if (!config || typeof config.brokerSocketPath !== "string" || !config.brokerSocketPath.trim()) {
       return codexToolHealthFallback("LCA Codex runtime is not configured", new Date().toISOString());
     }
-    if (config.mode !== "full") {
-      return codexToolHealthFallback("Codex native tools require the Full runtime mode", new Date().toISOString());
+    if (config.mode !== "full" || !config.tunnel) {
+      return codexToolHealthFallback("The full Codex harness is not configured", new Date().toISOString());
     }
     const current = await requestCodexToolHealth(config.brokerSocketPath);
     return current.live ? current : this.probeCodexTools(config);
@@ -1093,7 +1087,7 @@ class RuntimeHost {
 
   mcpConnectorName() {
     const config = this.supervisor.readConfig();
-    if (!config || config.mode !== "full") {
+    if (!config) {
       throw new Error("The native MCP runtime is not configured");
     }
     if (typeof config.appName !== "string" || !config.appName.trim() || config.appName.length > 80) {
@@ -1106,6 +1100,15 @@ class RuntimeHost {
     return this.run("cancel-browser-turns", ["service", "cancel-turns"], {
       message: "Cancelling retained browser turns",
       successMessage: "Retained browser turns cancelled",
+      timeoutMs: 15_000,
+    });
+  }
+
+  restoreNativeCodex() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return this.run("restore-native-codex", ["route", "reset"], {
+      message: "Restoring native Codex configuration",
+      successMessage: "Native Codex configuration restored",
       timeoutMs: 15_000,
     });
   }
@@ -1157,25 +1160,13 @@ class RuntimeHost {
     }
   }
 
-  async setupCore({ replaceCodexRoute = false } = {}) {
+  setupCore() {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    const existing = this.runtimeConfigSnapshot();
-    const mode = existing.mode;
-    const args = [
-      "setup",
-      mode === "full" ? "--full" : "--browser-only",
-      "--browser-host-descriptor",
-      this.browserDescriptorPath,
-      "--acknowledge-unofficial",
-      "--restart-service",
-    ];
-    if (replaceCodexRoute === true) args.push("--replace-codex-route");
-    const result = await this.runSetup("core-setup", args, {
+    return this.run("core-setup", ["route", "install"], {
       message: "Installing LCA Codex models into Codex",
       successMessage: "Codex integration installed",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
     });
-    return { ...result, mode };
   }
 
   async upgradeManagedRuntime() {
@@ -1189,7 +1180,6 @@ class RuntimeHost {
     const route = await this.bridgeStatus("runtime-upgrade-route");
     const args = [
       "setup",
-      existing.mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       "--acknowledge-unofficial",
@@ -1198,7 +1188,7 @@ class RuntimeHost {
     const result = await this.runSetup("runtime-upgrade", args, {
       message: `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
       successMessage: `Launcher runtime upgraded to ${currentVersion}`,
-      timeoutMs: existing.mode === "full" ? MCP_SETUP_TIMEOUT_MS : CORE_SETUP_TIMEOUT_MS,
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
     });
     if (!route.active) await this.setBridgeEnabled(false);
     return {
@@ -1226,7 +1216,6 @@ class RuntimeHost {
     }
     const args = [
       "setup",
-      "--full",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       "--app-name",
@@ -1235,9 +1224,10 @@ class RuntimeHost {
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");
       return this.runSetup("mcp-setup", args, {
-        message: "Reconnecting the native Codex harness with saved tunnel credentials",
+        message: "Connecting the native Codex harness with saved tunnel credentials",
         successMessage: "Local MCP tools are ready",
-        timeoutMs: MCP_SETUP_TIMEOUT_MS,
+        timeoutMs: CORE_SETUP_TIMEOUT_MS,
+        startAfterSetup: true,
       });
     }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
@@ -1256,12 +1246,14 @@ class RuntimeHost {
     return this.runSetup("mcp-setup", args, {
       message: "Connecting the native Codex harness",
       successMessage: "Local MCP tools are ready",
-      timeoutMs: MCP_SETUP_TIMEOUT_MS,
+      timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      startAfterSetup: true,
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
-  async runSetup(name, args, options) {
+  async runSetup(name, args, options = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const { startAfterSetup = false, ...runOptions } = options;
     const previousRuntime = this.runtimeConfigSnapshot();
     const previousLive = previousRuntime.owner === "launcher"
       ? await this.supervisor.observeRuntime()
@@ -1274,11 +1266,11 @@ class RuntimeHost {
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
-      const result = await this.run(name, args, options);
-      if (wasRunning) {
+      const result = await this.run(name, args, runOptions);
+      if (wasRunning || startAfterSetup) {
         const runtime = await this.supervisor.startIfConfigured();
         if (runtime.status !== "ready") {
-          throw new Error(`Setup completed, but the previously running runtime could not be restored: ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+          throw new Error(`Setup completed, but the full harness could not be started: ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
         }
       } else {
         await this.supervisor.stopForSetup();

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import type { AppConfig, RuntimeMode } from "./config";
+import type { AppConfig } from "./config";
 import {
   currentRuntimeCommand,
   defaultBrokerEndpoint,
@@ -32,7 +32,6 @@ import { getTunnelServiceStatus, installTunnelService, restartTunnelService, sto
 import { VERSION } from "./version";
 
 export interface SetupOptions {
-  mode: RuntimeMode;
   port?: number;
   chromeExecutablePath?: string;
   browserHostDescriptorPath?: string;
@@ -48,7 +47,7 @@ export interface SetupOptions {
 }
 
 export interface SetupResult {
-  mode: RuntimeMode;
+  mode: "full";
   configPath: string;
   loginCreated: boolean;
   serviceLoaded: boolean;
@@ -67,7 +66,7 @@ export function launcherCapabilityProbeRequired(existing: AppConfig | undefined)
 }
 
 export function existingFullSetupCredentials(existing: AppConfig | undefined): ExistingFullSetupCredentials {
-  const tunnel = existing?.mode === "full" ? existing.tunnel : undefined;
+  const tunnel = existing?.tunnel;
   return {
     tunnelId: Boolean(tunnel?.tunnelId),
     runtimeKey: Boolean(tunnel?.runtimeKeyFile && existsSync(tunnel.runtimeKeyFile)),
@@ -174,8 +173,8 @@ async function waitForProxy(config: AppConfig, timeoutMs = 10_000): Promise<void
 }
 
 function baseConfig(existing: AppConfig | undefined, options: SetupOptions): AppConfig {
-  const config = existing ? structuredClone(existing) : defaultConfig(options.mode);
-  config.mode = options.mode;
+  const config = existing ? structuredClone(existing) : defaultConfig();
+  config.mode = "full";
   config.releaseVersion = VERSION;
   config.runtimeCommand = currentRuntimeCommand();
   if (options.port !== undefined) {
@@ -201,21 +200,17 @@ function baseConfig(existing: AppConfig | undefined, options: SetupOptions): App
 }
 
 async function configureTunnel(config: AppConfig, existing: AppConfig | undefined, options: SetupOptions): Promise<void> {
-  if (config.mode === "browser-only") {
-    delete config.tunnel;
-    return;
-  }
-  const existingTunnel = existing?.mode === "full" ? existing.tunnel : undefined;
+  const existingTunnel = existing?.tunnel;
   const tunnelId = options.tunnelId ?? existingTunnel?.tunnelId;
   if (!tunnelId) {
-    throw new Error("Full mode requires --tunnel-id. Create it at https://platform.openai.com/settings/organization/tunnels");
+    throw new Error("Full harness requires --tunnel-id. Create it at https://platform.openai.com/settings/organization/tunnels");
   }
   let runtimeKeyFile = existingTunnel?.runtimeKeyFile;
   if (!runtimeKeyFile && existsSync(managedRuntimeKeyPath())) runtimeKeyFile = managedRuntimeKeyPath();
   if (options.runtimeKeyFile) runtimeKeyFile = installRuntimeKey(options.runtimeKeyFile);
   if (options.runtimeKeyValue) runtimeKeyFile = installRuntimeKeyBytes(options.runtimeKeyValue);
   if (!runtimeKeyFile || !existsSync(runtimeKeyFile)) {
-    throw new Error("Full mode requires a runtime key. Import it interactively or pass --runtime-key-file; create it at https://platform.openai.com/settings/organization/api-keys");
+    throw new Error("Full harness requires a runtime key. Import it interactively or pass --runtime-key-file; create it at https://platform.openai.com/settings/organization/api-keys");
   }
   const installedBinary = await installTunnelClient();
   config.tunnel = createTunnelConfig({
@@ -339,12 +334,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   }
 
   let tunnelReady: boolean | null = null;
-  if (config.mode === "browser-only" && existing?.mode === "full") {
-    const previousTunnelService = getTunnelServiceStatus();
-    if (previousTunnelService.installed || previousTunnelService.loaded) await uninstallTunnelService();
-    stopTunnel(existing);
-  }
-  if (config.mode === "full") {
+  {
     const profilePath = join(config.tunnel!.profileDir, `${config.tunnel!.profileName}.yaml`);
     const tunnelService = getTunnelServiceStatus();
     const needsProfile = !existsSync(profilePath);
@@ -390,6 +380,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     serviceLoaded: launcherOwned ? false : getServiceStatus().loaded,
     tunnelReady,
     codexRestartRequired: true,
-    connectorSetupRequired: config.mode === "full",
+    connectorSetupRequired: true,
   };
 }

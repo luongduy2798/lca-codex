@@ -86,8 +86,7 @@ describe("tunnel launchd ownership", () => {
     const runtime = join(root, "bin", "lca-codex");
     mkdirSync(join(root, "bin"), { recursive: true });
     writeFileSync(runtime, "runtime");
-    const before = defaultConfig("browser-only");
-    before.mode = "full";
+    const before = defaultConfig();
     before.releaseVersion = "0.1.3";
     before.runtimeCommand = [runtime];
     const after = structuredClone(before);
@@ -115,7 +114,7 @@ describe("tunnel launchd ownership", () => {
     expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: true });
     rmSync(key);
     expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: false });
-    expect(existingFullSetupCredentials(defaultConfig("browser-only"))).toEqual({ tunnelId: false, runtimeKey: false });
+    expect(existingFullSetupCredentials(defaultConfig())).toEqual({ tunnelId: false, runtimeKey: false });
   });
 
   test("passes the Windows MCP runtime directly to tunnel-client without cmd.exe", () => {
@@ -125,7 +124,7 @@ describe("tunnel launchd ownership", () => {
     const runtime = join(root, "Program Files", "runtime", "bun.exe");
     mkdirSync(join(root, "Program Files", "runtime"), { recursive: true });
     writeFileSync(runtime, "runtime");
-    const config = defaultConfig("browser-only");
+    const config = defaultConfig();
     config.runtimeCommand = [runtime, join(root, "Program Files", "app", "cli.js")];
     config.brokerSocketPath = "\\\\.\\pipe\\lca-codex-test";
 

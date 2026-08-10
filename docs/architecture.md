@@ -8,7 +8,7 @@ launcher-owned lca-codex daemon
   ├─ official /models passthrough + fixed LCA Codex models
   ├─ native Responses passthrough or ChatGPT Responses/SSE bridge
   ├─ ChatGPT browser worker (up to five task-bound Electron tabs)
-  ├─ capability broker (full mode only)
+  ├─ capability broker
   └─ stdio MCP server
             ▲
             │ outbound OpenAI Tunnel
@@ -16,24 +16,20 @@ launcher-owned lca-codex daemon
       ChatGPT custom connector
 ```
 
-## Modes
+## Runtime contract
 
-### `browser-only`
+LCA Codex has one supported runtime shape: the full Codex harness.
 
 - Exposes one `lca-codex` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
-  matching ChatGPT browser mode; Extra High and Pro are advertised only when the authenticated
-  account exposes Pro.
-- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat. Because this mode has no connector, the context remains an inline composer payload.
-- Never starts the broker, tunnel, or MCP server.
-- Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
-
-### `full`
-
-- Exposes the same single model; Instant through Extra High are tool-capable, while Pro remains
-  read-only after reasoning is resolved at runtime.
-- ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
+  matching ChatGPT browser reasoning mode; Extra High and Pro are advertised only when the
+  authenticated account exposes Pro.
+- Instant through Extra High are tool-capable. Pro remains intentionally read-only for local
+  workspace tools after reasoning is resolved at runtime.
+- ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
+- Runtime readiness is conjunctive: both the tunnel and the Responses daemon must be healthy. The
+  launcher starts the tunnel first and never reports the runtime Ready when tunnel readiness is lost.
 
 ## Browser lifecycle
 
@@ -46,7 +42,7 @@ closed. Closing a running tab destroys its page and terminates that browser turn
 turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
 controls.
 
-In full mode, tool-capable turns do not replay the entire accumulated Codex history through the
+Tool-capable turns do not replay the entire accumulated Codex history through the
 visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
 Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory
 bootstrap: active system instructions, unknown/custom developer overrides, the Codex-resolved
@@ -78,8 +74,8 @@ its outer Codex turn.
 
 Historical image bytes remain in the broker and are returned only when `codex_context` is called with
 `action=image` for an attachment reference discovered by a history result. They are no longer
-re-uploaded into every fresh Temporary Chat. Read-only routes that cannot use the custom connector —
-including Pro, browser-only mode, and routed compaction — retain the complete inline JSON fallback.
+re-uploaded into every fresh Temporary Chat. Read-only routes that do not attach the connector — Pro
+and routed compaction — retain the complete inline JSON fallback.
 
 The appended model advertises the conservative Instant/Medium window because Codex catalog context
 size is model-wide rather than reasoning-specific. The runtime still enforces the exact per-mode
@@ -110,8 +106,7 @@ usage-limit invariant without misclassifying a temporary 429 as a permanent API 
 ## Installation and service lifecycle
 
 Each native desktop package contains Electron, a platform-matched pinned Bun executable, the
-Responses bridge, Playwright client code, MCP server, setup, doctor, and the browser helper.
-Browser-only mode downloads no browser and requires no system Node/Bun. Full mode separately
+Responses bridge, Playwright client code, MCP server, setup, doctor, and the browser helper. Core setup
 downloads the official pinned `openai/tunnel-client` build for the current OS/architecture and
 verifies it against the release SHA-256 manifest.
 
@@ -120,7 +115,7 @@ versioned directory under the application home. Daemon and MCP commands use that
 which is required because Linux AppImage mount paths are temporary and must never be persisted in
 Codex or tunnel configuration.
 
-The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
+The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the required
 tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its
 versioned health payload. Runtime lifecycle orchestration is a separate transaction boundary from
 the Electron entry point: Start, Stop, Restart, and Quit share the same compensation rules for the

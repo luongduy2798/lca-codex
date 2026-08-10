@@ -50,7 +50,7 @@ function launcherConfig(descriptorPath, overrides = {}) {
   return {
     version: 3,
     releaseVersion: "0.2.0",
-    mode: "browser-only",
+    mode: "full",
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
@@ -67,6 +67,14 @@ function launcherConfig(descriptorPath, overrides = {}) {
     autoApproveToolCalls: false,
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
+    tunnel: {
+      binaryPath: process.execPath,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: path.join(root, "runtime.key"),
+      profileDir: path.join(root, "profiles"),
+      profileName: "lca-codex",
+      alias: "lca-codex",
+    },
     ...overrides,
   };
 }
@@ -154,7 +162,7 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
   const config = {
     version: 3,
     releaseVersion: "0.2.0",
-    mode: "browser-only",
+    mode: "full",
     host: "127.0.0.1",
     port: 17841,
     contextWindow: 256_000,
@@ -169,6 +177,14 @@ test("launcher runtime validation accepts native Windows paths and a named pipe"
     autoApproveToolCalls: false,
     controlToken: "runtime-supervisor-control-token-0123456789abcdef",
     runtimeCommand: ["C:\\Users\\Example\\.lca-codex\\runtime\\bun.exe"],
+    tunnel: {
+      binaryPath: "C:\\Users\\Example\\.lca-codex\\runtime\\tunnel-client.exe",
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: "C:\\Users\\Example\\.lca-codex\\runtime\\runtime.key",
+      profileDir: "C:\\Users\\Example\\.lca-codex\\runtime\\profiles",
+      profileName: "lca-codex",
+      alias: "lca-codex",
+    },
   };
   assert.equal(validateConfig(config, descriptorPath, "win32"), config);
 });
@@ -1099,7 +1115,7 @@ test("launcher marks compensation ready only after both owned runtime processes 
   });
   supervisor.daemon = { pid: 123_456_783, exitCode: null, signalCode: null };
   supervisor.proxyHealth = async () => true;
-  assert.equal(await supervisor.ownedRuntimeReady({ mode: "browser-only" }), true);
+  assert.equal(await supervisor.ownedRuntimeReady({ mode: "full" }), false);
 
   supervisor.tunnel = { pid: 123_456_784, exitCode: null, signalCode: null };
   supervisor.tunnelHealth = async () => false;

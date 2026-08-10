@@ -192,7 +192,7 @@ export function mcpCommand(config: AppConfig, platform = process.platform): stri
 }
 
 function tunnel(config: AppConfig): TunnelConfig {
-  if (config.mode !== "full" || !config.tunnel) throw new Error("Tunnel commands require full mode");
+  if (!config.tunnel) throw new Error("The full harness requires tunnel configuration");
   return config.tunnel;
 }
 

@@ -5,12 +5,14 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
+import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import {
   activateCodexIntegration,
   deactivateCodexIntegration,
   inspectCodexIntegration,
+  installCodexIntegration,
+  preflightCodexIntegration,
   uninstallCodexIntegration,
 } from "./codex-integration";
 import { formatDoctorReport, runDoctor } from "./doctor";
@@ -28,11 +30,10 @@ const HELP = `lca-codex ${VERSION}
 Focused LCA Codex models for the native Codex harness.
 
 Usage:
-  lca-codex setup --browser-only [options]
-  lca-codex setup --full --tunnel-id ID --runtime-key-file PATH [options]
+  lca-codex setup --tunnel-id ID --runtime-key-file PATH [options]
   lca-codex login
   lca-codex doctor [--json]
-  lca-codex route <status|connect|disconnect>
+  lca-codex route <status|install|connect|disconnect>
   lca-codex browser check
   lca-codex serve
   lca-codex mcp [--broker-socket PATH]
@@ -42,8 +43,6 @@ Usage:
   lca-codex uninstall --yes
 
 Setup options:
-  --browser-only               Account-eligible Web models, full context/images, no local tools or tunnel
-  --full                       Account-eligible Web models with tools; Pro remains read-only
   --port NUMBER                Loopback Responses port (default: 17841)
   --chrome PATH                Google Chrome executable
   --browser-host-descriptor PATH
@@ -114,13 +113,9 @@ function assertNoArgs(args: string[]): void {
 }
 
 async function setupCommand(args: string[]): Promise<void> {
-  const browserOnly = takeFlag(args, "--browser-only");
-  const full = takeFlag(args, "--full");
-  if (browserOnly === full) throw new Error("Choose exactly one setup mode: --browser-only or --full");
   const portRaw = takeOption(args, "--port");
   let acknowledged = takeFlag(args, "--acknowledge-unofficial");
   const options: SetupOptions = {
-    mode: full ? "full" : "browser-only",
     ...(portRaw ? { port: Number(portRaw) } : {}),
   };
   const appName = takeOption(args, "--app-name");
@@ -157,8 +152,8 @@ async function setupCommand(args: string[]): Promise<void> {
     && !reusableCredentials.runtimeKey
     && !existsSync(managedRuntimeKeyPath());
 
-  if (full && (needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
-    stdout.write("Full mode needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
+  if ((needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
+    stdout.write("The full harness needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
     stdout.write("Tunnels: https://platform.openai.com/settings/organization/tunnels\n");
     stdout.write("Runtime keys: https://platform.openai.com/settings/organization/api-keys\n");
     if (needsTunnelId) options.tunnelId = await prompt("Tunnel id: ");
@@ -198,9 +193,22 @@ async function routeCommand(args: string[]): Promise<void> {
           errors: status.errors,
         };
       })()
-    : action === "connect"
-      ? activateCodexIntegration()
-      : action === "disconnect"
+    : action === "install"
+      ? (() => {
+          const config = existsSync(getConfigPath()) ? loadConfigForSetup() : defaultConfig();
+          preflightCodexIntegration(config, { replaceExistingRoute: true });
+          installCodexIntegration(config, { replaceExistingRoute: true });
+          const status = inspectCodexIntegration();
+          return {
+            installed: status.installed,
+            active: status.active,
+            ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
+            errors: status.errors,
+          };
+        })()
+      : action === "connect"
+        ? activateCodexIntegration()
+        : action === "disconnect"
         ? deactivateCodexIntegration()
         : action === "reset"
           ? uninstallCodexIntegration()
@@ -309,7 +317,7 @@ async function uninstallCommand(args: string[]): Promise<void> {
   }
   const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
-  if (config?.mode === "full" && !launcherRuntimeStopped) {
+  if (config?.tunnel && !launcherRuntimeStopped) {
     if (process.platform === "darwin") await uninstallTunnelService();
     stopTunnel(config);
   }

@@ -170,7 +170,7 @@ test("rejects an unknown routed compact model instead of treating it as LCA Code
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "lca-codex/not-enabled", input: [] }),
-  }), defaultConfig("browser-only"));
+  }), defaultConfig());
 
   expect(response.status).toBe(400);
   const body = await response.json() as { error: { message: string } };
@@ -186,7 +186,7 @@ test("rejects Pro-only reasoning levels before opening a browser when the accoun
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, reasoning: { effort }, input: "test", stream: false }),
-    }), defaultConfig("browser-only"));
+    }), defaultConfig());
 
     expect(response.status).toBe(400);
     const body = await response.json() as { error: { message: string } };
@@ -199,7 +199,7 @@ test("preserves a structured browser preflight failure through the v1 compaction
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model, input: [] }),
-  }), defaultConfig("browser-only"), () => ({
+  }), defaultConfig(), () => ({
     name: "preflight-error",
     async runTurn(_parsed, _incoming, emit) {
       emit({
@@ -233,7 +233,7 @@ test("refuses a LCA Codex continuation when local previous-response state is una
       input: "continue",
       stream: false,
     }),
-  }), defaultConfig("browser-only"));
+  }), defaultConfig());
 
   expect(response.status).toBe(409);
   const body = await response.json() as { error: { message: string } };

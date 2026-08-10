@@ -816,7 +816,7 @@ test("smoke effort selection fails closed with rendering diagnostics", async () 
   );
 });
 
-test("connector verification temporarily reveals a visible ChatGPT composer before helper attach", async () => {
+test("connector verification temporarily exposes a browser-visible background surface before helper attach", async () => {
   const calls = [];
   const fixture = {
     visible: false,
@@ -825,17 +825,9 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
     descriptorPath: "/runtime/launcher-browser.json",
     logger: { info: (event, detail) => calls.push(["log", event, detail]) },
     setState: (patch) => calls.push(["state", patch]),
-    setSurfaceActive(active) {
-      this.surfaceActive = active;
-      calls.push(["surface", active]);
-    },
-    show() {
-      this.visible = true;
-      calls.push(["show"]);
-    },
-    hide() {
-      this.visible = false;
-      calls.push(["hide"]);
+    beginConnectorVerificationSurface() {
+      calls.push(["verification-surface", "begin"]);
+      return () => calls.push(["verification-surface", "restore"]);
     },
     waitForAuthenticated: async () => calls.push(["authenticated"]),
     waitForVisibleComposer: async () => calls.push(["visible-composer"]),
@@ -850,6 +842,7 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
       webContents: {
         getURL: () => "about:blank",
         loadURL: async (url) => calls.push(["load", url]),
+        setBackgroundThrottling: (enabled) => calls.push(["throttling", enabled]),
       },
     },
   };
@@ -857,9 +850,9 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
   const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
 
   assert.deepEqual(result, { ok: true, appName: "lca-codex" });
-  assert.deepEqual(calls.filter(([type]) => ["surface", "show", "visible-composer", "helper", "hide"].includes(type)).map(([type, value]) => [type, value]), [
-    ["surface", true],
-    ["show", undefined],
+  assert.deepEqual(calls.filter(([type]) => ["throttling", "verification-surface", "visible-composer", "helper"].includes(type)).map(([type, value]) => [type, value]), [
+    ["throttling", false],
+    ["verification-surface", "begin"],
     ["visible-composer", undefined],
     ["helper", {
       helper: fixture.helper,
@@ -867,11 +860,37 @@ test("connector verification temporarily reveals a visible ChatGPT composer befo
       appName: "lca-codex",
       logger: fixture.logger,
     }],
-    ["hide", undefined],
-    ["surface", false],
+    ["verification-surface", "restore"],
+    ["throttling", true],
   ]);
   assert.equal(fixture.visible, false);
   assert.equal(fixture.surfaceActive, false);
+});
+
+test("connector verification background surface keeps a full viewport while clipping it to one launcher edge pixel", () => {
+  const calls = [];
+  const fixture = {
+    visible: false,
+    surfaceActive: false,
+    boundsReady: false,
+    bounds: { x: 32, y: 48, width: 900, height: 650 },
+    window: { getContentSize: () => [1400, 900] },
+    view: {
+      setBounds: (bounds) => calls.push(["bounds", bounds]),
+      setVisible: (visible) => calls.push(["visible", visible]),
+    },
+    syncViewVisibility: () => calls.push(["sync"]),
+  };
+
+  const restore = BrowserHost.prototype.beginConnectorVerificationSurface.call(fixture);
+  restore();
+
+  assert.deepEqual(calls, [
+    ["bounds", { x: 1399, y: 899, width: 1400, height: 900 }],
+    ["visible", true],
+    ["bounds", fixture.bounds],
+    ["sync"],
+  ]);
 });
 
 test("connector verification has no independent CDP typing or coordinate-click path", () => {
@@ -956,6 +975,7 @@ test("connector verification preserves an already hydrated Temporary Chat page",
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
         loadURL: async () => { loaded = true; },
+        setBackgroundThrottling() {},
       },
     },
   };

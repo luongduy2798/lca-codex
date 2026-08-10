@@ -16,7 +16,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
   const previousLog = process.env.CODEX_LOGIN_ARG_LOG;
   process.env.CODEX_LOGIN_ARG_LOG = argsLog;
   try {
-    const config = defaultConfig("browser-only");
+    const config = defaultConfig();
     config.chromeExecutablePath = executable;
     config.storageStatePath = join(root, "browser", "storage-state.json");
     await loginToChatGpt(config, { timeoutMs: 100 }).catch(() => {});
@@ -38,7 +38,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
 test("a storage-state file is not trusted without a verification marker", () => {
   const root = mkdtempSync(join(tmpdir(), "lca-codex-login-state-"));
   try {
-    const config = defaultConfig("browser-only");
+    const config = defaultConfig();
     config.storageStatePath = join(root, "storage-state.json");
     writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
     expect(browserLoginStateExists(config)).toBe(false);

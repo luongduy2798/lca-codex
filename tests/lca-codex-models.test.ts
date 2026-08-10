@@ -76,7 +76,7 @@ describe("single LCA Codex model", () => {
   test("routes the single model while preserving the selected reasoning mode", () => {
     const request = parsed("lca-codex", "low");
     const rawSnapshot = structuredClone(request._rawBody);
-    const model = routeLcaCodexRequest(request, defaultConfig("browser-only"));
+    const model = routeLcaCodexRequest(request, defaultConfig());
 
     expect(model.slug).toBe("lca-codex");
     expect(request.modelId).toBe(LCA_CODEX_BACKEND_MODEL);

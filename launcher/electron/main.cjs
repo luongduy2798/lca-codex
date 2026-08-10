@@ -67,6 +67,7 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+const MAC_TRAY_ICON_PNG = "iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAYAAABWzo5XAAABQ0lEQVR42qXUzSqFURQG4Of4SUkKKXeAGEjKgFImboKUhBFXYmIoA2XqAhiZGIhDFGXABZgYKFLHOUzW0W77PsSq3f5b+91rr/ddu+KrtSq3ul9a5a/7RRvTWVSVaDUcJ2vvRYAt0W+FQ1nbCb/2PIi2DHAGt1iNvVf0oQcPOMAL1gOsVhbRKU6S9Q4c4Q6DGIrI1rJzX4DOcB45GsA9NjCJJwxjIcCWisBSoGqMezGX+ExgNMYXuEnPthUkvsnGIw6TS6qJzt7y/ORvbARQa8bKeybKStmTmtYVIHV0oj8B7wwGC/WXA21iHIsRehVTccF1ItbvyugTdCUimMcILiO5q4nvSRBTmOxGzLdjvBcU74Z+TjEbie7G80+F2x798g/lsp/+FmXV3Ez4WOgp/0JacBUSKS3gMiL+9f98x04jjeQD0LlO5qlqQEMAAAAASUVORK5CYII=";
 
 app.setName("LCA Codex");
 if (process.platform === "win32") app.setAppUserModelId("dev.lcacodex.launcher");
@@ -246,6 +247,7 @@ async function publishRuntimeStatus() {
   }
   const status = await runtimeSupervisor.observeRuntime();
   send("launcher:runtime-state", status);
+  updateTrayMenu(status);
   return status;
 }
 
@@ -305,12 +307,7 @@ function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
   if (!upgrade?.updated) return;
   const state = stateStore.update(codexRestartPending({
     bridgeEnabled: upgrade.bridgeEnabled,
-    coreSetupComplete: true,
-    ...(upgrade.mode === "browser-only" ? {
-      mcpRuntimeInstalled: false,
-      mcpSetupComplete: false,
-      mcpGuideStep: 0,
-    } : {}),
+    mcpRuntimeInstalled: true,
   }));
   send("launcher:state-changed", state);
   logger.info("runtime.release_upgraded", {
@@ -388,24 +385,42 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
 }
 
 function trayImage() {
-  if (process.platform !== "darwin") {
-    return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
-  }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
-  image.setTemplateImage(true);
+  const image = process.platform === "darwin"
+    ? nativeImage.createFromBuffer(Buffer.from(MAC_TRAY_ICON_PNG, "base64"))
+    : nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
+  if (image.isEmpty()) throw new Error("Tray icon could not be loaded");
+  if (process.platform === "darwin") image.setTemplateImage(true);
   return image;
+}
+
+function trayRuntimeLabel(status) {
+  const labels = {
+    stopped: "Stopped",
+    starting: "Starting…",
+    ready: "Ready",
+    stopping: "Stopping…",
+    degraded: "Degraded",
+    error: "Error",
+    stale: "Stale",
+    foreign: "Unavailable",
+  };
+  return `Runtime: ${labels[status?.lifecycle] || "Checking…"}`;
+}
+
+function updateTrayMenu(status) {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: trayRuntimeLabel(status), enabled: false },
+    { type: "separator" },
+    { label: "Quit LCA Codex", click: () => { void requestQuit(); } },
+  ]));
 }
 
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
     tray.setToolTip("LCA Codex");
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open LCA Codex", click: () => showMainWindow() },
-      { type: "separator" },
-      { label: "Quit", click: () => { void requestQuit(); } },
-    ]));
+    updateTrayMenu(null);
     tray.on("click", () => showMainWindow());
     return true;
   } catch (error) {
@@ -641,6 +656,9 @@ function registerIpc({ logger, stateStore }) {
       await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
       const state = stateStore.update({ mcpSetupComplete: true });
       send("launcher:state-changed", state);
+      const runtime = await publishRuntimeStatus();
+      if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
+      else stopCatalogVerificationMonitor();
       publishOperation({ name: operationName, status: "completed", message: "Runtime and connector verified" });
       return report;
     } catch (error) {
@@ -683,7 +701,7 @@ function registerIpc({ logger, stateStore }) {
     return { config, state };
   });
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
-  handle("launcher:uninstall-integration", async () => {
+  handle("launcher:restore-native-codex", async () => {
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Cancel", "Restore native Codex"],
@@ -691,7 +709,28 @@ function registerIpc({ logger, stateStore }) {
       cancelId: 0,
       title: "Restore native Codex",
       message: "Remove the LCA Codex-managed models and restore Codex's previous native route?",
-      detail: "Unrelated Codex settings and the launcher's ChatGPT login profile are preserved. Restart Codex once after restoring.",
+      detail: "MCP, tunnel credentials, runtime setup, unrelated Codex settings, and the ChatGPT login profile are preserved. Restart Codex once after restoring.",
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { cancelled: true };
+    await runtimeHost.restoreNativeCodex();
+    const state = stateStore.update(codexRestartPending({
+      coreSetupComplete: false,
+      bridgeEnabled: false,
+    }));
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    return { cancelled: false, state };
+  });
+  handle("launcher:uninstall-integration", async () => {
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Cancel", "Uninstall LCA Codex"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Uninstall LCA Codex",
+      message: "Remove the LCA Codex runtime, MCP configuration, and managed Codex route?",
+      detail: "This is the full uninstall action. Tunnel/runtime configuration owned by LCA Codex will be removed.",
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
@@ -719,15 +758,10 @@ function registerIpc({ logger, stateStore }) {
       if (!(smokePassedThisSession || smokePassedForCurrentVersion(beforeState))) {
         throw new Error("Run the browser smoke test before installing the Codex integration");
       }
-      const result = await runtimeHost.setupCore({ replaceCodexRoute: true });
+      const result = await runtimeHost.setupCore();
       const state = stateStore.update(codexRestartPending({
         bridgeEnabled: true,
         coreSetupComplete: true,
-        ...(result.mode === "browser-only" ? {
-          mcpSetupComplete: false,
-          mcpRuntimeInstalled: false,
-          mcpGuideStep: 0,
-        } : {}),
       }));
       send("launcher:state-changed", state);
       await browserHost.returnToIdle().catch((error) => {
@@ -735,9 +769,8 @@ function registerIpc({ logger, stateStore }) {
           message: error instanceof Error ? error.message : String(error),
         });
       });
-      const runtime = await publishRuntimeStatus();
-      if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
-      else stopCatalogVerificationMonitor();
+      await publishRuntimeStatus();
+      stopCatalogVerificationMonitor();
       return { ok: true, stdout: result.stdout, restartRequired: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -758,6 +791,10 @@ function registerIpc({ logger, stateStore }) {
     }
   });
   handle("launcher:setup-mcp", async (_event, input) => {
+    const beforeState = stateStore.read();
+    if (beforeState.coreSetupComplete !== true) {
+      throw new Error("Configure Codex before setting up MCP");
+    }
     await browserHost.reveal();
     const result = await runtimeHost.setupMcp({
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
@@ -765,11 +802,12 @@ function registerIpc({ logger, stateStore }) {
       replace: input?.replace === true,
       appName: typeof input?.connectorName === "string" ? input.connectorName : "",
     });
-    const state = stateStore.update(codexRestartPending({
+    const state = stateStore.update({
       connectorName: runtimeHost.mcpConnectorName(),
       mcpRuntimeInstalled: true,
+      mcpSetupComplete: false,
       mcpGuideStep: 2,
-    }));
+    });
     send("launcher:state-changed", state);
     const runtime = await publishRuntimeStatus();
     if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });

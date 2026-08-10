@@ -38,7 +38,7 @@ function serviceTarget(): string {
 }
 
 function settings(config: AppConfig) {
-  if (config.mode !== "full" || !config.tunnel) throw new Error("Tunnel service requires full mode");
+  if (!config.tunnel) throw new Error("The full harness requires tunnel configuration");
   return config.tunnel;
 }
 

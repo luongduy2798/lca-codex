@@ -48,16 +48,11 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
   return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
 }
 
-function selectNativeTemplate(models: unknown[], config: AppConfig): JsonObject {
-  const requireTools = config.mode === "full";
-  const candidates = models.filter(model => nativeTemplateCandidate(model, requireTools)) as JsonObject[];
+function selectNativeTemplate(models: unknown[], _config: AppConfig): JsonObject {
+  const candidates = models.filter(model => nativeTemplateCandidate(model, true)) as JsonObject[];
   const template = candidates[0];
   if (template) return template;
-  throw new Error(
-    requireTools
-      ? "Native Codex models response has no list-visible, API-supported, tool-capable model with reasoning metadata"
-      : "Native Codex models response has no list-visible, API-supported model with reasoning metadata",
-  );
+  throw new Error("Native Codex models response has no list-visible, API-supported, tool-capable model with reasoning metadata");
 }
 
 export function buildLcaCodexModel(
@@ -86,7 +81,7 @@ export function buildLcaCodexModel(
     multi_agent_version: "v1",
     // Pro's lack of local computer tools is enforced by the adapter runtime after reasoning is
     // resolved; the shared model must remain tool-capable so other reasoning levels keep Codex tools.
-    tool_mode: config.mode === "full" ? template.tool_mode : null,
+    tool_mode: template.tool_mode,
     upgrade: null,
     default_reasoning_level: "high",
     supported_reasoning_levels: reasoningModes.map(mode =>

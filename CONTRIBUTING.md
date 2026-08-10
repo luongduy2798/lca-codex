@@ -6,10 +6,10 @@ OpenCodex product surfaces are out of scope.
 Core invariants:
 
 - Model selection is explicit; never silently fall back to another model or reasoning level.
-- Full mode exposes local tools only through the active outer Codex registry and official MCP
-  tunnel.
-- Browser-only mode never creates a broker capability or attaches an MCP connector; Pro remains
-  read-only in every mode.
+- The full Codex harness is the only supported runtime; its OpenAI tunnel and ChatGPT MCP connector
+  are required core setup.
+- Local tools are exposed only through the active outer Codex registry and official MCP tunnel;
+  Pro remains intentionally read-only for local workspace tools.
 - Browser state, API keys, tunnel IDs, cookies, Codex history, and absolute user paths never enter
   the repository.
 

@@ -70,17 +70,18 @@ policies.
 Install or update the desktop launcher using the distributed build for your platform. Updating or
 repairing the application preserves the ChatGPT profile and launcher configuration.
 
-Then complete the three checks in the app:
+Then complete the three required checks in the app:
 
 1. Sign in to ChatGPT in the embedded browser.
 2. Run the browser smoke test.
-3. Press **Install models**, restart Codex once, and select a **LCA Codex — …** model.
+3. Configure the **full Codex harness**: provide the tunnel credentials, start the harness, attach the
+   ChatGPT MCP connector, verify it, then restart Codex once so the LCA Codex model appears.
 
-Pro appears only when the signed-in account exposes it. The separate **MCP** page is optional and
-guides the full-harness setup without terminal commands.
+Pro appears only when the signed-in account exposes it. MCP/tunnel setup is part of core setup and is
+required; the launcher supports only the full-harness runtime.
 
-A packaged browser-only install needs no Google Chrome, model API key, system Node/Bun, or separate
-browser download.
+The packaged launcher includes its own browser/runtime dependencies and does not require a system
+Node/Bun installation.
 
 **Run from source**
 
@@ -92,20 +93,19 @@ bun run app
 
 This source path requires Bun 1.3.14. The command installs locked dependencies and opens the app.
 
-## Modes
+## Runtime contract
 
-| Mode | Models | Local Codex tools | Extra setup |
-| --- | --- | --- | --- |
-| **Browser-only** | Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
-| **Full harness** | Plus: Instant–High; Pro: adds Extra High and Pro | Instant–Extra High: yes; Pro: read-only | OpenAI tunnel + ChatGPT connector |
+LCA Codex has one runtime shape: the **full harness**. The OpenAI tunnel and ChatGPT MCP connector are
+required before setup is complete. Instant through Extra High can use the active Codex tool registry;
+Pro remains intentionally read-only for local workspace tools.
 
-Every picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and Speed
-rows, but changing them cannot silently change the selected browser model. Pro receives the full
+Every picker entry has one fixed ChatGPT reasoning mode. Codex still displays its built-in Effort and
+Speed rows, but changing them cannot silently change the selected browser model. Pro receives the full
 context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
 
 ## Full harness
 
-Full mode connects ChatGPT back to the current Codex task through the official
+The full harness connects ChatGPT back to the current Codex task through the official
 [OpenAI tunnel-client](https://github.com/openai/tunnel-client). Each fresh Temporary Chat receives
 only a projected active bootstrap: active system/custom developer overrides, the AGENTS/project
 instructions already resolved by Codex, the latest user request, and current-turn images. Standard
@@ -116,12 +116,13 @@ round trip, while native file/command/MCP work
 still executes through the exact active Codex harness tool registry. The tunnel is outbound: it does
 not expose a public IP, open an inbound port, or require router forwarding.
 
-1. Finish the required launcher setup.
-2. Open **MCP** in the launcher. Create the Tunnel and a regular API key on the same OpenAI account
-   that will use the ChatGPT connector; creating the key is free and does not consume model API
-   credits.
-3. Enter the ChatGPT connector name you want, paste the Tunnel ID and API key, then press **Connect harness**.
-4. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
+1. In the required **Configure full Codex harness** setup step, create the Tunnel and a regular API
+   key on the same OpenAI account that will use the ChatGPT connector; creating the key is free and
+   does not consume model API credits.
+2. Enter the ChatGPT connector name, paste the Tunnel ID and API key, then press
+   **Configure & start harness**. The launcher waits for the tunnel to become ready before starting
+   the Responses runtime.
+3. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
    exact Tunnel, set **Authentication** to **None**, and give it exactly the connector name shown by the launcher.
 5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
    selects the configured connector name exactly and confirms the connector pill.

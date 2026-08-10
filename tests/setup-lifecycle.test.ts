@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { launcherCapabilityProbeRequired, setupProxyIsReady } from "../src/setup";
 
 const config = {
-  mode: "browser-only" as const,
+  mode: "full" as const,
   releaseVersion: "0.2.0",
 };
 
@@ -10,7 +10,7 @@ test("setup accepts only a matching daemon that is ready for new Codex turns", (
   const ready = {
     service: "lca-codex",
     status: "ok",
-    mode: "browser-only",
+    mode: "full",
     version: "0.2.0",
     accepting_turns: true,
   };

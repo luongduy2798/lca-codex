@@ -92,15 +92,12 @@ test("embedded ChatGPT is measured after its animated surface mounts", () => {
   assert.match(appSource, /ref=\{browserSlotRef\}/);
 });
 
-test("launcher keeps browser chrome flush and MCP instructions below the video", () => {
+test("launcher keeps browser chrome flush and MCP instructions structured", () => {
   assert.match(styles, /\.workspace\s*\{[^}]*padding-top:\s*0/s);
   assert.match(styles, /\.content-surface\s*\{[^}]*padding-top:\s*var\(--height-titlebar\)/s);
   assert.match(styles, /\.mcp-stage\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s);
-  assert.match(
-    styles,
-    /\.guide-media\s*\{[^}]*width:\s*min\(90%,\s*clamp\(511px,\s*44vw,\s*620px\)\)[^}]*aspect-ratio:\s*16\s*\/\s*9[^}]*overflow:\s*hidden/s,
-  );
-  assert.match(styles, /\.guide-media img\s*\{[^}]*object-fit:\s*contain/s);
+  assert.doesNotMatch(styles, /\.guide-media/);
+  assert.doesNotMatch(appSource, /MCP_GUIDE_MEDIA|mcp-create-tunnel\.gif|mcp-connect-connector\.gif/);
   assert.doesNotMatch(styles, /\.wizard-stepper\s*\{[^}]*border-(?:top|bottom)/s);
   assert.match(styles, /@media \(max-width: 900px\)[\s\S]*?\.wizard-stepper button\s*\{[^}]*gap:\s*6px[^}]*padding-inline:\s*7px/s);
   assert.doesNotMatch(styles, /@media \(max-width: 900px\)[\s\S]*?\.wizard-stepper em\s*\{[^}]*display:\s*none/s);
@@ -120,6 +117,15 @@ test("closing the launcher follows the persisted background-launcher preference"
     electronMain,
     /if \(stateStore\.read\(\)\.keepRunningOnClose && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
   );
+  assert.match(electronMain, /MAC_TRAY_ICON_PNG = "iVBORw0KGgo/);
+  assert.match(electronMain, /nativeImage\.createFromBuffer\(Buffer\.from\(MAC_TRAY_ICON_PNG, "base64"\)\)/);
+  assert.match(electronMain, /if \(image\.isEmpty\(\)\) throw new Error\("Tray icon could not be loaded"\);/);
+  assert.match(electronMain, /if \(process\.platform === "darwin"\) image\.setTemplateImage\(true\);/);
+  assert.doesNotMatch(electronMain, /data:image\/svg\+xml/);
+  assert.doesNotMatch(electronMain, /label: "Open LCA Codex"/);
+  assert.match(electronMain, /label: trayRuntimeLabel\(status\), enabled: false/);
+  assert.match(electronMain, /label: "Quit LCA Codex"/);
+  assert.match(electronMain, /tray\.on\("click", \(\) => showMainWindow\(\)\)/);
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
   assert.match(i18nSource, /keepRunningOnClose: "Keep launcher running when window closes"/);
 });
@@ -131,9 +137,8 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(styles, /\.sidebar-brand-copy small\s*\{/);
   assert.match(appSource, /className=\{`sidebar-runtime-card is-\$\{snapshot\.runtime\.lifecycle\}/);
   assert.match(appSource, /className="sidebar-runtime-overview"[\s\S]*?navigateSurface\("runtime"\)/);
-  assert.match(appSource, /sidebar-runtime-mode-line[\s\S]*?runtimeModeLabel[\s\S]*?sidebar-runtime-lifecycle[\s\S]*?runtimeLifecycleLabel\(copy, snapshot\.runtime\)/);
-  assert.match(appSource, /snapshot\.runtime\.mode === "full"[\s\S]*?copy\.codexMode/);
-  assert.match(appSource, /snapshot\.runtime\.mode === "browser-only"[\s\S]*?copy\.chatgptMode/);
+  assert.match(appSource, /sidebar-runtime-overview[\s\S]*?sidebar-runtime-lifecycle[\s\S]*?runtimeLifecycleLabel\(copy, snapshot\.runtime\)/);
+  assert.doesNotMatch(appSource, /runtimeModeLabel|snapshot\.runtime\.mode|sidebar-runtime-mode-line/);
   assert.match(appSource, /sidebar-runtime-overview[\s\S]*?<RuntimeActionButtons compact copy=\{copy\} runtime=\{snapshot\.runtime\} setError=\{setError\} \/>/);
   assert.doesNotMatch(appSource, /className="sidebar-runtime-mode"[\s\S]*?navigateSurface\("mcp"\)/);
   assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*17px/s);
@@ -150,19 +155,12 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*0;/);
 });
 
-test("runtime details explain the active role and ChatGPT mode offers a Codex-mode MCP CTA", () => {
-  assert.match(appSource, /description=\{runtime\.mode === "full" \? copy\.codexModeBody : runtime\.mode === "browser-only" \? copy\.chatgptModeBody/);
-  assert.match(appSource, /runtime\.mode === "browser-only"[\s\S]*?runtime-mode-suggestion[\s\S]*?copy\.switchToCodexMode[\s\S]*?onClick=\{showMcp\}[\s\S]*?copy\.configureMcp/);
-  assert.match(appSource, /showMcp=\{\(\) => setSurface\("mcp"\)\}/);
-  assert.match(i18nSource, /chatgptMode: "ChatGPT"/);
-  assert.match(i18nSource, /General-purpose AI assistant\. Can reason over context supplied by Codex/);
-  assert.match(i18nSource, /codexMode: "Codex"/);
-  assert.match(i18nSource, /Coding agent\. Can actively inspect and modify the workspace/);
-  assert.match(i18nSource, /switchToCodexMode: "Need coding-agent workspace access\?"/);
-  assert.match(i18nSource, /switchToCodexModeBody: "Configure MCP to switch from ChatGPT mode to Codex mode/);
-  assert.match(i18nSource, /mcpTitle: "Enable Codex mode with MCP"/);
-  assert.match(i18nSource, /mcpBody: "Configure MCP to enable Codex mode/);
-  assert.doesNotMatch(i18nSource, /Pro remains read-only|tool-capable ChatGPT tiers/);
+test("runtime details omit mode switching and always expose tunnel state", () => {
+  assert.doesNotMatch(appSource, /runtime\.mode|runtime-mode-suggestion|switchToCodexMode|chatgptMode/);
+  assert.match(i18nSource, /mcpTitle: "MCP"/);
+  assert.match(i18nSource, /configureMcp: "Configure MCP"/);
+  assert.match(i18nSource, /connect: "Configure MCP"/);
+  assert.match(i18nSource, /reconnect: "Apply MCP settings"/);
   assert.match(styles, /\.runtime-detail-row\.has-description\s*\{/);
   assert.match(appSource, /runtime\.tunnel\?\.ready[\s\S]*?runtime\.tunnel\.pid \? `PID \$\{runtime\.tunnel\.pid\} · ` : ""[\s\S]*?copy\.runtimeReady/);
   assert.match(appSource, /runtime\.tunnel\?\.state && runtime\.tunnel\.state !== "stopped"/);
@@ -184,7 +182,7 @@ test("manual-first runtime controls are global and startup stays observe-only by
   assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.stopRuntime\(\)/);
 });
 
-test("Codex config keeps automatic actions minimal and manual mode editable", () => {
+test("Codex config keeps install and restore actions independent from MCP and manual mode editable", () => {
   const start = appSource.indexOf("function CodexConfigSurface");
   const end = appSource.indexOf("function VsCodeAdvancedSurface", start);
   const codexConfigSource = appSource.slice(start, end);
@@ -198,16 +196,13 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("vscode-advanced"\)/);
   assert.match(codexConfigSource, /copy\.vscodeAdvancedTitle[\s\S]*?copy\.vscodeAdvancedSubtitle/);
   assert.match(codexConfigSource, /className="config-mode-toolbar"[\s\S]*?copy\.refreshing[\s\S]*?copy\.refresh/);
-  assert.match(codexConfigSource, /api!\.uninstallIntegration\(\)/);
+  assert.match(codexConfigSource, /api!\.restoreNativeCodex\(\)/);
   assert.match(codexConfigSource, /api!\.saveCodexConfig\(manualContent\)/);
   assert.match(codexConfigSource, /<textarea[\s\S]*?config-file-editor/);
   assert.match(codexConfigSource, /copy\.save/);
-  assert.match(codexConfigSource, /loading=\{activeAction === "install"\}/);
+  assert.match(codexConfigSource, /activeAction === "install"/);
   assert.match(codexConfigSource, /const modelsInstalled = config\?\.installed === true/);
   assert.match(codexConfigSource, /modelsInstalled \? copy\.reinstallModels : copy\.install/);
-  assert.match(codexConfigSource, /modelsInstalled \? copy\.reinstallingModels : copy\.installingModels/);
-  assert.match(i18nSource, /reinstallModels: "Reinstall models"/);
-  assert.match(i18nSource, /reinstallingModels: "Reinstalling…"/);
   assert.match(codexConfigSource, /loading=\{activeAction === "restore"\}/);
   assert.match(codexConfigSource, /loading=\{activeAction === "save"\}/);
   assert.match(codexConfigSource, /activeAction === "refresh" \? <ButtonSpinner \/> : null/);
@@ -216,7 +211,16 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   const configActionsStart = codexConfigSource.indexOf('className="inline-actions config-actions"');
   const configActionsEnd = codexConfigSource.indexOf("</div>", configActionsStart);
   assert.doesNotMatch(codexConfigSource.slice(configActionsStart, configActionsEnd), /copy\.refresh/);
-  assert.match(electronMain, /runtimeHost\.setupCore\(\{ replaceCodexRoute: true \}\)/);
+  assert.match(electronMain, /launcher:setup-core[\s\S]*?runtimeHost\.setupCore\(\)/);
+  assert.match(electronMain, /launcher:setup-mcp[\s\S]*?runtimeHost\.setupMcp\(/);
+  assert.match(preloadSource, /setupCore: \(\) => ipcRenderer\.invoke\("launcher:setup-core"\)/);
+  assert.match(preloadSource, /setupMcp: \(input\) => ipcRenderer\.invoke\("launcher:setup-mcp", input\)/);
+  assert.match(preloadSource, /restoreNativeCodex: \(\) => ipcRenderer\.invoke\("launcher:restore-native-codex"\)/);
+  const nativeRestoreStart = electronMain.indexOf('handle("launcher:restore-native-codex"');
+  const fullUninstallStart = electronMain.indexOf('handle("launcher:uninstall-integration"', nativeRestoreStart);
+  const nativeRestoreSource = electronMain.slice(nativeRestoreStart, fullUninstallStart);
+  assert.match(nativeRestoreSource, /runtimeHost\.restoreNativeCodex\(\)/);
+  assert.doesNotMatch(nativeRestoreSource, /mcpSetupComplete|mcpRuntimeInstalled|mcpGuideStep/);
   assert.doesNotMatch(electronMain, /Replace existing route|--replace-codex-route/);
   assert.match(preloadSource, /saveCodexConfig:[\s\S]*?launcher:codex-config-save/);
   assert.doesNotMatch(preloadSource, /codex-config-reset|resetCodexConfig/);
@@ -235,7 +239,8 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.match(styles, /\.codex-next-step\.is-pending\s*\{[^}]*opacity:/s);
   assert.match(electronMain, /function codexRestartPending[\s\S]*?codexCatalogVerified:\s*false[\s\S]*?codexRestartRequestedAt:/);
   assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
-  assert.match(electronMain, /launcher:setup-mcp[\s\S]*?codexRestartPending\([\s\S]*?publishRuntimeStatus\(\)[\s\S]*?startCatalogVerificationMonitor\(\{ logger, stateStore \}\)/);
+  assert.match(electronMain, /launcher:setup-core[\s\S]*?codexRestartPending\([\s\S]*?coreSetupComplete:\s*true[\s\S]*?publishRuntimeStatus\(\)/);
+  assert.match(appSource, /index=\{3\}[\s\S]*?title=\{copy\.stepInstall\}[\s\S]*?index=\{4\}[\s\S]*?title=\{copy\.stepMcp\}/);
   assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
 });
 
@@ -350,18 +355,6 @@ test("launcher is English-only and exposes no repository UI", () => {
   assert.doesNotMatch(i18nSource, /Choose your language|Open repository|简体中文|zh-CN/);
 });
 
-test("MCP guide uses the two optimized recordings in the requested step order", () => {
-  assert.match(
-    appSource,
-    /MCP_GUIDE_MEDIA = \[\s*new URL\("\.\/assets\/mcp-create-tunnel\.gif"[\s\S]*?new URL\("\.\/assets\/mcp-connect-connector\.gif"[\s\S]*?new URL\("\.\/assets\/mcp-connect-connector\.gif"/,
-  );
-  for (const file of ["mcp-create-tunnel.gif", "mcp-connect-connector.gif"]) {
-    const asset = fs.readFileSync(path.join(launcherRoot, "src", "assets", file));
-    assert.equal(asset.subarray(0, 6).toString("ascii"), "GIF89a");
-    assert.ok(asset.length < 5 * 1024 * 1024, `${file} is unexpectedly large`);
-  }
-});
-
 test("MCP copy includes every required account, key, and connector instruction", () => {
   assert.match(i18nSource, /regular API key with Tunnels Read \+ Use \(free;/);
   assert.match(i18nSource, /Don't forget to create a ChatGPT workspace\./);
@@ -393,18 +386,21 @@ test("MCP wizard reuses saved credentials and exposes replacement explicitly", (
 });
 
 test("MCP verification has one primary action and exposes live progress", () => {
+  const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
   assert.doesNotMatch(
     appSource,
     /<SecondaryButton disabled=\{busy \|\| !connectorOpened\} onClick=\{\(\) => void verify\(\)\}>/,
   );
-  assert.match(appSource, /<PrimaryButton\s+disabled=\{busy\}/);
+  assert.match(appSource, /<PrimaryButton\s+disabled=\{busy \|\| snapshot\.runtime\.lifecycle !== "ready"\}/);
   assert.match(appSource, /onClick=\{\(\) => void \(doctor\?\.ok \? onDone\(\) : verify\(\)\)\}/);
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
   assert.match(
     electronMain,
     /Checking local runtime[\s\S]*?await runtimeHost\.doctor\(\)[\s\S]*?Checking ChatGPT connector[\s\S]*?await browserHost\.verifyConnector/,
   );
-  const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
+  assert.match(appSource, /if \(busy \|\| snapshot\.runtime\.lifecycle !== "ready"\) return;/);
+  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?setBackgroundThrottling\(false\)[\s\S]*?beginConnectorVerificationSurface\(\)[\s\S]*?verifyConnectorWithBrowserHelper[\s\S]*?setBackgroundThrottling\(true\)/);
+  assert.match(browserHostSource, /beginConnectorVerificationSurface[\s\S]*?setBounds\([\s\S]*?contentWidth - 1[\s\S]*?contentHeight - 1[\s\S]*?setVisible\(true\)/);
   assert.doesNotMatch(
     browserHostSource,
     /querySelectorAll\('\[role="group"\], \[role="option"\], \[role="menuitem"\]'\)/,

@@ -428,13 +428,11 @@ export function startServer(
   dependencies: { fetchUpstream?: NativeFetch } = {},
 ): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
-  if (config.mode === "full") {
-    void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
-      console.error(
-        `[lca-codex] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-  }
+  void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
+    console.error(
+      `[lca-codex] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
   let draining = false;
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;

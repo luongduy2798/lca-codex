@@ -590,6 +590,28 @@ class BrowserHost {
     this.authView?.setVisible(visible);
   }
 
+  beginConnectorVerificationSurface() {
+    if (browserViewVisible(this.visible, this.surfaceActive, this.boundsReady)) return () => {};
+    const [contentWidth, contentHeight] = this.window.getContentSize();
+    const fallback = initialBrowserBounds(this.window);
+    // Chromium reports document.visibilityState=hidden whenever the launcher-owned WebContentsView
+    // is actually hidden. Connector autocomplete will not reliably hydrate in that state. Keep a
+    // full-size layout viewport alive while clipping all but one edge pixel outside the launcher
+    // content area, so verification is browser-visible without covering or navigating away from
+    // the MCP screen.
+    this.view.setBounds({
+      x: Math.max(0, contentWidth - 1),
+      y: Math.max(0, contentHeight - 1),
+      width: fallback.width,
+      height: fallback.height,
+    });
+    this.view.setVisible(true);
+    return () => {
+      this.view.setBounds(this.bounds);
+      this.syncViewVisibility();
+    };
+  }
+
   selectTab(tabId) {
     if (tabId !== "home" && !this.turnTabs.has(tabId)) throw new Error("Browser tab does not exist");
     if (this.authView) this.closeAuthView(this.authView, true);
@@ -1527,11 +1549,13 @@ class BrowserHost {
       throw new Error("Connector name is invalid");
     }
     const connectorName = appName.trim();
-    const previousVisible = this.visible;
-    const previousSurfaceActive = this.surfaceActive;
+    const contents = this.view.webContents;
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    this.setSurfaceActive(true);
-    this.show();
+    // A fresh launcher can reach MCP verification before the renderer ever mounts Browser, leaving
+    // the home WebContentsView both throttled and document-hidden. Keep it live and Chromium-visible
+    // in a clipped background viewport for the duration of connector verification.
+    contents.setBackgroundThrottling(false);
+    const restoreVerificationSurface = this.beginConnectorVerificationSurface();
     try {
       if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
         await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
@@ -1548,8 +1572,8 @@ class BrowserHost {
       this.setState({ status: "ready", message: "ChatGPT connector is available", authenticated: true });
       return result;
     } finally {
-      if (!previousVisible) this.hide();
-      this.setSurfaceActive(previousSurfaceActive);
+      restoreVerificationSurface();
+      contents.setBackgroundThrottling(true);
     }
   }
 
