@@ -118,6 +118,10 @@ function emitTextDeltas(deltas: string[], emit: (event: AdapterEvent) => void): 
   for (const text of deltas) emit({ type: "text_delta", text, phase: "final_answer" });
 }
 
+function hasFinalAnswerText(events: AdapterEvent[]): boolean {
+  return events.some(event => event.type === "text_delta" && event.phase === "final_answer" && event.text.length > 0);
+}
+
 function emitProContextWarning(
   parsed: CodexParsedRequest,
   capabilities: LcaCodexCapabilities,
@@ -256,7 +260,14 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
 
   return {
     name: "lca-codex",
-    async runTurn(parsed, incoming, emit) {
+    async runTurn(parsed, incoming, emitOuter) {
+      let streamedFinalAnswer = false;
+      const emit = (event: AdapterEvent) => {
+        if (event.type === "text_delta" && event.phase === "final_answer" && event.text.length > 0) {
+          streamedFinalAnswer = true;
+        }
+        emitOuter(event);
+      };
       if (parsed._opaqueMultiAgentV2Payload) {
         throw new Error(
           "LCA Codex subagents currently require a V1-rooted task. "
@@ -438,7 +449,12 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
           }
         });
       } catch (error) {
-        if (error instanceof LcaCodexAdapterError && error.retryable) {
+        const retryable = error instanceof LcaCodexAdapterError
+          ? error.retryable
+            && !streamedFinalAnswer
+            && !hasFinalAnswerText(session.eventsForFinalReplay())
+          : false;
+        if (error instanceof LcaCodexAdapterError && retryable) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
@@ -456,7 +472,11 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
             status: error.status,
             errorType: error.errorType,
             code: error.code,
-            retryable: error.retryable,
+            // Responses deltas are append-only. Once any final-answer text escaped this request,
+            // starting a fresh browser generation would make Codex append the retry from byte 0
+            // after the already-visible prefix. Keep the failed session replayable instead and
+            // force this streamed failure to be terminal for the native request.
+            retryable,
           });
           return;
         }

@@ -67,6 +67,14 @@ function commonPrefixLength(left: string, right: string): number {
   return index;
 }
 
+function replayLikeRewritePrefixLength(emitted: string, latest: string): number {
+  if (latest.length < emitted.length || emitted.length < 64) return 0;
+  const prefix = commonPrefixLength(emitted, latest);
+  const changedTail = emitted.length - prefix;
+  const toleratedTail = Math.min(256, Math.ceil(emitted.length * 0.2));
+  return prefix >= 64 && changedTail <= toleratedTail ? prefix : 0;
+}
+
 function suffixPrefixOverlapLength(left: string, right: string, minimum = 32, maximum = 8_192): number {
   const limit = Math.min(left.length, right.length, maximum);
   if (limit < minimum) return 0;
@@ -175,9 +183,18 @@ export class ChatGptMarkdownBuffer {
     if (this.latestSnapshot.startsWith(this.emitted)) {
       delta = this.latestSnapshot.slice(this.emitted.length);
     } else if (this.latestSnapshot !== this.emitted) {
-      // Responses deltas cannot retract. A rare late rewrite therefore starts a fresh correction
-      // paragraph instead of crashing the turn or withholding the final visible answer forever.
-      delta = this.emitted ? `\n\n${this.latestSnapshot}` : this.latestSnapshot;
+      const replayPrefix = replayLikeRewritePrefixLength(this.emitted, this.latestSnapshot);
+      if (replayPrefix > 0) {
+        // A browser retry/render replay can replace an almost-identical answer after most of its
+        // prefix was already streamed. Responses deltas cannot retract, so appending the complete
+        // replacement would duplicate the whole answer. Preserve the emitted prefix and resume at
+        // the same raw offset; any incompatible rewrite is intentionally confined to the small tail.
+        delta = this.latestSnapshot.slice(this.emitted.length);
+      } else {
+        // A genuinely different late rewrite cannot replace already-emitted Responses deltas.
+        // Surface it once as a correction instead of silently returning stale visible content.
+        delta = this.emitted ? `\n\n${this.latestSnapshot}` : this.latestSnapshot;
+      }
     }
     this.emitted += delta;
     this.finished = true;

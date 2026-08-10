@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/lca-codex/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
+import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
 import { createLcaCodexAdapter } from "../src/adapters/lca-codex/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/lca-codex/markdown";
@@ -499,6 +500,58 @@ describe("ChatGPT outer-native harness v3", () => {
     sessions.clear();
   });
 
+  test("does not start a fresh native retry after final-answer text has already streamed", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-partial-retry-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "lca-codex",
+      baseUrl: "browser://chatgpt-partial-retry-test",
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: false, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      turn.onTextDelta("partial answer already visible");
+      throw new LcaCodexAdapterError("transient upstream failure after partial output", {
+        status: 503,
+        errorType: "server_error",
+        code: "upstream_server_error",
+        retryable: true,
+      });
+    };
+
+    try {
+      const request = rawWireRequest(environmentXml);
+      const firstEvents: AdapterEvent[] = [];
+      await createLcaCodexAdapter(provider).runTurn!(request, { headers: new Headers() }, event => firstEvents.push(event));
+
+      expect(firstEvents.some(event => (
+        event.type === "text_delta"
+        && event.phase === "final_answer"
+        && event.text === "partial answer already visible"
+      ))).toBe(true);
+      expect(firstEvents.at(-1)).toMatchObject({
+        type: "error",
+        code: "upstream_server_error",
+        retryable: false,
+      });
+
+      const replayEvents: AdapterEvent[] = [];
+      await createLcaCodexAdapter(provider).runTurn!(request, { headers: new Headers() }, event => replayEvents.push(event));
+      expect(browserStarts).toBe(1);
+      expect(replayEvents.some(event => event.type === "text_delta" && event.phase === "final_answer")).toBe(false);
+      expect(replayEvents.at(-1)).toMatchObject({
+        type: "error",
+        code: "upstream_server_error",
+        retryable: false,
+      });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close().catch(() => {});
+    }
+  });
+
   test("waits for one shared browser retirement before starting the compacted continuation", async () => {
     const sessions = new ChatGptTurnSessions();
     let finishBrowser!: (answer: string) => void;
@@ -971,6 +1024,24 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe("");
     expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe(" gamma delta");
     expect(buffer.finish()).toEqual({ markdown: "Alpha beta gamma delta", delta: "" });
+  });
+
+  test("a near-tail browser replay resumes without appending the answer from the beginning", () => {
+    const stablePrefix = "Stable answer prefix that has already streamed to Codex. ".repeat(4);
+    const first = `${stablePrefix}request-receivX`;
+    const growing = `${first} old tail`;
+    const replayed = `${stablePrefix}request-received new tail and completed answer`;
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown);
+
+    expect(buffer.observeHtml(`<p>${first}</p>`)).toBe("");
+    expect(buffer.observeHtml(`<p>${growing}</p>`)).toBe(first);
+    expect(buffer.observeHtml(`<p>${replayed}</p>`)).toBe("");
+    const final = buffer.finish();
+
+    expect(final.markdown.startsWith(first)).toBe(true);
+    expect(final.markdown.indexOf(stablePrefix, stablePrefix.length)).toBe(-1);
+    expect(final.delta).not.toContain(stablePrefix);
+    expect(final.markdown.endsWith("completed answer")).toBe(true);
   });
 
   test("a permanent late rewrite is appended as a final correction instead of crashing the turn", () => {
