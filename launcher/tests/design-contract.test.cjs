@@ -115,10 +115,12 @@ test("Windows chrome uses the available left edge and the branded application ic
 test("closing the launcher follows the persisted background-launcher preference", () => {
   assert.match(
     electronMain,
-    /if \(stateStore\.read\(\)\.keepRunningOnClose && tray\) window\.hide\(\);\s*else void requestQuit\(\);/,
+    /if \(stateStore\.read\(\)\.keepRunningOnClose\) window\.hide\(\);\s*else void requestQuit\(\);/,
   );
+  assert.match(electronMain, /same BrandMark glyph rendered in the sidebar/);
   assert.match(electronMain, /MAC_TRAY_ICON_PNG = "iVBORw0KGgo/);
-  assert.match(electronMain, /nativeImage\.createFromBuffer\(Buffer\.from\(MAC_TRAY_ICON_PNG, "base64"\)\)/);
+  assert.match(electronMain, /nativeImage\.createFromBuffer\(Buffer\.from\(MAC_TRAY_ICON_PNG, "base64"\)\)\.resize\(\{ width: 18, height: 18 \}\)/);
+  assert.doesNotMatch(electronMain, /keepRunningOnClose && tray/);
   assert.match(electronMain, /if \(image\.isEmpty\(\)\) throw new Error\("Tray icon could not be loaded"\);/);
   assert.match(electronMain, /if \(process\.platform === "darwin"\) image\.setTemplateImage\(true\);/);
   assert.doesNotMatch(electronMain, /data:image\/svg\+xml/);
@@ -126,8 +128,23 @@ test("closing the launcher follows the persisted background-launcher preference"
   assert.match(electronMain, /label: trayRuntimeLabel\(status\), enabled: false/);
   assert.match(electronMain, /label: "Quit LCA Codex"/);
   assert.match(electronMain, /tray\.on\("click", \(\) => showMainWindow\(\)\)/);
+  assert.match(electronMain, /tray\.setTitle\(latestTrayActivity \? `\$\{runtime\} · \$\{latestTrayActivity\}` : runtime\)/);
+  assert.match(electronMain, /Waiting for ChatGPT/);
+  assert.match(electronMain, /record\?\.event === "lca_codex\.tool_started" \|\| record\?\.event === "lca_codex\.tool_completed"/);
+  assert.match(electronMain, /traceId\.startsWith\("health-"\)/);
+  assert.match(electronMain, /clearTrayActivityAfter\(8_000\)/);
+  assert.match(electronMain, /publish: \(record\) => \{[\s\S]*?send\("launcher:log", record\);[\s\S]*?publishTrayActivity\(record\);/);
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
   assert.match(i18nSource, /keepRunningOnClose: "Keep launcher running when window closes"/);
+});
+
+test("tray activity keeps active work visible but detects stalled LCA turns", () => {
+  assert.match(electronMain, /ACTIVITY_STALL_MS/);
+  assert.match(electronMain, /"lca_codex\.turn_started": \{ label: "Turn started", terminal: false, stallable: true \}/);
+  assert.match(electronMain, /stallable: !terminal && record\.detail\?\.layer !== "codex"/);
+  assert.match(electronMain, /if \(!activity\.stallable\) return;/);
+  assert.match(electronMain, /latestTrayActivity = "Stalled";[\s\S]*?clearTrayActivityAfter\(8_000\)/);
+  assert.match(electronMain, /"lca_codex\.turn_completed": \{ label: "Task completed", terminal: true, stallable: false \}/);
 });
 
 test("sidebar keeps the brand prominent, runtime actions clear, and Settings free of unexplained status dots", () => {
@@ -197,6 +214,7 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   assert.match(codexConfigSource, /copy\.vscodeAdvancedTitle[\s\S]*?copy\.vscodeAdvancedSubtitle/);
   assert.match(codexConfigSource, /className="config-mode-toolbar"[\s\S]*?copy\.refreshing[\s\S]*?copy\.refresh/);
   assert.match(codexConfigSource, /api!\.restoreNativeCodex\(\)/);
+  assert.match(codexConfigSource, /config\?\.active \? config\.routeUrl \?\? copy\.previousRoute : copy\.previousRoute/);
   assert.match(codexConfigSource, /api!\.saveCodexConfig\(manualContent\)/);
   assert.match(codexConfigSource, /<textarea[\s\S]*?config-file-editor/);
   assert.match(codexConfigSource, /copy\.save/);
@@ -219,7 +237,7 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   const nativeRestoreStart = electronMain.indexOf('handle("launcher:restore-native-codex"');
   const fullUninstallStart = electronMain.indexOf('handle("launcher:uninstall-integration"', nativeRestoreStart);
   const nativeRestoreSource = electronMain.slice(nativeRestoreStart, fullUninstallStart);
-  assert.match(nativeRestoreSource, /runtimeHost\.restoreNativeCodex\(\)/);
+  assert.match(nativeRestoreSource, /stopManagedRuntime\(\{ restoreCodex: false \}\)[\s\S]*?runtimeHost\.restoreNativeCodex\(\)/);
   assert.doesNotMatch(nativeRestoreSource, /mcpSetupComplete|mcpRuntimeInstalled|mcpGuideStep/);
   assert.doesNotMatch(electronMain, /Replace existing route|--replace-codex-route/);
   assert.match(preloadSource, /saveCodexConfig:[\s\S]*?launcher:codex-config-save/);
@@ -240,6 +258,9 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   assert.match(electronMain, /function codexRestartPending[\s\S]*?codexCatalogVerified:\s*false[\s\S]*?codexRestartRequestedAt:/);
   assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
   assert.match(electronMain, /launcher:setup-core[\s\S]*?codexRestartPending\([\s\S]*?coreSetupComplete:\s*true[\s\S]*?publishRuntimeStatus\(\)/);
+  assert.match(appSource, /const codexRouteActive = snapshot\.state\.coreSetupComplete === true[\s\S]*?snapshot\.state\.bridgeEnabled === true/);
+  assert.match(appSource, /action=\{codexRouteActive[\s\S]*?complete=\{codexRouteActive\}[\s\S]*?index=\{3\}/);
+  assert.match(appSource, /disabled=\{busy \|\| !codexRouteActive\}[\s\S]*?index=\{4\}/);
   assert.match(appSource, /index=\{3\}[\s\S]*?title=\{copy\.stepInstall\}[\s\S]*?index=\{4\}[\s\S]*?title=\{copy\.stepMcp\}/);
   assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
 });

@@ -12,7 +12,7 @@ export const copy = {
   codexInconsistent: "Needs repair",
   configPath: "Config path",
   route: "Model route",
-  previousRoute: "Previous/native route",
+  previousRoute: "Native Codex route",
   codexAutomaticBody: "Installing or reinstalling models replaces conflicting model-routing settings with LCA Codex while preserving unrelated Codex TOML such as project trust settings.",
   codexManualBody: "Edit the real Codex config.toml directly. Saving writes the file atomically; invalid TOML remains editable so you can correct it.",
   restorePreviousRoute: "Restore native Codex",

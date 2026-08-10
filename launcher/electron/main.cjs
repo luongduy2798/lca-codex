@@ -20,6 +20,7 @@ const { BrowserHost } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
+  ACTIVITY_STALL_MS,
   createLogger,
   installProcessDiagnosticGuards,
   registerLoggedIpc,
@@ -67,7 +68,8 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
-const MAC_TRAY_ICON_PNG = "iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAYAAABWzo5XAAABQ0lEQVR42qXUzSqFURQG4Of4SUkKKXeAGEjKgFImboKUhBFXYmIoA2XqAhiZGIhDFGXABZgYKFLHOUzW0W77PsSq3f5b+91rr/ddu+KrtSq3ul9a5a/7RRvTWVSVaDUcJ2vvRYAt0W+FQ1nbCb/2PIi2DHAGt1iNvVf0oQcPOMAL1gOsVhbRKU6S9Q4c4Q6DGIrI1rJzX4DOcB45GsA9NjCJJwxjIcCWisBSoGqMezGX+ExgNMYXuEnPthUkvsnGIw6TS6qJzt7y/ORvbARQa8bKeybKStmTmtYVIHV0oj8B7wwGC/WXA21iHIsRehVTccF1ItbvyugTdCUimMcILiO5q4nvSRBTmOxGzLdjvBcU74Z+TjEbie7G80+F2x798g/lsp/+FmXV3Ez4WOgp/0JacBUSKS3gMiL+9f98x04jjeQD0LlO5qlqQEMAAAAASUVORK5CYII=";
+// Transparent raster generated from the same BrandMark glyph rendered in the sidebar.
+const MAC_TRAY_ICON_PNG = "iVBORw0KGgoAAAANSUhEUgAAACQAAAAkCAYAAADhAJiYAAAE1klEQVR4nL2Ya4hVVRTHf+feuTPjqxx7OFoj9rIHFgj5gBiw14cMStFKCkqFiKIgrZiCPiRRoxUUko8mEyxloowYSyF7gn6YaiKSsgdZVkT2IDOTcixPH9Z/z1733HPnqS643LPXXnut/157PfY5CYOnRP8FIAWODEHXkCgBijn8YhX+MaVi5nkYcDEw0fELHCdgwchJwBLgN+AAdlwp0AG0ZOTDr+ZogyzofxHwpwB8DGwHHgI2OmBPAlOr6EmIsTdoKgrQvTL4JXBZjtwUoEsy/wJtwAZgK7A2A7JQsbqfVHLGUmAzMNwpLVG+42VET6XAYaDbjVcCYwcDyru2BvhACs8Xr9YpHAnMB36WzPvAA8AFAj8COANo1/x3wCRnp19gwv84YKkUfYMFdMGBmSV+CnwE3NqH7kWS3a1N9RlTQaAIvEJ09X/AOsmUMK89SzyW1X3oLAkAwN1aN1/jqtnnwWzSonbgdT3f7nbzoHhvEo/RV+6rsKNb7PSHmCsAXwN7ZauqlwraRfDMC+KP0/haJ9sO/IB5KlAJuBrLwsNE736KxVSgIpZ5qXQH22UU3HaNBF/DArIIjBfveie/GVjlxucBnVihfERrmrE6FYCtAk6U/D3iXZqx30M1mNvWSXC0m2sU7zrHWw2s0fNyZ3RLVrGMvqX5/QKzETgEjJFMxZEFhG9ol6OIbswDNA/4A8uwH4G52JF2AfuABTnApgBfOfB7gbo8QMHweKzCbtM4xMepUnCDW7hCvCec0kC3YTF0M9EDgUYAj8vOfuCcDIaeQQI0Ab9gPQqi1yZIwSzH3wo873YXmmhQ3ElsIa1UHk2L5j/EYrUi04I37pLgTCdwrniPOvlWzEtFYnsJmysK0BLgFuAL7BjnSmfw6A5yMs27KsHiAuBOCddhNWMpcAfwOTAbKw/dkk0zgI4A9ZJdj2XgTqy2nYwdZ4JdV8BaTLBfpigBzgR2ycgcjxxoAJ4h1pjl4oe7jq9Je7A2EXgrc7xRjyXFbqoUyBAzV2rxASxFsyk5RsC6sbrl6XTgJa2f7Xb+HOa5RmerFvgEC+4aJ1sGKAEup/wKsQO4iEp6Cjvid7EKfSPwj4z8hWVloLXS1eh4DQL5EzEOcz00k3gkrQ7YBuDsDKg6LGBT7CZ5n/i7KK9FHlAwOgFr2is09kdeBmiOFofjOAvrayl2TB3AZOA04GXgoAyOdro+wzIsC6jJbWSbeBPFq9rPrpDgY8QrA8D9WLAGjx3EetVkzYedn4LF3005gIbJ8BZiA0/ywHiETVhBe0fjegd2OJbK24EZOTqasRhKgUucsTXivUhsuJuIN8+ql7RgeDEWcMvcXKlSvIeasD4YvLcgo68Ti5cwv97N9XljLGCp/bsWt2BeyqMG4GHsHS3Fdj9NcyFIm7GsS7HaNNat79edOhzdVOBXKXoVK2ozsGAehd179hAv9tOdjlBnIPa1toyNAb2fBVCTiLc7/zvknudlgJTc+guBv7H6dALVvwv0i/zCaVimdABPUx4vbVhpyNJC4lEupJdsGgj15trpwHsOWBfwNhZHO8X7nthChgzGk/9g4D8cjMQaZzvxRXEf8C12Oxjm1h9zyhqpxV6Jsvzj+s0owTxW0YeILw4DVni0KNxnwoUt7UW2Kv0Pauo192+fGvIAAAAASUVORK5CYII=";
 
 app.setName("LCA Codex");
 if (process.platform === "win32") app.setAppUserModelId("dev.lcacodex.launcher");
@@ -90,6 +92,9 @@ let runtimeSupervisor = null;
 let runtimeLifecycle = null;
 let launcherStateStore = null;
 let tray = null;
+let latestTrayRuntimeStatus = null;
+let latestTrayActivity = null;
+let trayActivityTimer = null;
 let quitting = false;
 let shutdownInProgress = false;
 let exitCommitted = false;
@@ -247,7 +252,7 @@ async function publishRuntimeStatus() {
   }
   const status = await runtimeSupervisor.observeRuntime();
   send("launcher:runtime-state", status);
-  updateTrayMenu(status);
+  updateTrayRuntimeStatus(status);
   return status;
 }
 
@@ -386,14 +391,14 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
 
 function trayImage() {
   const image = process.platform === "darwin"
-    ? nativeImage.createFromBuffer(Buffer.from(MAC_TRAY_ICON_PNG, "base64"))
+    ? nativeImage.createFromBuffer(Buffer.from(MAC_TRAY_ICON_PNG, "base64")).resize({ width: 18, height: 18 })
     : nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
   if (image.isEmpty()) throw new Error("Tray icon could not be loaded");
   if (process.platform === "darwin") image.setTemplateImage(true);
   return image;
 }
 
-function trayRuntimeLabel(status) {
+function trayRuntimeTitle(status) {
   const labels = {
     stopped: "Stopped",
     starting: "Starting…",
@@ -404,7 +409,57 @@ function trayRuntimeLabel(status) {
     stale: "Stale",
     foreign: "Unavailable",
   };
-  return `Runtime: ${labels[status?.lifecycle] || "Checking…"}`;
+  return labels[status?.lifecycle] || "Checking…";
+}
+
+function trayRuntimeLabel(status) {
+  return `Runtime: ${trayRuntimeTitle(status)}`;
+}
+
+function truncateTrayText(value, maxChars = 44) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return text.length <= maxChars ? text : `${text.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function trayActivity(record) {
+  const traceId = typeof record?.detail?.traceId === "string" ? record.detail.traceId : "";
+  if (traceId.startsWith("health-")) return null;
+  const fixed = {
+    "lca_codex.turn_started": { label: "Turn started", terminal: false, stallable: true },
+    "lca_codex.turn_send_accepted": { label: "Waiting for ChatGPT", terminal: false, stallable: true },
+    "lca_codex.turn_first_response": { label: "ChatGPT responding", terminal: false, stallable: true },
+    "lca_codex.turn_first_reasoning": { label: "Thinking", terminal: false, stallable: true },
+    "lca_codex.turn_first_text": { label: "Writing response", terminal: false, stallable: true },
+    "lca_codex.turn_completed": { label: "Task completed", terminal: true, stallable: false },
+    "lca_codex.turn_failed": { label: "Task failed", terminal: true, stallable: false },
+    "lca_codex.turn_retry_scheduled": { label: "Retrying task", terminal: false, stallable: true },
+    "lca_codex.turn_retry_stopped": { label: "Retry stopped", terminal: true, stallable: false },
+    "browser.turn_started": { label: "Opening ChatGPT", terminal: false, stallable: false },
+  };
+  if (fixed[record?.event]) return fixed[record.event];
+  if (record?.event === "browser.turn_ended") {
+    return {
+      label: record.detail?.status === "completed" ? "ChatGPT completed" : "ChatGPT ended",
+      terminal: true,
+      stallable: false,
+    };
+  }
+  if (record?.event === "lca_codex.tool_started" || record?.event === "lca_codex.tool_completed") {
+    const tool = truncateTrayText(record.detail?.tool || "tool", 24);
+    const terminal = record.event === "lca_codex.tool_completed";
+    return {
+      label: terminal ? `${tool} completed` : `Running ${tool}`,
+      terminal,
+      stallable: !terminal && record.detail?.layer !== "codex",
+    };
+  }
+  return null;
+}
+
+function updateTrayTitle() {
+  if (process.platform !== "darwin" || !tray || typeof tray.setTitle !== "function") return;
+  const runtime = trayRuntimeTitle(latestTrayRuntimeStatus);
+  tray.setTitle(latestTrayActivity ? `${runtime} · ${latestTrayActivity}` : runtime);
 }
 
 function updateTrayMenu(status) {
@@ -416,11 +471,48 @@ function updateTrayMenu(status) {
   ]));
 }
 
+function updateTrayRuntimeStatus(status) {
+  latestTrayRuntimeStatus = status;
+  updateTrayMenu(status);
+  updateTrayTitle();
+}
+
+function clearTrayActivityAfter(delayMs) {
+  trayActivityTimer = setTimeout(() => {
+    trayActivityTimer = null;
+    latestTrayActivity = null;
+    updateTrayTitle();
+  }, delayMs);
+  trayActivityTimer.unref?.();
+}
+
+function publishTrayActivity(record) {
+  if (process.platform !== "darwin") return;
+  const activity = trayActivity(record);
+  if (!activity) return;
+  if (trayActivityTimer) clearTimeout(trayActivityTimer);
+  trayActivityTimer = null;
+  latestTrayActivity = truncateTrayText(activity.label);
+  updateTrayTitle();
+  if (activity.terminal) {
+    clearTrayActivityAfter(8_000);
+    return;
+  }
+  if (!activity.stallable) return;
+  trayActivityTimer = setTimeout(() => {
+    trayActivityTimer = null;
+    latestTrayActivity = "Stalled";
+    updateTrayTitle();
+    clearTrayActivityAfter(8_000);
+  }, ACTIVITY_STALL_MS);
+  trayActivityTimer.unref?.();
+}
+
 function createTray(logger) {
   try {
     tray = new Tray(trayImage());
     tray.setToolTip("LCA Codex");
-    updateTrayMenu(null);
+    updateTrayRuntimeStatus(latestTrayRuntimeStatus);
     tray.on("click", () => showMainWindow());
     return true;
   } catch (error) {
@@ -530,7 +622,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
-    if (stateStore.read().keepRunningOnClose && tray) window.hide();
+    if (stateStore.read().keepRunningOnClose) window.hide();
     else void requestQuit();
   });
   window.on("closed", () => {
@@ -709,10 +801,11 @@ function registerIpc({ logger, stateStore }) {
       cancelId: 0,
       title: "Restore native Codex",
       message: "Remove the LCA Codex-managed models and restore Codex's previous native route?",
-      detail: "MCP, tunnel credentials, runtime setup, unrelated Codex settings, and the ChatGPT login profile are preserved. Restart Codex once after restoring.",
+      detail: "The local runtime will be stopped. MCP, tunnel credentials, runtime setup, unrelated Codex settings, and the ChatGPT login profile are preserved. Restart Codex once after restoring.",
       noLink: true,
     });
     if (confirmation.response !== 1) return { cancelled: true };
+    await stopManagedRuntime({ restoreCodex: false });
     await runtimeHost.restoreNativeCodex();
     const state = stateStore.update(codexRestartPending({
       coreSetupComplete: false,
@@ -996,7 +1089,10 @@ async function start() {
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
-    publish: (record) => send("launcher:log", record),
+    publish: (record) => {
+      send("launcher:log", record);
+      publishTrayActivity(record);
+    },
     threadIndexPath: path.join(CODEX_HOME, "session_index.jsonl"),
   });
   codexUsageUpsellPatcher = new CodexUsageUpsellPatcher({ logger });

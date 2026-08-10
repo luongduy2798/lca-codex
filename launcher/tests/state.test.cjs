@@ -15,7 +15,7 @@ const DEFAULT_EXPECTED = {
   autoStart: false,
   runtimeAutoStart: false,
   bridgeEnabled: true,
-  keepRunningOnClose: false,
+  keepRunningOnClose: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
   browserSmokePassed: false,
@@ -36,7 +36,7 @@ test("launcher state persists manual runtime preferences atomically", () => {
     assert.deepEqual(store.read(), DEFAULT_EXPECTED);
     store.update({
       runtimeAutoStart: true,
-      keepRunningOnClose: true,
+      keepRunningOnClose: false,
       hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -45,7 +45,7 @@ test("launcher state persists manual runtime preferences atomically", () => {
     assert.deepEqual(createStateStore(file).read(), {
       ...DEFAULT_EXPECTED,
       runtimeAutoStart: true,
-      keepRunningOnClose: true,
+      keepRunningOnClose: false,
       hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -96,7 +96,7 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
   }
 });
 
-test("legacy background lifecycle preferences migrate to manual-first defaults", () => {
+test("legacy lifecycle migration keeps an explicit background-window preference", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-legacy-lifecycle-state-"));
   const file = path.join(root, "state.json");
   try {
@@ -116,7 +116,7 @@ test("legacy background lifecycle preferences migrate to manual-first defaults",
     assert.equal("githubOpened" in state, false);
     assert.equal(state.autoStart, true);
     assert.equal(state.runtimeAutoStart, false);
-    assert.equal(state.keepRunningOnClose, false);
+    assert.equal(state.keepRunningOnClose, true);
     assert.equal(state.showBrowserDuringTurns, false);
     assert.equal(state.connectorName, "My Connector");
   } finally {

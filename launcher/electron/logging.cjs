@@ -7,6 +7,7 @@ const MAX_MEMORY_RECORDS = 300;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
 const MAX_THREAD_TITLE_CHARS = 240;
 const THREAD_TITLE_REFRESH_MS = 1_000;
+const ACTIVITY_STALL_MS = 30_000;
 const LCA_CODEX_ACTIVITY_PREFIX = "[lca-codex-activity] ";
 const LCA_CODEX_HELPER_ACTIVITY_PREFIX = `[lca-codex-helper] ${LCA_CODEX_ACTIVITY_PREFIX}`;
 const LCA_CODEX_ACTIVITY_EVENTS = new Set([
@@ -458,7 +459,7 @@ function summarizeActivityTask(task, now = Date.now()) {
   const stalled = status === undefined
     && sawStart
     && !pendingSources.includes("codex")
-    && now - lastAt >= 30_000;
+    && now - lastAt >= ACTIVITY_STALL_MS;
   const taskStatus = status
     ?? (stalled ? "stalled" : pendingTools.size > 0 || phase === "waiting" ? "waiting" : "running");
 
@@ -727,6 +728,7 @@ function registerLoggedIpc(ipcMain, logger, channel, handler) {
 }
 
 module.exports = {
+  ACTIVITY_STALL_MS,
   createLogger,
   installProcessDiagnosticGuards,
   parseLcaCodexActivity,

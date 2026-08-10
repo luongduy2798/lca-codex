@@ -778,6 +778,8 @@ function SetupSurface({
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
   });
+  const codexRouteActive = snapshot.state.coreSetupComplete === true
+    && snapshot.state.bridgeEnabled === true;
   return (
     <ContentSurface
       eyebrow={copy.required}
@@ -809,10 +811,10 @@ function SetupSurface({
           title={copy.stepSmoke}
         />
         <SetupRow
-          action={snapshot.state.coreSetupComplete
+          action={codexRouteActive
             ? copy.installed
             : activeAction === "install" ? copy.installingModels : copy.install}
-          complete={snapshot.state.coreSetupComplete === true}
+          complete={codexRouteActive}
           description={copy.stepInstallBody}
           disabled={busy || !snapshot.smokePassed}
           index={3}
@@ -826,7 +828,7 @@ function SetupSurface({
             : snapshot.state.mcpRuntimeInstalled ? copy.finishMcpSetup : copy.configureMcp}
           complete={snapshot.state.mcpSetupComplete === true}
           description={copy.stepMcpBody}
-          disabled={busy || snapshot.state.coreSetupComplete !== true}
+          disabled={busy || !codexRouteActive}
           index={4}
           onAction={showMcp}
           title={copy.stepMcp}
@@ -1109,7 +1111,7 @@ function CodexConfigSurface({
           </div>
           <div className="config-detail-list">
             <div><span>{copy.configPath}</span><code>{config?.configPath ?? "~/.codex/config.toml"}</code></div>
-            <div><span>{copy.route}</span><code>{config?.routeUrl ?? copy.previousRoute}</code></div>
+            <div><span>{copy.route}</span><code>{config?.active ? config.routeUrl ?? copy.previousRoute : copy.previousRoute}</code></div>
           </div>
           {config?.errors.length ? (
             <NoticeRow icon="alert" tone="warning">{config.errors.join("; ")}</NoticeRow>

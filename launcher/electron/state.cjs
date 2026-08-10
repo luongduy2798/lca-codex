@@ -9,7 +9,7 @@ const DEFAULT_STATE = Object.freeze({
   autoStart: false,
   runtimeAutoStart: false,
   bridgeEnabled: true,
-  keepRunningOnClose: false,
+  keepRunningOnClose: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
   browserSmokePassed: false,
@@ -37,10 +37,9 @@ function readState(filePath) {
     delete state.onboardingComplete;
     delete state.githubOpened;
     if (legacyRuntimeLifecycle) {
-      // Older releases defaulted to a background-service UX. Migrate once to the new
-      // manual-first lifecycle so closing an upgraded launcher does not silently keep it alive.
+      // Keep runtime startup manual while preserving any explicit background-window choice.
+      // If the old state never stored that choice, the current default remains enabled.
       state.runtimeAutoStart = false;
-      state.keepRunningOnClose = false;
     }
     for (const key of [
       "autoStart",
