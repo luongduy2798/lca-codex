@@ -15,6 +15,20 @@ import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey,
 import { estimateLcaCodexUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
+export const LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT = "LCA_CODEX_NATIVE_TOOL_HEALTH_PROBE_V1";
+
+function messageText(content: string | CodexContentPart[]): string {
+  return typeof content === "string"
+    ? content
+    : content.filter(part => part.type === "text").map(part => part.text).join("\n");
+}
+
+export function isLcaCodexToolHealthProbe(parsed: CodexParsedRequest): boolean {
+  const latestUser = parsed.context.messages.findLast(message => message.role === "user");
+  return latestUser !== undefined
+    && messageText(latestUser.content).trim() === LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT;
+}
+
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.lcaCodex?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
@@ -196,6 +210,39 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
+    if (mode.localTools && isLcaCodexToolHealthProbe(parsed)) {
+      if (!environment) throw new Error("Codex native-tool health probe requires a trusted Codex environment");
+      const probeBrowser = deferred<string>();
+      let cancelled = false;
+      let activeToken: string | undefined;
+      const token = broker.register(
+        environment,
+        timeoutMs === undefined ? 60_000 : Math.min(timeoutMs + 60_000, 120_000),
+        `health-${traceId}`,
+      ).then(turnToken => {
+        if (cancelled) {
+          broker.revoke(turnToken);
+          throw abortError();
+        }
+        activeToken = turnToken;
+        return turnToken;
+      });
+      return {
+        mode: "tools",
+        attempt,
+        startedAt,
+        token,
+        browser: probeBrowser.promise,
+        trace,
+        text,
+        cancel: () => {
+          if (cancelled) return;
+          cancelled = true;
+          if (activeToken) broker.revoke(activeToken);
+          probeBrowser.reject(abortError());
+        },
+      };
+    }
     if (!mode.localTools) {
       const browser = worker.run({
         traceId,

@@ -322,6 +322,8 @@ function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
 async function startManagedRuntime({ logger, stateStore }) {
   let runtimeStarted = false;
   try {
+    runtimeHost.resetCodexToolHealth();
+    send("launcher:codex-tool-health-state", runtimeHost.codexToolHealthSnapshot());
     const before = await runtimeSupervisor.observeRuntime();
     if (before.lifecycle === "foreign") {
       throw new Error(before.detail || "The configured Responses port is owned by another process");
@@ -342,6 +344,8 @@ async function startManagedRuntime({ logger, stateStore }) {
       const bridge = await runtimeHost.activateRuntimeBridge();
       updateRuntimeBridgeState(bridge, stateStore);
       startCatalogVerificationMonitor({ logger, stateStore });
+      const toolHealth = await runtimeHost.checkCodexTools();
+      send("launcher:codex-tool-health-state", toolHealth);
     }
     return status;
   } catch (error) {
@@ -366,6 +370,7 @@ async function startManagedRuntime({ logger, stateStore }) {
 }
 
 async function stopManagedRuntime({ logger, stateStore, restoreCodex = true } = {}) {
+  runtimeHost?.stopCodexToolHealthProbe();
   browserHost?.abortAllTurns();
   stopCatalogVerificationMonitor();
   try {
@@ -705,6 +710,12 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:doctor", () => runtimeHost.doctor());
   handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
+  handle("launcher:codex-tool-health", () => runtimeHost.codexToolHealthSnapshot());
+  handle("launcher:codex-tool-health-check", async () => {
+    const report = await runtimeHost.checkCodexTools();
+    send("launcher:codex-tool-health-state", report);
+    return report;
+  });
   handle("launcher:vscode-advanced-config", () => runtimeHost.vscodeAdvancedSnapshot());
   handle("launcher:vscode-advanced-setup", async () => {
     const configured = runtimeHost.setupVsCodeAdvanced();

@@ -9,7 +9,11 @@ import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePa
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
 import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
-import { createLcaCodexAdapter } from "../src/adapters/lca-codex/index";
+import {
+  createLcaCodexAdapter,
+  isLcaCodexToolHealthProbe,
+  LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT,
+} from "../src/adapters/lca-codex/index";
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/lca-codex/markdown";
 import { LCA_CODEX_MODEL_ID, resolveLcaCodexModelMode } from "../src/adapters/lca-codex/model";
 import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/lca-codex/prompt";
@@ -247,6 +251,89 @@ describe("ChatGPT outer-native harness v3", () => {
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("launcher native-tool health probe creates its own broker wait without starting ChatGPT", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-health-probe-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "lca-codex",
+      baseUrl: "browser://chatgpt-health-probe-test",
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+      browserStarts += 1;
+      throw new Error("health probe must not start ChatGPT");
+    };
+    const request = rawWireRequest(environmentXml);
+    request.context.tools = tools.filter(tool => tool.name !== "exec");
+    request.context.messages = [{ role: "user", content: LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT, timestamp: 2 }];
+    const raw = request._rawBody as { input: Array<Record<string, unknown>> };
+    raw.input.at(-1)!.content = [{ type: "input_text", text: LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT }];
+    expect(isLcaCodexToolHealthProbe(request)).toBe(true);
+
+    const adapter = createLcaCodexAdapter(provider);
+    const firstEvents: AdapterEvent[] = [];
+    const firstTurn = adapter.runTurn!(request, { headers: new Headers() }, event => firstEvents.push(event));
+    await Bun.sleep(10);
+    const health = callTurnBroker<{
+      activeTurn: boolean;
+      live: boolean;
+      tools: Array<{ name: string; status: string }>;
+    }>(socketPath, { method: "health_check" }, 30_000);
+
+    try {
+      await firstTurn;
+      const execCall = firstEvents.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
+      expect(execCall?.name).toBe("exec_command");
+
+      const secondRequest = structuredClone(request);
+      secondRequest.context.messages.push({
+        role: "toolResult",
+        toolCallId: execCall!.id,
+        toolName: "exec_command",
+        content: JSON.stringify({ session_id: 37 }),
+        isError: false,
+        timestamp: 3,
+      });
+      const secondEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(secondRequest, { headers: new Headers() }, event => secondEvents.push(event));
+      const stdinCall = secondEvents.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
+      expect(stdinCall?.name).toBe("write_stdin");
+
+      const thirdRequest = structuredClone(secondRequest);
+      thirdRequest.context.messages.push({
+        role: "toolResult",
+        toolCallId: stdinCall!.id,
+        toolName: "write_stdin",
+        content: JSON.stringify({ output: "LCA_CODEX_TOOL_CHECK_STDIN" }),
+        isError: false,
+        timestamp: 4,
+      });
+      const abort = new AbortController();
+      const thirdTurn = adapter.runTurn!(
+        thirdRequest,
+        { headers: new Headers(), abortSignal: abort.signal },
+        () => {},
+      );
+      const report = await health;
+      expect(report.activeTurn).toBe(true);
+      expect(report.live).toBe(true);
+      expect(report.tools.map(tool => [tool.name, tool.status])).toEqual([
+        ["exec_command", "working"],
+        ["write_stdin", "working"],
+        ["apply_patch", "available"],
+        ["view_image", "available"],
+      ]);
+      expect(browserStarts).toBe(0);
+      abort.abort();
+      await expect(thirdTurn).rejects.toThrow();
+    } finally {
+      (worker as unknown as { run: typeof worker.run }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close().catch(() => {});
     }
   });
 

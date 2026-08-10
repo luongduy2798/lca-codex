@@ -122,6 +122,22 @@ export interface CodexConfigSnapshot {
   errors: string[];
 }
 
+export type CodexToolHealthStatus = "working" | "available" | "failed" | "missing" | "unknown";
+
+export interface CodexToolHealthItem {
+  name: "exec_command" | "write_stdin" | "apply_patch" | "view_image";
+  status: CodexToolHealthStatus;
+  detail: string;
+}
+
+export interface CodexToolHealthReport {
+  checkedAt: string | null;
+  activeTurn: boolean;
+  live: boolean;
+  traceId: string | null;
+  tools: CodexToolHealthItem[];
+}
+
 export interface CodexUsageUpsellStatus {
   state: "not-found" | "unsupported" | "available" | "applied" | "error";
   version: string | null;
@@ -178,6 +194,8 @@ export interface LauncherApi {
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
   codexConfig(): Promise<CodexConfigSnapshot>;
+  codexToolHealth(): Promise<CodexToolHealthReport>;
+  checkCodexTools(): Promise<CodexToolHealthReport>;
   vscodeAdvancedConfig(): Promise<VsCodeAdvancedSnapshot>;
   setupVsCodeAdvanced(): Promise<VsCodeAdvancedSnapshot>;
   installVsCodeAdvancedProxy(): Promise<VsCodeAdvancedSnapshot>;
@@ -205,6 +223,7 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onRuntimeState(listener: (state: RuntimeStatus) => void): () => void;
+  onCodexToolHealthState(listener: (state: CodexToolHealthReport) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;

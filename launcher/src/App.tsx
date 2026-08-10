@@ -13,6 +13,8 @@ import { Icon, type IconName } from "./icons";
 import type {
   BrowserState,
   CodexConfigSnapshot,
+  CodexToolHealthReport,
+  CodexToolHealthStatus,
   DoctorReport,
   LauncherSnapshot,
   LauncherState,
@@ -920,10 +922,11 @@ function CodexConfigSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [config, setConfig] = useState<CodexConfigSnapshot | null>(null);
+  const [toolHealth, setToolHealth] = useState<CodexToolHealthReport | null>(null);
   const [manualContent, setManualContent] = useState("");
   const [manualDirty, setManualDirty] = useState(false);
   const [mode, setMode] = useState<"automatic" | "manual">("automatic");
-  const [subview, setSubview] = useState<"config" | "vscode-advanced">("config");
+  const [subview, setSubview] = useState<"config" | "codex-tools" | "vscode-advanced">("config");
   const [advancedConfig, setAdvancedConfig] = useState<VsCodeAdvancedSnapshot | null>(null);
   const [activeAction, setActiveAction] = useState<"install" | "restore" | "refresh" | "save" | null>(null);
   const busy = activeAction !== null || operation?.status === "running";
@@ -955,18 +958,21 @@ function CodexConfigSurface({
   useEffect(() => {
     if (operation?.status === "running") return;
     let cancelled = false;
-    void Promise.all([api!.codexConfig(), api!.vscodeAdvancedConfig()]).then(([next, advanced]) => {
+    void Promise.all([api!.codexConfig(), api!.vscodeAdvancedConfig(), api!.codexToolHealth()]).then(([next, advanced, health]) => {
       if (!cancelled) {
         setConfig(next);
         setManualContent(next.content);
         setManualDirty(false);
         setAdvancedConfig(advanced);
+        setToolHealth(health);
       }
     }).catch((cause) => {
       if (!cancelled) setError(messageOf(cause));
     });
     return () => { cancelled = true; };
   }, [operation?.status, setError]);
+
+  useEffect(() => api!.onCodexToolHealthState(setToolHealth), []);
 
   const run = async (name: "install" | "restore", action: () => Promise<void>) => {
     if (busy) return;
@@ -1038,6 +1044,21 @@ function CodexConfigSurface({
         : advancedConfig?.state === "inconsistent"
           ? copy.vscodeAdvancedNeedsRepair
           : copy.vscodeAdvancedNotInstalled;
+  const toolHealthStatusLabel = codexToolHealthSummary(copy, toolHealth);
+
+  if (subview === "codex-tools") {
+    return (
+      <CodexToolHealthSurface
+        copy={copy}
+        initialHealth={toolHealth}
+        onBack={() => setSubview("config")}
+        onHealthChange={setToolHealth}
+        operation={operation}
+        runtime={snapshot.runtime}
+        setError={setError}
+      />
+    );
+  }
 
   if (subview === "vscode-advanced") {
     return (
@@ -1127,6 +1148,17 @@ function CodexConfigSurface({
         </div>
       )}
 
+      <SectionHeading label={copy.codexToolHealthSection} meta={copy.automatic} spaced />
+      <button className="next-surface-row" onClick={() => setSubview("codex-tools")} type="button">
+        <Icon name="activity" />
+        <span>
+          <strong>{copy.codexToolHealthTitle}</strong>
+          <small>{copy.codexToolHealthSubtitle}</small>
+        </span>
+        <em>{toolHealthStatusLabel}</em>
+        <Icon name="chevron" />
+      </button>
+
       <SectionHeading label={copy.vscodeAdvancedSection} meta={copy.optional} spaced />
       <button className="next-surface-row" onClick={() => setSubview("vscode-advanced")} type="button">
         <Icon name="setup" />
@@ -1137,6 +1169,129 @@ function CodexConfigSurface({
         <em>{advancedStatusLabel}</em>
         <Icon name="chevron" />
       </button>
+    </ContentSurface>
+  );
+}
+
+function codexToolHealthSummary(copy: Copy, report: CodexToolHealthReport | null): string {
+  if (!report?.checkedAt) return copy.codexToolHealthNotChecked;
+  if (report.tools.some((tool) => tool.status === "failed" || tool.status === "missing")) return copy.codexToolHealthIssues;
+  if (report.tools.every((tool) => tool.status === "working" || tool.status === "available")) return copy.codexToolHealthHealthy;
+  return copy.codexToolUnknown;
+}
+
+function codexToolHealthStatusLabel(copy: Copy, status: CodexToolHealthStatus): string {
+  if (status === "working") return copy.codexToolWorking;
+  if (status === "available") return copy.codexToolAvailable;
+  if (status === "failed") return copy.codexToolFailed;
+  if (status === "missing") return copy.codexToolMissing;
+  return copy.codexToolUnknown;
+}
+
+function CodexToolHealthSurface({
+  copy,
+  initialHealth,
+  onBack,
+  onHealthChange,
+  operation,
+  runtime,
+  setError,
+}: {
+  copy: Copy;
+  initialHealth: CodexToolHealthReport | null;
+  onBack: () => void;
+  onHealthChange: (health: CodexToolHealthReport) => void;
+  operation: OperationState | null;
+  runtime: RuntimeStatus;
+  setError: (error: string | null) => void;
+}) {
+  const [health, setHealth] = useState<CodexToolHealthReport | null>(initialHealth);
+  const [checking, setChecking] = useState(false);
+  const busy = checking || operation?.status === "running";
+  const runtimeReady = runtime.lifecycle === "ready";
+
+  const updateHealth = useCallback((next: CodexToolHealthReport) => {
+    setHealth(next);
+    onHealthChange(next);
+  }, [onHealthChange]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api!.codexToolHealth().then((next) => {
+      if (!cancelled) updateHealth(next);
+    }).catch((cause) => {
+      if (!cancelled) setError(messageOf(cause));
+    });
+    const unsubscribe = api!.onCodexToolHealthState((next) => {
+      if (!cancelled) updateHealth(next);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [setError, updateHealth]);
+
+  const check = async () => {
+    if (busy || !runtimeReady) return;
+    setChecking(true);
+    setError(null);
+    try {
+      updateHealth(await api!.checkCodexTools());
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const summary = codexToolHealthSummary(copy, health);
+  const summaryState = summary === copy.codexToolHealthHealthy
+    ? "ready"
+    : summary === copy.codexToolHealthIssues
+      ? "error"
+      : "busy";
+
+  return (
+    <ContentSurface narrow subtitle={copy.codexToolHealthSubtitle} title={copy.codexToolHealthTitle}>
+      <button className="text-button nested-surface-back" onClick={onBack} type="button">
+        <Icon name="back" />
+        {copy.codexConfig}
+      </button>
+      <div className="codex-config-panel">
+        <div className="config-status-card">
+          <div>
+            <span>{copy.status}</span>
+            <strong>{summary}</strong>
+          </div>
+          <StateDot state={summaryState} />
+        </div>
+        <p className="config-explainer">{copy.codexToolHealthBody}</p>
+        <div className="codex-tool-health-card">
+          <header>
+            <div>
+              <strong>{copy.codexToolHealthTitle}</strong>
+              <span>
+                {health?.checkedAt
+                  ? `${copy.codexToolHealthLastChecked}: ${new Date(health.checkedAt).toLocaleString()}`
+                  : copy.codexToolHealthNotChecked}
+              </span>
+            </div>
+            <SecondaryButton disabled={busy || !runtimeReady} loading={checking} onClick={() => void check()}>
+              {checking ? copy.checkingCodexTools : copy.checkCodexTools}
+            </SecondaryButton>
+          </header>
+          <div className="codex-tool-health-list">
+            {health?.tools.map((tool) => (
+              <div className="codex-tool-health-row" key={tool.name}>
+                <code>{tool.name}</code>
+                <span className={`codex-tool-health-status is-${tool.status}`}>{codexToolHealthStatusLabel(copy, tool.status)}</span>
+                <small>{tool.detail}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+        {!runtimeReady ? <NoticeRow icon="alert" tone="warning">{copy.codexToolHealthRuntimeRequired}</NoticeRow> : null}
+      </div>
     </ContentSurface>
   );
 }

@@ -263,6 +263,178 @@ test("turn broker serves immutable context in order, replays the last chunk, and
   }
 });
 
+test("turn broker health check exercises direct command and stdin tools without touching patch or image tools", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-health-direct-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [
+        { name: "exec_command", description: "Run command", parameters: { type: "object" } },
+        { name: "write_stdin", description: "Write stdin", parameters: { type: "object" } },
+        { name: "apply_patch", description: "Patch", parameters: {}, freeform: true },
+        { name: "view_image", description: "View image", parameters: { type: "object" } },
+      ],
+    }, 10_000, "health-direct");
+
+    const firstBatch = broker.nextToolBatch(token);
+    const reportPromise = callTurnBroker<{
+      activeTurn: boolean;
+      live: boolean;
+      tools: Array<{ name: string; status: string; detail: string }>;
+    }>(socketPath, { method: "health_check" });
+    const [execRequest] = await firstBatch;
+    expect(execRequest).toMatchObject({ wireName: "exec_command", freeform: false });
+    broker.completeTool(token, execRequest!.callId, {
+      content: [{ type: "text", text: JSON.stringify({ session_id: 17 }) }],
+      structuredContent: { session_id: 17 },
+    });
+
+    const [stdinRequest] = await broker.nextToolBatch(token);
+    expect(stdinRequest).toMatchObject({ wireName: "write_stdin", freeform: false });
+    expect(stdinRequest?.arguments).toMatchObject({ session_id: 17, chars: "LCA_CODEX_TOOL_CHECK_STDIN\n" });
+    broker.completeTool(token, stdinRequest!.callId, {
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: { output: "ok" },
+    });
+
+    const report = await reportPromise;
+    expect(report.activeTurn).toBe(true);
+    expect(report.live).toBe(true);
+    expect(report.tools.find(tool => tool.name === "exec_command")?.status).toBe("working");
+    expect(report.tools.find(tool => tool.name === "write_stdin")?.status).toBe("working");
+    expect(report.tools.find(tool => tool.name === "apply_patch")).toMatchObject({ status: "available" });
+    expect(report.tools.find(tool => tool.name === "view_image")).toMatchObject({ status: "available" });
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn broker health check discovers nested native routes through the exec gateway", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-health-gateway-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [{ name: "exec", description: "Run nested Codex tools", parameters: {}, freeform: true }],
+    }, 10_000, "health-gateway");
+
+    const registryBatch = broker.nextToolBatch(token);
+    const reportPromise = callTurnBroker<{
+      activeTurn: boolean;
+      live: boolean;
+      tools: Array<{ name: string; status: string; detail: string }>;
+    }>(socketPath, { method: "health_check" });
+    const [registryRequest] = await registryBatch;
+    expect(registryRequest).toMatchObject({ wireName: "exec", freeform: true });
+    expect(registryRequest?.input).toContain("LCA_CODEX_TOOL_HEALTH_ROUTES:");
+    broker.completeTool(token, registryRequest!.callId, {
+      content: [{
+        type: "text",
+        text: "Script completed\nOutput:\nLCA_CODEX_TOOL_HEALTH_ROUTES:{\"exec_command\":true,\"shell_command\":false,\"write_stdin\":true,\"apply_patch\":true,\"view_image\":true}\n",
+      }],
+    });
+
+    const [execRequest] = await broker.nextToolBatch(token);
+    expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
+    expect(execRequest?.input).toContain('tools["exec_command"]');
+    broker.completeTool(token, execRequest!.callId, {
+      content: [{ type: "text", text: JSON.stringify({ session_id: 23 }) }],
+    });
+
+    const [stdinRequest] = await broker.nextToolBatch(token);
+    expect(stdinRequest).toMatchObject({ wireName: "exec", freeform: true });
+    expect(stdinRequest?.input).toContain('tools["write_stdin"]');
+    broker.completeTool(token, stdinRequest!.callId, {
+      content: [{ type: "text", text: "ok" }],
+    });
+
+    const report = await reportPromise;
+    expect(report.activeTurn).toBe(true);
+    expect(report.live).toBe(true);
+    expect(report.tools.map(tool => [tool.name, tool.status])).toEqual([
+      ["exec_command", "working"],
+      ["write_stdin", "working"],
+      ["apply_patch", "available"],
+      ["view_image", "available"],
+    ]);
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn broker health check keeps advertised native routes visible between and after Codex tool rounds", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-health-idle-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [{
+        name: "exec",
+        description: [
+          "Run nested Codex tools",
+          "### `exec_command`",
+          "declare const tools: { exec_command(args: object): Promise<unknown>; };",
+          "### `write_stdin`",
+          "declare const tools: { write_stdin(args: object): Promise<unknown>; };",
+          "### `apply_patch`",
+          "declare const tools: { apply_patch(input: string): Promise<unknown>; };",
+          "### `view_image`",
+          "declare const tools: { view_image(args: object): Promise<unknown>; };",
+        ].join("\n"),
+        parameters: {},
+        freeform: true,
+      }],
+    }, 10_000, "health-idle");
+    const registered = await callTurnBroker<{
+      activeTurn: boolean;
+      live: boolean;
+      traceId: string | null;
+      tools: Array<{ name: string; status: string; detail: string }>;
+    }>(socketPath, { method: "health_check" });
+    expect(registered.activeTurn).toBe(true);
+    expect(registered.live).toBe(false);
+    expect(registered.traceId).toBe("health-idle");
+    expect(registered.tools.map(tool => [tool.name, tool.status])).toEqual([
+      ["exec_command", "available"],
+      ["write_stdin", "available"],
+      ["apply_patch", "available"],
+      ["view_image", "available"],
+    ]);
+    expect(registered.tools[0]?.detail).toContain("Live smoke test will run when this turn is waiting");
+
+    broker.revoke(token);
+    const retired = await callTurnBroker<{
+      activeTurn: boolean;
+      live: boolean;
+      traceId: string | null;
+      tools: Array<{ status: string; detail: string }>;
+    }>(socketPath, { method: "health_check" });
+    expect(retired.activeTurn).toBe(false);
+    expect(retired.live).toBe(false);
+    expect(retired.traceId).toBe("health-idle");
+    expect(retired.tools.every(tool => tool.status === "available")).toBe(true);
+    expect(retired.tools[0]?.detail).toContain("most recently observed Codex turn");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("turn broker tokens do not expire while their browser turn is still alive", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-unbounded-"));
   const socketPath = defaultBrokerEndpoint(root);

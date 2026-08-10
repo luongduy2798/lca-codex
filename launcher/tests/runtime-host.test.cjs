@@ -3,7 +3,22 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { RuntimeHost } = require("../electron/runtime.cjs");
+const {
+  RuntimeHost,
+  CODEX_TOOL_HEALTH_PROBE_PROMPT,
+  codexToolHealthProbeArgs,
+} = require("../electron/runtime.cjs");
+
+test("Codex tool health probe passes approval policy before the exec subcommand", () => {
+  const args = codexToolHealthProbeArgs("/tmp/lca-codex-tool-probe");
+  assert.deepEqual(args.slice(0, 3), ["--ask-for-approval", "never", "exec"]);
+  assert.equal(args.includes("--ephemeral"), true);
+  assert.equal(args.at(-1), CODEX_TOOL_HEALTH_PROBE_PROMPT);
+  assert.deepEqual(args.slice(args.indexOf("--cd"), args.indexOf("--cd") + 2), [
+    "--cd",
+    "/tmp/lca-codex-tool-probe",
+  ]);
+});
 
 function hostFor(existingConfig) {
   const host = new RuntimeHost({

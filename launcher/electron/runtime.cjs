@@ -1,12 +1,14 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const net = require("node:net");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { findCodexExecutable } = require("./codex-cli-proxy.cjs");
 const {
   bridgeStatus: vscodeAdvancedStatus,
   removeBridge: removeVsCodeAdvanced,
@@ -22,6 +24,107 @@ const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
+const CODEX_TOOL_HEALTH_TIMEOUT_MS = 90_000;
+const CODEX_TOOL_PROBE_TIMEOUT_MS = 45_000;
+const CODEX_TOOL_PROBE_POLL_MS = 150;
+const CODEX_TOOL_HEALTH_NAMES = ["exec_command", "write_stdin", "apply_patch", "view_image"];
+const CODEX_TOOL_HEALTH_PROBE_PROMPT = "LCA_CODEX_NATIVE_TOOL_HEALTH_PROBE_V1";
+
+function codexToolHealthFallback(detail, checkedAt = null) {
+  return {
+    checkedAt,
+    activeTurn: false,
+    live: false,
+    traceId: null,
+    tools: CODEX_TOOL_HEALTH_NAMES.map((name) => ({ name, status: "unknown", detail })),
+  };
+}
+
+function validateCodexToolHealthReport(value) {
+  if (!value || typeof value !== "object") throw new Error("Codex tool health response is invalid");
+  if (typeof value.checkedAt !== "string" || Number.isNaN(Date.parse(value.checkedAt))) {
+    throw new Error("Codex tool health response has an invalid timestamp");
+  }
+  if (typeof value.activeTurn !== "boolean") throw new Error("Codex tool health response is missing activeTurn");
+  if (typeof value.live !== "boolean") throw new Error("Codex tool health response is missing live status");
+  if (value.traceId !== null && typeof value.traceId !== "string") throw new Error("Codex tool health response has an invalid traceId");
+  if (!Array.isArray(value.tools) || value.tools.length !== CODEX_TOOL_HEALTH_NAMES.length) {
+    throw new Error("Codex tool health response is missing tool results");
+  }
+  const statuses = new Set(["working", "available", "failed", "missing", "unknown"]);
+  for (const name of CODEX_TOOL_HEALTH_NAMES) {
+    const item = value.tools.find((candidate) => candidate?.name === name);
+    if (!item || !statuses.has(item.status) || typeof item.detail !== "string") {
+      throw new Error(`Codex tool health response is invalid for ${name}`);
+    }
+  }
+  return value;
+}
+
+function requestCodexToolHealth(socketPath, timeoutMs = CODEX_TOOL_HEALTH_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const id = `health_${randomBytes(18).toString("base64url")}`;
+    const socket = net.createConnection(socketPath);
+    let buffered = "";
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(new Error("Codex tool health check timed out")), timeoutMs);
+    socket.setEncoding("utf8");
+    socket.once("error", (error) => finish(error));
+    socket.once("connect", () => socket.write(`${JSON.stringify({ id, method: "health_check" })}\n`));
+    socket.on("data", (chunk) => {
+      buffered += chunk;
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) return;
+      let response;
+      try {
+        response = JSON.parse(buffered.slice(0, newline));
+      } catch {
+        finish(new Error("Codex tool health broker returned invalid JSON"));
+        return;
+      }
+      if (response?.id !== id) {
+        finish(new Error("Codex tool health broker returned a mismatched response"));
+        return;
+      }
+      if (typeof response.error === "string" && response.error) {
+        finish(new Error(response.error));
+        return;
+      }
+      try {
+        finish(null, validateCodexToolHealthReport(response.result));
+      } catch (error) {
+        finish(error);
+      }
+    });
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function codexToolHealthProbeArgs(probeDir) {
+  return [
+    "--ask-for-approval", "never",
+    "exec",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--color", "never",
+    "--sandbox", "workspace-write",
+    "--cd", probeDir,
+    "--model", "lca-codex",
+    "--config", 'model_reasoning_effort="low"',
+    CODEX_TOOL_HEALTH_PROBE_PROMPT,
+  ];
+}
 
 function collect(stream, chunks, onLine, onError) {
   let buffered = "";
@@ -161,6 +264,9 @@ class RuntimeHost {
     this.active = null;
     this.activeChild = null;
     this.lifecycleOperation = null;
+    this.codexToolHealthReport = null;
+    this.codexToolHealthCheckInFlight = null;
+    this.codexToolProbeChild = null;
     this.cleanupEphemeralSecrets();
   }
 
@@ -663,6 +769,124 @@ class RuntimeHost {
     }
   }
 
+  codexToolHealthSnapshot() {
+    return structuredClone(this.codexToolHealthReport || codexToolHealthFallback("Not checked yet"));
+  }
+
+  resetCodexToolHealth() {
+    this.codexToolHealthReport = null;
+  }
+
+  stopCodexToolHealthProbe(child = this.codexToolProbeChild) {
+    if (!child) return;
+    if (this.codexToolProbeChild === child) this.codexToolProbeChild = null;
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      terminateOwnedProcessTree(child);
+    } catch (error) {
+      this.logger.warn("codex.tool_health_probe_stop_failed", {
+        message: redactText(error instanceof Error ? error.message : String(error)),
+      });
+    }
+  }
+
+  startCodexToolHealthProbe(config) {
+    if (config.mode !== "full") {
+      throw new Error("Codex native tools require the Full runtime mode");
+    }
+    const probeDir = path.join(this.coreHome, "runtime", "codex-tool-health-probe");
+    fs.mkdirSync(probeDir, { recursive: true, mode: 0o700 });
+    const executable = findCodexExecutable({ env: process.env });
+    const child = spawn(executable, codexToolHealthProbeArgs(probeDir), {
+      cwd: probeDir,
+      detached: DETACH_OWNED_CHILD,
+      env: {
+        ...process.env,
+        CODEX_HOME: this.codexHome,
+        LCA_CODEX_HOME: this.coreHome,
+        LCA_CODEX_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    this.codexToolProbeChild = child;
+    let stderr = "";
+    let exited = false;
+    let exitDetail = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-8_192);
+    });
+    child.once("error", (error) => {
+      exited = true;
+      exitDetail = error instanceof Error ? error.message : String(error);
+    });
+    child.once("exit", (code, signal) => {
+      exited = true;
+      exitDetail = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
+    });
+    return {
+      child,
+      exited: () => exited,
+      detail: () => redactText([exitDetail, stderr.trim()].filter(Boolean).join(": ")).slice(0, 1_000),
+    };
+  }
+
+  async probeCodexTools(config) {
+    const probe = this.startCodexToolHealthProbe(config);
+    const deadline = Date.now() + CODEX_TOOL_PROBE_TIMEOUT_MS;
+    try {
+      while (Date.now() < deadline) {
+        if (probe.exited()) {
+          throw new Error(`Codex tool health probe stopped before native tools became available${probe.detail() ? `: ${probe.detail()}` : ""}`);
+        }
+        const remaining = Math.max(1_000, deadline - Date.now());
+        const report = await requestCodexToolHealth(config.brokerSocketPath, Math.min(CODEX_TOOL_HEALTH_TIMEOUT_MS, remaining));
+        if (report.live) return report;
+        await sleep(CODEX_TOOL_PROBE_POLL_MS);
+      }
+      throw new Error("Codex tool health probe timed out before a live native tool wait was available");
+    } finally {
+      this.stopCodexToolHealthProbe(probe.child);
+    }
+  }
+
+  async performCodexToolHealthCheck() {
+    const config = this.runtimeConfigSnapshot().config;
+    if (!config || typeof config.brokerSocketPath !== "string" || !config.brokerSocketPath.trim()) {
+      return codexToolHealthFallback("LCA Codex runtime is not configured", new Date().toISOString());
+    }
+    if (config.mode !== "full") {
+      return codexToolHealthFallback("Codex native tools require the Full runtime mode", new Date().toISOString());
+    }
+    const current = await requestCodexToolHealth(config.brokerSocketPath);
+    return current.live ? current : this.probeCodexTools(config);
+  }
+
+  async checkCodexTools() {
+    if (this.codexToolHealthCheckInFlight) {
+      return structuredClone(await this.codexToolHealthCheckInFlight);
+    }
+    const check = (async () => {
+      try {
+        return await this.performCodexToolHealthCheck();
+      } catch (error) {
+        return codexToolHealthFallback(
+          redactText(error instanceof Error ? error.message : String(error)),
+          new Date().toISOString(),
+        );
+      }
+    })();
+    this.codexToolHealthCheckInFlight = check;
+    try {
+      const report = await check;
+      this.codexToolHealthReport = report;
+      return structuredClone(report);
+    } finally {
+      if (this.codexToolHealthCheckInFlight === check) this.codexToolHealthCheckInFlight = null;
+    }
+  }
+
   vscodeAdvancedSnapshot() {
     return vscodeAdvancedStatus({
       coreHome: this.coreHome,
@@ -1116,4 +1340,4 @@ class RuntimeHost {
   }
 }
 
-module.exports = { RuntimeHost };
+module.exports = { RuntimeHost, CODEX_TOOL_HEALTH_PROBE_PROMPT, codexToolHealthProbeArgs };

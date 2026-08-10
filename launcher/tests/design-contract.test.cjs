@@ -184,6 +184,11 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   const end = appSource.indexOf("function VsCodeAdvancedSurface", start);
   const codexConfigSource = appSource.slice(start, end);
   assert.match(codexConfigSource, /api!\.setupCore\(\)/);
+  assert.match(codexConfigSource, /SectionHeading label=\{copy\.codexToolHealthSection\} meta=\{copy\.automatic\} spaced/);
+  assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("codex-tools"\)/);
+  assert.match(codexConfigSource, /function CodexToolHealthSurface[\s\S]*?api!\.checkCodexTools\(\)/);
+  assert.match(codexConfigSource, /api!\.onCodexToolHealthState/);
+  assert.match(electronMain, /runtimeStarted[\s\S]*?runtimeHost\.checkCodexTools\(\)[\s\S]*?launcher:codex-tool-health-state/);
   assert.match(codexConfigSource, /SectionHeading label=\{copy\.vscodeAdvancedSection\} meta=\{copy\.optional\} spaced/);
   assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("vscode-advanced"\)/);
   assert.match(codexConfigSource, /copy\.vscodeAdvancedTitle[\s\S]*?copy\.vscodeAdvancedSubtitle/);
@@ -257,6 +262,28 @@ test("Advanced VS Code setup is nested under Codex Config and offers Automatic a
   assert.match(electronMain, /launcher:vscode-advanced-proxy-install[\s\S]*?runtimeHost\.installVsCodeAdvancedProxy\(\)/);
   assert.doesNotMatch(i18nSource, /JetBrains|client-agnostic/);
   assert.match(i18nSource, /Stop or Quit restores the previous cliExecutable value/i);
+});
+
+test("Codex native tool health is auto-checked on runtime start and nested under Codex Config", () => {
+  const configStart = appSource.indexOf("function CodexConfigSurface");
+  const toolsStart = appSource.indexOf("function CodexToolHealthSurface", configStart);
+  const vscodeStart = appSource.indexOf("function VsCodeAdvancedSurface", toolsStart);
+  const configSource = appSource.slice(configStart, toolsStart);
+  const toolsSource = appSource.slice(toolsStart, vscodeStart);
+
+  assert.ok(configStart >= 0 && toolsStart > configStart && vscodeStart > toolsStart);
+  assert.match(configSource, /setSubview\("codex-tools"\)/);
+  assert.match(configSource, /className="next-surface-row"[\s\S]*?copy\.codexToolHealthTitle[\s\S]*?copy\.codexToolHealthSubtitle/);
+  assert.doesNotMatch(configSource, /className="codex-tool-health-list"/);
+  assert.match(toolsSource, /className="text-button nested-surface-back"[\s\S]*?copy\.codexConfig/);
+  assert.match(toolsSource, /api!\.checkCodexTools\(\)/);
+  assert.match(toolsSource, /className="codex-tool-health-list"/);
+  assert.match(electronMain, /startManagedRuntime[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)[\s\S]*?runtimeHost\.checkCodexTools\(\)/);
+  assert.match(electronMain, /launcher:codex-tool-health-check[\s\S]*?runtimeHost\.checkCodexTools\(\)/);
+  assert.match(preloadSource, /checkCodexTools:[\s\S]*?launcher:codex-tool-health-check/);
+  assert.match(preloadSource, /onCodexToolHealthState:[\s\S]*?launcher:codex-tool-health-state/);
+  assert.match(i18nSource, /Checked automatically whenever the runtime starts/);
+  assert.match(i18nSource, /Starting the runtime runs this same check automatically/);
 });
 
 test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
