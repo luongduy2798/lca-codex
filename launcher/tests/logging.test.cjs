@@ -7,6 +7,7 @@ const { PassThrough } = require("node:stream");
 const {
   createLogger,
   installProcessDiagnosticGuards,
+  parseLcaCodexActivity,
   registerLoggedIpc,
   sanitize,
 } = require("../electron/logging.cjs");
@@ -21,6 +22,38 @@ test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", ()
     authorization: "[redacted]",
     nested: { controlToken: "[redacted]" },
   });
+});
+
+test("LCA Codex activity accepts only known payload-free timing fields", () => {
+  const parsed = parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
+    event: "lca_codex.tool_completed",
+    level: "info",
+    detail: {
+      traceId: "abc123",
+      layer: "codex",
+      tool: "mcp__files__read",
+      durationMs: 1_250,
+      status: "completed",
+      prompt: "must not be logged",
+      arguments: { path: "/private/file" },
+      output: "must not be logged",
+    },
+  })}`);
+
+  assert.deepEqual(parsed, {
+    event: "lca_codex.tool_completed",
+    level: "info",
+    detail: {
+      traceId: "abc123",
+      layer: "codex",
+      tool: "mcp__files__read",
+      durationMs: 1_250,
+      status: "completed",
+    },
+  });
+  assert.equal(parseLcaCodexActivity(
+    '[lca-codex-activity] {"event":"lca_codex.unknown","level":"info","detail":{}}',
+  ), null);
 });
 
 test("failed launcher IPC calls are written to runtime activity", async () => {

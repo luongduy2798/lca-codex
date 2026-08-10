@@ -240,7 +240,7 @@ test("Advanced VS Code setup is nested under Codex Config and offers Automatic a
   assert.match(preloadSource, /setupVsCodeAdvanced:[\s\S]*?launcher:vscode-advanced-setup/);
   assert.match(electronMain, /launcher:vscode-advanced-proxy-install[\s\S]*?runtimeHost\.installVsCodeAdvancedProxy\(\)/);
   assert.doesNotMatch(i18nSource, /JetBrains|client-agnostic/);
-  assert.match(i18nSource, /normal next-prompt cleanup remains active without it/i);
+  assert.match(i18nSource, /Stop or Quit restores the previous cliExecutable value/i);
 });
 
 test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
@@ -256,14 +256,20 @@ test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
   assert.match(i18nSource, /official extension remains updateable through VS Code/);
 });
 
-test("settings expose a persistent fail-closed Codex bridge switch", () => {
-  assert.match(appSource, /api!\.setBridgeEnabled\(enabled\)/);
-  assert.match(appSource, /body=\{copy\.bridgeRouteBody\} label=\{copy\.bridgeRoute\}/);
-  assert.match(styles, /\.action-dot\.is-success\s*\{[^}]*background:\s*var\(--green-300\)/s);
-  assert.match(styles, /\.action-dot\.is-error\s*\{[^}]*background:\s*var\(--red-300\)/s);
-  assert.match(electronMain, /runtimeHost\.setBridgeEnabled\(enabled === true\)/);
+test("runtime lifecycle owns the Codex bridge without exposing a separate switch", () => {
+  assert.doesNotMatch(appSource, /api!\.setBridgeEnabled|copy\.bridgeRoute/);
+  assert.doesNotMatch(preloadSource, /launcher:bridge-enabled/);
+  assert.doesNotMatch(i18nSource, /Codex bridge/);
+  assert.match(electronMain, /startManagedRuntime[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
+  assert.match(electronMain, /stopManagedRuntime[\s\S]*?runtimeHost\.deactivateRuntimeBridge\(\)/);
+  assert.match(electronMain, /restartManagedRuntime[\s\S]*?restoreCodex:\s*false/);
+  assert.match(electronMain, /requestQuit[\s\S]*?stopManagedRuntime\(\{\s*logger: loggerForQuit\(\),\s*stateStore: launcherStateStore\s*\}\)/);
+  const stopLifecycle = electronMain.slice(
+    electronMain.indexOf("async function stopManagedRuntime"),
+    electronMain.indexOf("async function restartManagedRuntime"),
+  );
+  assert.doesNotMatch(stopLifecycle, /mcp|connector|credential/i);
   assert.match(electronMain, /function codexRestartPending[\s\S]*?codexRestartRequired:\s*true[\s\S]*?codexRestartRequestedAt:/);
-  assert.match(i18nSource, /Turning it off restores your previous model route without deleting setup or saved credentials/);
 });
 
 test("long-running diagnostics expose action-local progress", () => {

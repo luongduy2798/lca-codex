@@ -339,6 +339,23 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toBe(original);
   });
 
+  test("disconnecting the bridge preserves MCP configuration", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("full"));
+    const mcpConfig = '\n[mcp_servers.saved_connector]\ncommand = "saved-mcp-command"\n';
+    writeFileSync(configPath, `${readFileSync(configPath, "utf8")}${mcpConfig}`);
+
+    deactivateCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toContain("[mcp_servers.saved_connector]");
+    expect(readFileSync(configPath, "utf8")).toContain('command = "saved-mcp-command"');
+
+    activateCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toContain("[mcp_servers.saved_connector]");
+    expect(readFileSync(configPath, "utf8")).toContain('command = "saved-mcp-command"');
+  });
+
   test("keeps a disconnected bridge disabled across process-style journal reloads", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

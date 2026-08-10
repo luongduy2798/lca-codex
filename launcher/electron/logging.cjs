@@ -5,6 +5,37 @@ const { renameAtomicFile } = require("./atomic-file.cjs");
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
+const LCA_CODEX_ACTIVITY_PREFIX = "[lca-codex-activity] ";
+const LCA_CODEX_HELPER_ACTIVITY_PREFIX = `[lca-codex-helper] ${LCA_CODEX_ACTIVITY_PREFIX}`;
+const LCA_CODEX_ACTIVITY_EVENTS = new Set([
+  "lca_codex.turn_started",
+  "lca_codex.turn_send_accepted",
+  "lca_codex.turn_first_response",
+  "lca_codex.turn_first_reasoning",
+  "lca_codex.turn_first_text",
+  "lca_codex.turn_completed",
+  "lca_codex.turn_failed",
+  "lca_codex.turn_retry_scheduled",
+  "lca_codex.turn_retry_stopped",
+  "lca_codex.tool_started",
+  "lca_codex.tool_completed",
+]);
+const LCA_CODEX_ACTIVITY_DETAIL_KEYS = new Set([
+  "attempt",
+  "callId",
+  "code",
+  "durationMs",
+  "elapsedMs",
+  "layer",
+  "mode",
+  "nextAttempt",
+  "reason",
+  "responseChars",
+  "sinceSendMs",
+  "status",
+  "tool",
+  "traceId",
+]);
 
 function redactText(value) {
   const redacted = value
@@ -30,6 +61,37 @@ function sanitize(value, seen = new WeakSet()) {
         : sanitize(item, seen),
     ]),
   );
+}
+
+function parseLcaCodexActivity(line) {
+  if (typeof line !== "string") return null;
+  const prefix = line.startsWith(LCA_CODEX_ACTIVITY_PREFIX)
+    ? LCA_CODEX_ACTIVITY_PREFIX
+    : line.startsWith(LCA_CODEX_HELPER_ACTIVITY_PREFIX)
+      ? LCA_CODEX_HELPER_ACTIVITY_PREFIX
+      : null;
+  if (!prefix) return null;
+  const encoded = line.slice(prefix.length);
+  if (!encoded || encoded.length > 8 * 1024) return null;
+  try {
+    const value = JSON.parse(encoded);
+    if (!value
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || !LCA_CODEX_ACTIVITY_EVENTS.has(value.event)
+      || !["info", "warning", "error"].includes(value.level)
+      || !value.detail
+      || typeof value.detail !== "object"
+      || Array.isArray(value.detail)) return null;
+    const detail = {};
+    for (const [key, item] of Object.entries(value.detail)) {
+      if (!LCA_CODEX_ACTIVITY_DETAIL_KEYS.has(key)) continue;
+      if (item === null || ["string", "number", "boolean"].includes(typeof item)) detail[key] = item;
+    }
+    return { event: value.event, level: value.level, detail };
+  } catch {
+    return null;
+  }
 }
 
 function readRecent(filePath) {
@@ -134,6 +196,7 @@ function registerLoggedIpc(ipcMain, logger, channel, handler) {
 module.exports = {
   createLogger,
   installProcessDiagnosticGuards,
+  parseLcaCodexActivity,
   readRecent,
   redactText,
   registerLoggedIpc,

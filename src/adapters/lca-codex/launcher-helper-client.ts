@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import { LCA_CODEX_ACTIVITY_PREFIX } from "./activity";
 import { LcaCodexAdapterError } from "./adapter-error";
 import type { CompiledLcaCodexPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
@@ -166,6 +167,8 @@ export class LauncherBrowserHelperClient {
           },
           turn: {
             traceId: turn.traceId,
+            attempt: turn.attempt,
+            startedAt: turn.startedAt,
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
@@ -224,7 +227,9 @@ export class LauncherBrowserHelperClient {
     const output = createInterface({ input: child.stdout });
     output.on("line", line => this.handleLine(child, line));
     const errors = createInterface({ input: child.stderr });
-    errors.on("line", line => console.info(`[lca-codex-helper] ${line}`));
+    errors.on("line", line => console.info(
+      line.startsWith(LCA_CODEX_ACTIVITY_PREFIX) ? line : `[lca-codex-helper] ${line}`,
+    ));
     const failChild = (error: Error) => {
       const owned = this.child === child;
       this.handleExit(child, error);

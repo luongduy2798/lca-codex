@@ -208,6 +208,10 @@ function hashFile(pathname) {
 
 function bridgeStatus({ coreHome, proxySourcePath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
   const paths = bridgePaths({ coreHome, platform });
+  const persistedState = readState(paths.statePath);
+  const configuredClients = new Set(
+    Array.isArray(persistedState?.configuredClients) ? persistedState.configuredClients : [],
+  );
   const errors = [];
   const expectedHash = proxySourcePath ? hashFile(proxySourcePath) : null;
   const scriptHash = hashFile(paths.proxyScript);
@@ -225,6 +229,7 @@ function bridgeStatus({ coreHome, proxySourcePath, homeDir = os.homedir(), platf
   });
   const vscode = clients[0];
   const configured = vscode?.configured === true;
+  const managed = Boolean(vscode?.settingsPath && configuredClients.has(vscode.settingsPath));
   const state = errors.length > 0
     ? "inconsistent"
     : installed && configured
@@ -236,6 +241,7 @@ function bridgeStatus({ coreHome, proxySourcePath, homeDir = os.homedir(), platf
     state,
     installed,
     configured,
+    managed,
     vscodeDetected: vscode?.detected === true,
     proxyPath: paths.proxyExecutable,
     settingsPath: vscode?.settingsPath || "",
@@ -258,7 +264,9 @@ function setupBridge({ coreHome, proxySourcePath, electronExecutable = process.e
 
   const existingState = readState(paths.statePath);
   const previousValues = { ...(existingState?.previousValues || {}) };
-  const configuredClients = [];
+  const configuredClients = new Set(
+    Array.isArray(existingState?.configuredClients) ? existingState.configuredClients : [],
+  );
   if (configureSettings) {
     for (const candidate of vscodeSettingsCandidates({ homeDir, platform, appData })) {
       if (!hasCodexExtension(candidate.extensionRoot) && !fs.existsSync(candidate.path)) continue;
@@ -275,7 +283,7 @@ function setupBridge({ coreHome, proxySourcePath, electronExecutable = process.e
         fs.mkdirSync(path.dirname(candidate.path), { recursive: true });
         writePrivateFileAtomic(candidate.path, next);
       }
-      configuredClients.push(candidate.path);
+      configuredClients.add(candidate.path);
     }
   }
   writePrivateFileAtomic(paths.statePath, JSON.stringify({
@@ -283,14 +291,14 @@ function setupBridge({ coreHome, proxySourcePath, electronExecutable = process.e
     installedAt: new Date().toISOString(),
     proxyHash: hashFile(proxySourcePath),
     previousValues,
-    configuredClients,
+    configuredClients: [...configuredClients],
   }, null, 2) + "\n");
   return bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
 }
 
 function repairBridge({ coreHome, proxySourcePath, electronExecutable = process.execPath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
   const status = bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
-  if (status.installed || !status.configured) return { ...status, repaired: false };
+  if (status.installed || (!status.configured && !status.managed)) return { ...status, repaired: false };
   const repaired = setupBridge({
     coreHome,
     proxySourcePath,
@@ -301,6 +309,102 @@ function repairBridge({ coreHome, proxySourcePath, electronExecutable = process.
     configureSettings: false,
   });
   return { ...repaired, repaired: true };
+}
+
+function normalizePreviousValue(previous) {
+  return previous && typeof previous === "object"
+    ? previous
+    : { present: true, value: previous };
+}
+
+function previousValueMatches(current, previous) {
+  const record = normalizePreviousValue(previous);
+  if (record.present === false) return current === undefined;
+  return current === (typeof record.value === "string" ? record.value : null);
+}
+
+function suspendBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
+  const paths = bridgePaths({ coreHome, platform });
+  const state = readState(paths.statePath);
+  const previousValues = { ...(state?.previousValues || {}) };
+  const configuredClients = new Set(Array.isArray(state?.configuredClients) ? state.configuredClients : []);
+  const writes = [];
+  let stateChanged = false;
+  let changed = false;
+  for (const candidate of vscodeSettingsCandidates({ homeDir, platform, appData })) {
+    if (!fs.existsSync(candidate.path)) continue;
+    const content = fs.readFileSync(candidate.path, "utf8");
+    if (readCliSetting(content) !== paths.proxyExecutable) continue;
+    if (!configuredClients.has(candidate.path)) {
+      configuredClients.add(candidate.path);
+      stateChanged = true;
+    }
+    if (!Object.prototype.hasOwnProperty.call(previousValues, candidate.path)) {
+      previousValues[candidate.path] = { present: false, value: null, migratedLegacyProxy: true };
+      stateChanged = true;
+    }
+    const previous = normalizePreviousValue(previousValues[candidate.path]);
+    const next = previous.present === false
+      ? removeCliSetting(content)
+      : setCliSetting(content, typeof previous.value === "string" ? previous.value : null);
+    if (next !== content) writes.push({ path: candidate.path, content: next });
+  }
+  if (stateChanged) {
+    fs.mkdirSync(path.dirname(paths.statePath), { recursive: true, mode: 0o700 });
+    writePrivateFileAtomic(paths.statePath, JSON.stringify({
+      version: STATE_VERSION,
+      installedAt: state?.installedAt || new Date().toISOString(),
+      proxyHash: state?.proxyHash || hashFile(proxySourcePath),
+      previousValues,
+      configuredClients: [...configuredClients],
+    }, null, 2) + "\n");
+  }
+  for (const write of writes) {
+    writePrivateFileAtomic(write.path, write.content);
+    changed = true;
+  }
+  const status = bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
+  return { ...status, changed, reloadRequired: changed || status.reloadRequired };
+}
+
+function resumeBridge({ coreHome, proxySourcePath, electronExecutable = process.execPath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
+  const paths = bridgePaths({ coreHome, platform });
+  let state = readState(paths.statePath);
+  const configuredClients = new Set(Array.isArray(state?.configuredClients) ? state.configuredClients : []);
+  if (configuredClients.size === 0) {
+    return { ...bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData }), changed: false };
+  }
+  const repaired = repairBridge({
+    coreHome,
+    proxySourcePath,
+    electronExecutable,
+    homeDir,
+    platform,
+    appData,
+  });
+  if (!repaired.installed) throw new Error("The managed Codex lifecycle proxy is not installed");
+  state = readState(paths.statePath);
+  const writes = [];
+  for (const candidate of vscodeSettingsCandidates({ homeDir, platform, appData })) {
+    if (!configuredClients.has(candidate.path)) continue;
+    const content = fs.existsSync(candidate.path) ? fs.readFileSync(candidate.path, "utf8") : "{}\n";
+    const current = readCliSetting(content);
+    if (current === paths.proxyExecutable) continue;
+    if (!Object.prototype.hasOwnProperty.call(state?.previousValues || {}, candidate.path)) {
+      throw new Error(`${candidate.label} managed chatgpt.cliExecutable baseline is missing`);
+    }
+    const previous = state?.previousValues?.[candidate.path];
+    if (!previousValueMatches(current, previous)) {
+      throw new Error(`${candidate.label} chatgpt.cliExecutable changed while LCA Codex was stopped; refusing to overwrite it`);
+    }
+    writes.push({ path: candidate.path, content: setCliSetting(content, paths.proxyExecutable) });
+  }
+  for (const write of writes) {
+    fs.mkdirSync(path.dirname(write.path), { recursive: true });
+    writePrivateFileAtomic(write.path, write.content);
+  }
+  const status = bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
+  return { ...status, changed: writes.length > 0, reloadRequired: writes.length > 0 || status.reloadRequired };
 }
 
 function removeBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
@@ -332,4 +436,17 @@ function removeBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), platf
   return bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
 }
 
-module.exports = { SETTING_KEY, bridgePaths, bridgeStatus, readCliSetting, removeBridge, removeCliSetting, repairBridge, setCliSetting, setupBridge, vscodeSettingsCandidates };
+module.exports = {
+  SETTING_KEY,
+  bridgePaths,
+  bridgeStatus,
+  readCliSetting,
+  removeBridge,
+  removeCliSetting,
+  repairBridge,
+  resumeBridge,
+  setCliSetting,
+  setupBridge,
+  suspendBridge,
+  vscodeSettingsCandidates,
+};

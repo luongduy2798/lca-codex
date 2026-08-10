@@ -116,6 +116,10 @@ export class ChatGptTextFeed {
 }
 
 interface ChatGptTurnRuntimeBase {
+  /** One-based browser generation number for a bounded native retry. */
+  attempt?: number;
+  /** Wall-clock start shared with the launcher helper for end-to-end timings. */
+  startedAt?: number;
   browser: Promise<string>;
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
@@ -288,6 +292,7 @@ export class ChatGptTurnSession {
 export class ChatGptTurnSessions {
   private readonly entries = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
+  private readonly retryAttempts = new Map<string, { attempt: number; updatedAt: number }>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -317,6 +322,28 @@ export class ChatGptTurnSessions {
     return session;
   }
 
+  retryAttempt(key: string): number {
+    this.prune();
+    return this.retryAttempts.get(key)?.attempt ?? 1;
+  }
+
+  scheduleRetry(key: string, session: ChatGptTurnSession, maxAttempts = 2): number | null {
+    const attempt = session.runtime.attempt ?? 1;
+    if (attempt >= maxAttempts) return null;
+    const nextAttempt = attempt + 1;
+    const scheduled = this.retryAttempts.get(key);
+    if (scheduled?.attempt === nextAttempt && this.entries.get(key) !== session) return nextAttempt;
+    if (this.entries.get(key) !== session) return null;
+    this.retryAttempts.set(key, { attempt: nextAttempt, updatedAt: Date.now() });
+    session.cancel();
+    this.entries.delete(key);
+    return nextAttempt;
+  }
+
+  clearRetry(key: string): void {
+    this.retryAttempts.delete(key);
+  }
+
   async retireSupersededThreadTurns(threadId: string, turnId: string, keepKey?: string): Promise<number> {
     const keys = [...this.entries]
       .filter(([key, session]) => (
@@ -344,9 +371,13 @@ export class ChatGptTurnSessions {
       return true;
     }
     const session = this.entries.get(key);
-    if (!session) return false;
+    if (!session) {
+      this.retryAttempts.delete(key);
+      return false;
+    }
 
     this.entries.delete(key);
+    this.retryAttempts.delete(key);
     session.cancel();
     const retirement = session.browserOutcome.then(() => undefined);
     this.retirements.set(key, retirement);
@@ -362,6 +393,7 @@ export class ChatGptTurnSessions {
     if (this.entries.get(key) !== session) return false;
     session.cancel();
     this.entries.delete(key);
+    this.retryAttempts.delete(key);
     return true;
   }
 
@@ -371,6 +403,7 @@ export class ChatGptTurnSessions {
       if (session.scope?.threadId !== threadId || session.scope?.turnId !== turnId) continue;
       session.cancel();
       this.entries.delete(key);
+      this.retryAttempts.delete(key);
       retired += 1;
     }
     return retired;
@@ -382,6 +415,7 @@ export class ChatGptTurnSessions {
       if (session.scope?.threadId !== threadId) continue;
       session.cancel();
       this.entries.delete(key);
+      this.retryAttempts.delete(key);
       retired += 1;
     }
     return retired;
@@ -391,6 +425,7 @@ export class ChatGptTurnSessions {
     const cancelled = this.entries.size;
     for (const session of this.entries.values()) session.cancel();
     this.entries.clear();
+    this.retryAttempts.clear();
     return cancelled;
   }
 
@@ -407,6 +442,10 @@ export class ChatGptTurnSessions {
       if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
       session.cancel();
       this.entries.delete(key);
+      this.retryAttempts.delete(key);
+    }
+    for (const [key, state] of this.retryAttempts) {
+      if (state.updatedAt < cutoff) this.retryAttempts.delete(key);
     }
   }
 }

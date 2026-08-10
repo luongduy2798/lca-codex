@@ -103,6 +103,7 @@ export interface VsCodeAdvancedSnapshot {
   state: "configured" | "installed" | "inconsistent" | "not-configured";
   installed: boolean;
   configured: boolean;
+  managed: boolean;
   vscodeDetected: boolean;
   proxyPath: string;
   settingsPath: string;
@@ -183,7 +184,6 @@ export interface LauncherApi {
   removeVsCodeAdvanced(): Promise<VsCodeAdvancedSnapshot>;
   saveCodexConfig(content: string): Promise<{ config: CodexConfigSnapshot; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
-  setBridgeEnabled(enabled: boolean): Promise<LauncherState>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {

@@ -226,6 +226,80 @@ test("bridge disconnection restores only the prior Codex route", async () => {
   assert.deepEqual(fixture.calls, ["route status", "route disconnect"]);
 });
 
+test("runtime start connects the Codex route and resumes only the optional VS Code proxy", async () => {
+  const fixture = bridgeFixture({ active: false });
+  fixture.host.resumeVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:resume");
+    return { changed: true, configured: true };
+  };
+
+  const result = await fixture.host.activateRuntimeBridge();
+
+  assert.equal(result.route.active, true);
+  assert.equal(result.vscode.configured, true);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "vscode:resume"]);
+});
+
+test("runtime start waits for an in-flight Codex config status read", async () => {
+  const fixture = bridgeFixture({ active: false });
+  let releaseStatus;
+  fixture.host.active = "codex-config-status";
+  fixture.host.codexConfigSnapshotInFlight = new Promise((resolve) => {
+    releaseStatus = () => {
+      fixture.host.active = null;
+      resolve();
+    };
+  });
+  fixture.host.resumeVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:resume");
+    return { changed: false, configured: true };
+  };
+
+  const starting = fixture.host.activateRuntimeBridge();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.calls, []);
+
+  releaseStatus();
+  const result = await starting;
+  assert.equal(result.route.active, true);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "vscode:resume"]);
+});
+
+test("runtime stop restores Codex and VS Code without reading or rewriting MCP setup", async () => {
+  const fixture = bridgeFixture({ active: true });
+  fixture.supervisor.readConfig = () => { throw new Error("MCP runtime config must not be read"); };
+  fixture.supervisor.readSetupConfig = () => { throw new Error("MCP setup must not be read"); };
+  fixture.host.suspendVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:suspend");
+    return { changed: true, configured: false };
+  };
+
+  const result = await fixture.host.deactivateRuntimeBridge();
+
+  assert.equal(result.route.active, false);
+  assert.equal(result.vscode.configured, false);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect", "vscode:suspend"]);
+});
+
+test("runtime stop still restores VS Code when restoring the Codex route fails", async () => {
+  const fixture = bridgeFixture({ active: true });
+  fixture.host.run = async (_name, args) => {
+    const action = args.join(" ");
+    fixture.calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active: true, errors: [] }) };
+    }
+    throw new Error("synthetic route restore failure");
+  };
+  fixture.host.suspendVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:suspend");
+    return { changed: true, configured: false };
+  };
+
+  await assert.rejects(fixture.host.deactivateRuntimeBridge(), /restoring the native Codex route failed/);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect", "vscode:suspend"]);
+});
+
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
   const fixture = bridgeFixture({ active: false });
   fixture.host.run = async (_name, args) => {

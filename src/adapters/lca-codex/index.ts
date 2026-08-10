@@ -5,6 +5,7 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { LcaCodexAdapterError } from "./adapter-error";
+import { activityDuration, logLcaCodexActivity } from "./activity";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
@@ -181,14 +182,23 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: LcaCodexCapabilities,
+    attempt: number,
   ): ChatGptTurnRuntime => {
+    const startedAt = Date.now();
     const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+    logLcaCodexActivity("lca_codex.turn_started", {
+      traceId,
+      attempt,
+      mode: mode.localTools ? "tools" : "read-only",
+    });
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
     if (!mode.localTools) {
       const browser = worker.run({
         traceId,
+        attempt,
+        startedAt,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
@@ -200,6 +210,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
       });
       return {
         mode: "read-only",
+        attempt,
+        startedAt,
         browser,
         trace,
         text,
@@ -212,6 +224,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     let activeToken: string | undefined;
     const browser = worker.run({
       traceId,
+      attempt,
+      startedAt,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
@@ -247,6 +261,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     });
     return {
       mode: "tools",
+      attempt,
+      startedAt,
       token: token.promise,
       browser,
       trace,
@@ -301,9 +317,10 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
       }
       await chatGptTurnSessions.waitForRetirement(executionKey);
       const traceId = createHash("sha256").update(executionKey).digest("hex").slice(0, 12);
+      const attempt = chatGptTurnSessions.retryAttempt(executionKey);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
-        () => startRuntime(parsed, environment, traceId, turnCapabilities),
+        () => startRuntime(parsed, environment, traceId, turnCapabilities, attempt),
         {
           threadId: identity.threadId,
           turnId: identity.turnId,
@@ -339,6 +356,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
               session.setFinalEvents(events);
             }
             emitBrowserCompletion(settled, estimateLcaCodexUsage(parsed, { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            chatGptTurnSessions.clearRetry(executionKey);
             return;
           }
 
@@ -429,6 +447,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
                   estimateLcaCodexUsage(parsed, { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
+                chatGptTurnSessions.clearRetry(executionKey);
                 return;
               }
               if (!turnToken || session.runtime.mode !== "tools") {
@@ -449,18 +468,37 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
           }
         });
       } catch (error) {
-        const retryable = error instanceof LcaCodexAdapterError
-          ? error.retryable
-            && !streamedFinalAnswer
-            && !hasFinalAnswerText(session.eventsForFinalReplay())
-          : false;
+        const providerRetryable = error instanceof LcaCodexAdapterError && error.retryable;
+        const responseStreamed = streamedFinalAnswer || hasFinalAnswerText(session.eventsForFinalReplay());
+        const nextAttempt = providerRetryable && !responseStreamed
+          ? chatGptTurnSessions.scheduleRetry(executionKey, session)
+          : null;
+        const retryable = nextAttempt !== null;
         if (error instanceof LcaCodexAdapterError && retryable) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
-          chatGptTurnSessions.retire(executionKey, session);
+          logLcaCodexActivity("lca_codex.turn_retry_scheduled", {
+            traceId,
+            attempt: session.runtime.attempt ?? 1,
+            nextAttempt,
+            durationMs: activityDuration(session.runtime.startedAt ?? Date.now()),
+            reason: error.code,
+            status: error.status,
+            code: error.code,
+          }, "warning");
         } else {
           session.cancel();
+          if (providerRetryable) {
+            logLcaCodexActivity("lca_codex.turn_retry_stopped", {
+              traceId,
+              attempt: session.runtime.attempt ?? 1,
+              durationMs: activityDuration(session.runtime.startedAt ?? Date.now()),
+              reason: responseStreamed ? "response_streamed" : "retry_limit",
+              status: error.status,
+              code: error.code,
+            }, "error");
+          }
         }
         if (session.runtime.mode === "tools") {
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});

@@ -18,6 +18,8 @@ interface RunMessage {
   };
   turn: {
     traceId: string;
+    attempt?: number;
+    startedAt?: number;
     modelId: string;
     reasoning?: string;
     capabilities: LcaCodexCapabilities;
@@ -93,6 +95,10 @@ async function run(message: RunMessage): Promise<void> {
   if (!message.turn.prepared || typeof message.turn.prepared.text !== "string" || !Array.isArray(message.turn.prepared.images)) {
     throw new Error("Browser helper prompt is invalid");
   }
+  if ((message.turn.attempt !== undefined && (!Number.isInteger(message.turn.attempt) || message.turn.attempt < 1))
+    || (message.turn.startedAt !== undefined && (!Number.isFinite(message.turn.startedAt) || message.turn.startedAt <= 0))) {
+    throw new Error("Browser helper activity timing is invalid");
+  }
   const provider: CodexProviderConfig = {
     adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
@@ -108,6 +114,8 @@ async function run(message: RunMessage): Promise<void> {
   abortControllers.set(message.id, abortController);
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
+    attempt: message.turn.attempt,
+    startedAt: message.turn.startedAt,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,

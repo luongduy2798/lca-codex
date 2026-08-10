@@ -12,6 +12,7 @@ const {
   allowedAuthUrl,
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
+  initialBrowserBounds,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   initializationNavigationWasSuperseded,
@@ -232,6 +233,21 @@ test("browser bounds are clipped to the launcher content area", () => {
     constrainBrowserBounds({ x: -20, y: -10, width: 0, height: 0 }, { width: 1200, height: 800 }),
     { x: 0, y: 0, width: 1, height: 1 },
   );
+});
+
+test("background browser turns have a usable viewport before the Browser tab is measured", () => {
+  assert.deepEqual(initialBrowserBounds({ getContentSize: () => [1120, 720] }), {
+    x: 0,
+    y: 0,
+    width: 1120,
+    height: 720,
+  });
+  assert.deepEqual(initialBrowserBounds({ getContentSize: () => [0, 0] }), {
+    x: 0,
+    y: 0,
+    width: 1024,
+    height: 720,
+  });
 });
 
 test("authentication windows stay in the owned browser surface", () => {

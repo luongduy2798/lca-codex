@@ -3,7 +3,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { redactText } = require("./logging.cjs");
+const { parseLcaCodexActivity, redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
   processRunning,
@@ -43,6 +43,16 @@ function collectLines(stream, onLine, onError) {
     if (line) onLine(line);
   });
   stream.on("error", (error) => onError?.(error));
+}
+
+function recordRuntimeLine(logger, name, stream, line) {
+  const activity = parseLcaCodexActivity(line);
+  if (activity) {
+    const method = activity.level === "error" ? "error" : activity.level === "warning" ? "warn" : "info";
+    logger[method](activity.event, activity.detail);
+    return;
+  }
+  logger[stream === "stderr" ? "warn" : "info"](`runtime.${name}_${stream}`, { line });
 }
 
 function loopbackHealthBaseURL(value) {
@@ -667,13 +677,13 @@ class RuntimeSupervisor {
     this.lastChildOutput[name] = null;
     collectLines(child.stdout, (line) => {
       this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
-      this.logger.info(`runtime.${name}_stdout`, { line });
+      recordRuntimeLine(this.logger, name, "stdout", line);
     }, (error) => {
       this.logger.warn(`runtime.${name}_stdout_unavailable`, { message: errorMessage(error) });
     });
     collectLines(child.stderr, (line) => {
       this.lastChildOutput[name] = redactText(line).slice(0, 1_000);
-      this.logger.warn(`runtime.${name}_stderr`, { line });
+      recordRuntimeLine(this.logger, name, "stderr", line);
     }, (error) => {
       this.logger.warn(`runtime.${name}_stderr_unavailable`, { message: errorMessage(error) });
     });

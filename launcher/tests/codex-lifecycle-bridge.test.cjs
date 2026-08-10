@@ -9,8 +9,10 @@ const {
   removeBridge,
   repairBridge,
   removeCliSetting,
+  resumeBridge,
   setCliSetting,
   setupBridge,
+  suspendBridge,
 } = require("../electron/codex-lifecycle-bridge.cjs");
 
 const proxySourcePath = path.resolve(__dirname, "../electron/codex-cli-proxy.cjs");
@@ -72,6 +74,12 @@ test("Configured VS Code proxy self-heals when the renamed executable is missing
     const second = repairBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
     assert.equal(second.repaired, false);
     assert.equal(second.state, "configured");
+
+    const suspended = suspendBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
+    assert.equal(suspended.managed, true);
+    assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), undefined);
+    resumeBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
+    assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), expectedProxy);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -120,10 +128,46 @@ test("Automatic VS Code advanced setup installs a durable proxy and restores the
     assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), installed.proxyPath);
     assert.equal(fs.existsSync(installed.proxyPath), true);
 
+    const suspended = suspendBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
+    assert.equal(suspended.installed, true);
+    assert.equal(suspended.managed, true);
+    assert.equal(suspended.configured, false);
+    assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), "/previous/codex");
+
+    const resumed = resumeBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
+    assert.equal(resumed.installed, true);
+    assert.equal(resumed.managed, true);
+    assert.equal(resumed.configured, true);
+    assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), installed.proxyPath);
+
     const removed = removeBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
     assert.equal(removed.installed, false);
     assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), "/previous/codex");
     assert.equal(bridgeStatus({ coreHome, proxySourcePath, homeDir, platform: "darwin" }).state, "not-configured");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Starting does not overwrite a newer VS Code cliExecutable value", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-lifecycle-newer-cli-"));
+  const coreHome = path.join(root, "lca-home");
+  const homeDir = path.join(root, "user");
+  const settingsPath = path.join(homeDir, "Library", "Application Support", "Code", "User", "settings.json");
+  const extensionRoot = path.join(homeDir, ".vscode", "extensions", "openai.chatgpt-test");
+  fs.mkdirSync(extensionRoot, { recursive: true });
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, "{}\n");
+  try {
+    setupBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
+    suspendBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
+    fs.writeFileSync(settingsPath, setCliSetting(fs.readFileSync(settingsPath, "utf8"), "/newer/codex"));
+
+    assert.throws(
+      () => resumeBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" }),
+      /changed while LCA Codex was stopped/,
+    );
+    assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), "/newer/codex");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

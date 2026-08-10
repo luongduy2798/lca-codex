@@ -4,6 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { dirname } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import type { ChatGptTurnEnvironment } from "./environment";
+import { activityCallId, activityDuration, logLcaCodexActivity } from "./activity";
 import { withoutRetiredTurnHandles, type ChatGptContextEntry, type ChatGptContextSnapshot } from "./prompt";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
@@ -27,6 +28,8 @@ export interface BrokerToolResult {
 
 interface PendingInvocation {
   request: BrokerToolRequest;
+  activityTool: string;
+  startedAt: number;
   resolve: (result: BrokerToolResult) => void;
   reject: (error: Error) => void;
 }
@@ -78,6 +81,10 @@ interface BrokerRequest {
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
+  /** Public LCA connector tool that originated this broker operation. */
+  sourceTool?: string;
+  /** Native Codex tool requested before any exec-gateway wrapping. */
+  activityTool?: string;
 }
 
 interface BrokerResponse {
@@ -228,6 +235,14 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
+    logLcaCodexActivity("lca_codex.tool_completed", {
+      traceId: channel.traceId,
+      layer: "codex",
+      tool: invocation.activityTool,
+      callId: activityCallId(callId),
+      durationMs: activityDuration(invocation.startedAt),
+      status: result.isError ? "error" : "completed",
+    }, result.isError ? "error" : "info");
     console.info(`[lca-codex] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
@@ -378,11 +393,55 @@ export class TurnBroker {
         this.writeSocketResponse(socket, { id: request?.id ?? "unknown", error: errorOf(error).message });
         return;
       }
+      const sourceActivity = this.sourceToolActivity(request);
+      const sourceStartedAt = Date.now();
+      if (sourceActivity) {
+        logLcaCodexActivity("lca_codex.tool_started", sourceActivity);
+      }
       void Promise.resolve().then(() => this.dispatch(request!)).then(
-        result => this.writeSocketResponse(socket, { id: request!.id, result }),
-        error => this.writeSocketResponse(socket, { id: request!.id, error: errorOf(error).message }),
+        result => {
+          if (sourceActivity) {
+            const failed = Boolean(result && typeof result === "object" && (result as BrokerToolResult).isError === true);
+            logLcaCodexActivity("lca_codex.tool_completed", {
+              ...sourceActivity,
+              durationMs: activityDuration(sourceStartedAt),
+              status: failed ? "error" : "completed",
+            }, failed ? "error" : "info");
+          }
+          this.writeSocketResponse(socket, { id: request!.id, result });
+        },
+        error => {
+          if (sourceActivity) {
+            logLcaCodexActivity("lca_codex.tool_completed", {
+              ...sourceActivity,
+              durationMs: activityDuration(sourceStartedAt),
+              status: "error",
+            }, "error");
+          }
+          this.writeSocketResponse(socket, { id: request!.id, error: errorOf(error).message });
+        },
       );
     });
+  }
+
+  private sourceToolActivity(request: BrokerRequest): {
+    traceId: string;
+    layer: string;
+    tool: string;
+    callId: string;
+  } | null {
+    const tool = request.sourceTool?.trim();
+    if (!tool) return null;
+    const channel = request.method === "claim"
+      ? this.channels.get(request.token?.trim() ?? "")
+      : this.bindings.get(request.bindingId?.trim() ?? "")?.channel;
+    if (!channel) return null;
+    return {
+      traceId: channel.traceId,
+      layer: "lca",
+      tool,
+      callId: activityCallId(request.id),
+    };
   }
 
   private writeSocketResponse(socket: Socket, response: BrokerResponse): void {
@@ -404,6 +463,11 @@ export class TurnBroker {
       && request.method !== "context_query"
       && request.method !== "invoke") {
       throw new Error("turn broker method is invalid");
+    }
+    for (const value of [request.sourceTool, request.activityTool]) {
+      if (value !== undefined && (!/^[A-Za-z0-9_.$:-]{1,1000}$/.test(value))) {
+        throw new Error("turn broker activity tool name is invalid");
+      }
     }
   }
 
@@ -565,6 +629,8 @@ export class TurnBroker {
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
     const callId = opaqueId("call");
+    const activityTool = request.activityTool?.trim() || wireName;
+    const startedAt = Date.now();
     const toolRequest: BrokerToolRequest = {
       callId,
       wireName,
@@ -572,8 +638,20 @@ export class TurnBroker {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      binding.channel.invocations.set(callId, {
+        request: toolRequest,
+        activityTool,
+        startedAt,
+        resolve: resolveInvoke,
+        reject: rejectInvoke,
+      });
       binding.channel.queuedCallIds.push(callId);
+      logLcaCodexActivity("lca_codex.tool_started", {
+        traceId: binding.channel.traceId,
+        layer: "codex",
+        tool: activityTool,
+        callId: activityCallId(callId),
+      });
       console.info(
         `[lca-codex] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
       );
@@ -622,7 +700,17 @@ export class TurnBroker {
       waiter.reject(error);
     }
     channel.waiters.clear();
-    for (const invocation of channel.invocations.values()) invocation.reject(error);
+    for (const [callId, invocation] of channel.invocations) {
+      logLcaCodexActivity("lca_codex.tool_completed", {
+        traceId: channel.traceId,
+        layer: "codex",
+        tool: invocation.activityTool,
+        callId: activityCallId(callId),
+        durationMs: activityDuration(invocation.startedAt),
+        status: "error",
+      }, "error");
+      invocation.reject(error);
+    }
     channel.invocations.clear();
     channel.queuedCallIds = [];
   }

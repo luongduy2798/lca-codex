@@ -329,7 +329,11 @@ function LauncherShell({
                 />
                 <SidebarItem
                   active={surface === "codex"}
-                  badge={snapshot.state.coreSetupComplete && !snapshot.state.bridgeEnabled ? <ActionDot tone="error" /> : null}
+                  badge={snapshot.state.coreSetupComplete
+                    && snapshot.runtime.lifecycle === "ready"
+                    && !snapshot.state.bridgeEnabled
+                    ? <ActionDot tone="error" />
+                    : null}
                   icon="setup"
                   label={copy.codexConfig}
                   onClick={navigateCodexRoot}
@@ -1027,11 +1031,13 @@ function CodexConfigSurface({
         : copy.notConfigured;
   const advancedStatusLabel = advancedConfig?.state === "configured"
     ? copy.vscodeAdvancedConfigured
-    : advancedConfig?.state === "installed"
-      ? copy.vscodeAdvancedProxyInstalled
-      : advancedConfig?.state === "inconsistent"
-        ? copy.vscodeAdvancedNeedsRepair
-        : copy.vscodeAdvancedNotInstalled;
+    : advancedConfig?.managed && advancedConfig?.installed
+      ? copy.vscodeAdvancedReadyForStart
+      : advancedConfig?.state === "installed"
+        ? copy.vscodeAdvancedProxyInstalled
+        : advancedConfig?.state === "inconsistent"
+          ? copy.vscodeAdvancedNeedsRepair
+          : copy.vscodeAdvancedNotInstalled;
 
   if (subview === "vscode-advanced") {
     return (
@@ -1196,11 +1202,13 @@ function VsCodeAdvancedSurface({
 
   const statusLabel = config?.state === "configured"
     ? copy.vscodeAdvancedConfigured
-    : config?.state === "installed"
-      ? copy.vscodeAdvancedProxyInstalled
-      : config?.state === "inconsistent"
-        ? copy.vscodeAdvancedNeedsRepair
-        : copy.vscodeAdvancedNotInstalled;
+    : config?.managed && config?.installed
+      ? copy.vscodeAdvancedReadyForStart
+      : config?.state === "installed"
+        ? copy.vscodeAdvancedProxyInstalled
+        : config?.state === "inconsistent"
+          ? copy.vscodeAdvancedNeedsRepair
+          : copy.vscodeAdvancedNotInstalled;
   const proxyPath = config?.proxyPath ?? "~/.lca-codex/bin/lca-codex-proxy";
   const settingsPath = config?.settingsPath || "VS Code settings.json";
   const manualSnippet = `"chatgpt.cliExecutable": ${JSON.stringify(proxyPath)}`;
@@ -1233,7 +1241,7 @@ function VsCodeAdvancedSurface({
               <span>{copy.status}</span>
               <strong>{statusLabel}</strong>
             </div>
-            <StateDot state={config?.state === "configured" ? "ready" : config?.state === "inconsistent" ? "error" : "busy"} />
+            <StateDot state={config?.state === "configured" || (config?.managed && config?.installed) ? "ready" : config?.state === "inconsistent" ? "error" : "busy"} />
           </div>
           <div className="config-detail-list">
             <div><span>{copy.vscodeAdvancedSettingsPath}</span><code>{settingsPath}</code></div>
@@ -1681,7 +1689,7 @@ function ActivitySurface({
             <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
             <div>
               <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.detail)}</span>
+              <span>{logDetail(record.event, record.detail)}</span>
             </div>
             <time>{formatTime(record.at)}</time>
           </div>
@@ -1703,7 +1711,7 @@ function SettingsSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "bridge" | "upsell" | "uninstall" | null>(null);
+  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "upsell" | "uninstall" | null>(null);
   const busy = activeAction !== null;
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
@@ -1724,17 +1732,6 @@ function SettingsSurface({
     try {
       await api!.cancelTurns();
       setTurnsCancelled(true);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setActiveAction(null);
-    }
-  };
-  const setBridgeEnabled = async (enabled: boolean) => {
-    setActiveAction("bridge");
-    setError(null);
-    try {
-      updateState(await api!.setBridgeEnabled(enabled));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1787,13 +1784,6 @@ function SettingsSurface({
             onChange={(checked) => void api!.setPreference("runtimeAutoStart", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        <SettingRow body={copy.bridgeRouteBody} label={copy.bridgeRoute}>
-          <Switch
-            checked={snapshot.state.bridgeEnabled}
-            disabled={busy || snapshot.state.coreSetupComplete !== true}
-            onChange={(checked) => void setBridgeEnabled(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
@@ -2240,13 +2230,79 @@ function platformLabel(value: string): string {
   return value === "darwin" ? "macOS" : value === "win32" ? "Windows" : value === "linux" ? "Linux" : value;
 }
 
+const lcaActivityEventLabels: Record<string, string> = {
+  "lca_codex.turn_started": "LCA Codex turn started",
+  "lca_codex.turn_send_accepted": "Prompt accepted by ChatGPT",
+  "lca_codex.turn_first_response": "First ChatGPT response",
+  "lca_codex.turn_first_reasoning": "First reasoning update",
+  "lca_codex.turn_first_text": "First answer text",
+  "lca_codex.turn_completed": "LCA Codex turn completed",
+  "lca_codex.turn_failed": "LCA Codex turn failed",
+  "lca_codex.turn_retry_scheduled": "LCA Codex retry scheduled",
+  "lca_codex.turn_retry_stopped": "LCA Codex retry stopped",
+  "lca_codex.tool_started": "Tool started",
+  "lca_codex.tool_completed": "Tool completed",
+};
+
 function humanEvent(value: string): string {
-  return value.split(".").map((part) => part.replaceAll("_", " ")).join(" · ");
+  return lcaActivityEventLabels[value]
+    ?? value.split(".").map((part) => part.replaceAll("_", " ")).join(" · ");
 }
 
-function logDetail(detail: Record<string, unknown>): string {
+function formatActivityDuration(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return String(value);
+  const milliseconds = Math.max(0, Math.round(value));
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  if (milliseconds < 60_000) {
+    const seconds = milliseconds / 1_000;
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  }
+  const minutes = Math.floor(milliseconds / 60_000);
+  const seconds = Math.round((milliseconds % 60_000) / 1_000);
+  return seconds === 60 ? `${minutes + 1}m` : `${minutes}m ${seconds}s`;
+}
+
+function lcaActivityDetail(key: string, value: unknown): string {
+  if (key === "layer") {
+    return value === "lca" ? "LCA connector" : value === "codex" ? "Codex native" : String(value);
+  }
+  if (key === "attempt") return `attempt ${String(value)}`;
+  if (key === "nextAttempt") return `next attempt ${String(value)}`;
+  if (key === "elapsedMs") return `elapsed ${formatActivityDuration(value)}`;
+  if (key === "sinceSendMs") return `after send ${formatActivityDuration(value)}`;
+  if (key === "durationMs") return `duration ${formatActivityDuration(value)}`;
+  if (key === "responseChars" && typeof value === "number") return `${value.toLocaleString()} chars`;
+  if (key === "traceId") return `turn ${String(value)}`;
+  if (key === "callId") return `call ${String(value)}`;
+  return key === "tool" ? String(value) : `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`;
+}
+
+function logDetail(event: string, detail: Record<string, unknown>): string {
   const entries = Object.entries(detail).filter(([, value]) => value !== undefined && value !== null);
   if (entries.length === 0) return "";
+  if (event.startsWith("lca_codex.")) {
+    const order = [
+      "layer",
+      "tool",
+      "attempt",
+      "nextAttempt",
+      "mode",
+      "elapsedMs",
+      "sinceSendMs",
+      "durationMs",
+      "responseChars",
+      "status",
+      "reason",
+      "code",
+      "traceId",
+      "callId",
+    ];
+    const values = new Map(entries);
+    return order
+      .filter((key) => values.has(key))
+      .map((key) => lcaActivityDetail(key, values.get(key)))
+      .join(" · ");
+  }
   return entries
     .slice(0, 3)
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)

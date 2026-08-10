@@ -29,6 +29,7 @@ import { resolveLcaCodexContextLimits } from "../../lca-codex-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { LcaCodexAdapterError } from "./adapter-error";
+import { activityDuration, logLcaCodexActivity } from "./activity";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -190,6 +191,10 @@ export const CHATGPT_CONNECTOR_MENU_ROW_SELECTOR = [
 
 export interface BrowserTurn {
   traceId: string;
+  /** One-based browser-generation attempt for this native Codex turn. */
+  attempt?: number;
+  /** End-to-end wall-clock start supplied by the parent runtime. */
+  startedAt?: number;
   modelId: string;
   reasoning?: string;
   capabilities: LcaCodexCapabilities;
@@ -1616,8 +1621,21 @@ export class ChatGptBrowserWorker {
 
   private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
+    const startedAt = Number.isFinite(turn.startedAt) && turn.startedAt! <= Date.now()
+      ? turn.startedAt!
+      : Date.now();
+    const attempt = Number.isInteger(turn.attempt) && turn.attempt! > 0 ? turn.attempt! : 1;
     const requestedMode = resolveLcaCodexModelMode(turn.modelId, turn.reasoning, turn.capabilities);
-    const prepared = await turn.prepare();
+    const prepared = await turn.prepare().catch(error => {
+      logLcaCodexActivity("lca_codex.turn_failed", {
+        traceId: turn.traceId,
+        attempt,
+        durationMs: activityDuration(startedAt),
+        reason: error instanceof Error ? error.name : "Error",
+        ...(error instanceof LcaCodexAdapterError ? { status: error.status, code: error.code } : {}),
+      }, "error");
+      throw error;
+    });
     const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
@@ -1724,6 +1742,12 @@ export class ChatGptBrowserWorker {
         );
         console.info(`[lca-codex] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
       }, turn.abortSignal);
+      const sentAt = Date.now();
+      logLcaCodexActivity("lca_codex.turn_send_accepted", {
+        traceId: turn.traceId,
+        attempt,
+        elapsedMs: activityDuration(startedAt),
+      });
       await diagnostics.capture(page, "send-accepted");
 
       let lastHeartbeat = 0;
@@ -1731,7 +1755,8 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
+      let firstReasoningLogged = false;
+      let firstTextLogged = false;
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const textCoalescer = new ChatGptTextDeltaCoalescer();
@@ -1744,7 +1769,17 @@ export class ChatGptBrowserWorker {
       const emitCoalescedText = (delta: string, now: number, force = false) => {
         let ready = textCoalescer.push(delta, now);
         if (force) ready += textCoalescer.flush();
-        if (ready) turn.onTextDelta(ready);
+        if (!ready) return;
+        if (!firstTextLogged) {
+          firstTextLogged = true;
+          logLcaCodexActivity("lca_codex.turn_first_text", {
+            traceId: turn.traceId,
+            attempt,
+            elapsedMs: activityDuration(startedAt),
+            sinceSendMs: activityDuration(sentAt),
+          });
+        }
+        turn.onTextDelta(ready);
       };
       for (;;) {
         if (page.isClosed()) {
@@ -1795,12 +1830,30 @@ export class ChatGptBrowserWorker {
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
+            logLcaCodexActivity("lca_codex.turn_first_response", {
+              traceId: turn.traceId,
+              attempt,
+              elapsedMs: activityDuration(startedAt),
+              sinceSendMs: activityDuration(sentAt),
+            });
             await diagnostics.capture(page, "response-visible");
           }
           const textDelta = markdownBuffer.observeRoots(snapshot.markdownRoots);
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible, observedAt)) {
-            if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
-            else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+            if (trace.kind === "commentary") {
+              turn.onCommentary?.(trace.text, trace.continuation === true);
+            } else {
+              if (!firstReasoningLogged) {
+                firstReasoningLogged = true;
+                logLcaCodexActivity("lca_codex.turn_first_reasoning", {
+                  traceId: turn.traceId,
+                  attempt,
+                  elapsedMs: activityDuration(startedAt),
+                  sinceSendMs: activityDuration(sentAt),
+                });
+              }
+              turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+            }
           }
           emitCoalescedText(textDelta, observedAt);
           const domError = domHealthTracker.update({
@@ -1863,9 +1916,22 @@ export class ChatGptBrowserWorker {
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
       await diagnostics.capture(page, "turn-completed");
+      logLcaCodexActivity("lca_codex.turn_completed", {
+        traceId: turn.traceId,
+        attempt,
+        durationMs: activityDuration(startedAt),
+        responseChars: finalText.length,
+      });
       console.info(`[lca-codex] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;
     } catch (error) {
+      logLcaCodexActivity("lca_codex.turn_failed", {
+        traceId: turn.traceId,
+        attempt,
+        durationMs: activityDuration(startedAt),
+        reason: error instanceof Error ? error.name : "Error",
+        ...(error instanceof LcaCodexAdapterError ? { status: error.status, code: error.code } : {}),
+      }, error instanceof DOMException && error.name === "AbortError" ? "warning" : "error");
       if (diagnosticPage && !diagnosticPage.isClosed()) {
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
       }

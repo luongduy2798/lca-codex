@@ -27,6 +27,7 @@ const SMOKE_RESPONSE_TIMEOUT_MS = 120_000;
 const SMOKE_COMPLETION_SETTLE_MS = 1_500;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
+const DEFAULT_BACKGROUND_BROWSER_SIZE = Object.freeze({ width: 1024, height: 720 });
 const CHATGPT_PARTITION = "persist:lca-codex-chatgpt";
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
@@ -95,6 +96,16 @@ function normalizeBounds(bounds) {
     width: Math.min(MAX_BROWSER_VIEW_DIMENSION, Math.max(1, read(bounds?.width))),
     height: Math.min(MAX_BROWSER_VIEW_DIMENSION, Math.max(1, read(bounds?.height))),
   };
+}
+
+function initialBrowserBounds(window) {
+  const [contentWidth, contentHeight] = window.getContentSize();
+  return normalizeBounds({
+    x: 0,
+    y: 0,
+    width: contentWidth > 1 ? contentWidth : DEFAULT_BACKGROUND_BROWSER_SIZE.width,
+    height: contentHeight > 1 ? contentHeight : DEFAULT_BACKGROUND_BROWSER_SIZE.height,
+  });
 }
 
 function allowedAuthUrl(value) {
@@ -188,7 +199,9 @@ class BrowserHost {
     this.viewportCssKey = null;
     this.authView = null;
     this.boundsReady = false;
-    this.bounds = { x: 0, y: 0, width: 1, height: 1 };
+    // Turn views must have a usable viewport even before the renderer mounts the Browser tab and
+    // reports its exact slot. Keep boundsReady false so this fallback is never shown as UI bounds.
+    this.bounds = initialBrowserBounds(window);
     this.state = {
       status: "idle",
       message: "No active task",
@@ -1654,6 +1667,7 @@ module.exports = {
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   initializationNavigationWasSuperseded,
+  initialBrowserBounds,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   TEMPORARY_CHAT_URL,

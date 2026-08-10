@@ -176,8 +176,15 @@ function execGatewayProgram(
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
   const server = new McpServer({ name: "codex-native", version: "3.0.0" });
 
-  const environment = async (bindingId: string): Promise<ChatGptTurnEnvironment & { expiresAt?: number }> => {
-    const resolved = await callTurnBroker<ResolvedTurn>(options.brokerSocketPath, { method: "resolve", bindingId });
+  const environment = async (
+    bindingId: string,
+    sourceTool?: string,
+  ): Promise<ChatGptTurnEnvironment & { expiresAt?: number }> => {
+    const resolved = await callTurnBroker<ResolvedTurn>(options.brokerSocketPath, {
+      method: "resolve",
+      bindingId,
+      ...(sourceTool ? { sourceTool } : {}),
+    });
     const expiresAt = resolved.environment.expiresAt;
     if (expiresAt !== undefined && expiresAt <= Date.now()) throw new Error("Codex turn binding expired");
     return resolved.environment;
@@ -188,11 +195,15 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
+    activityTool = wireName(tool),
   ) => {
     const response = await callTurnBroker<BrokerToolResult>(options.brokerSocketPath, {
       method: "invoke",
       bindingId,
       wireName: wireName(tool),
+      sourceTool,
+      activityTool,
       freeform: tool.freeform === true,
       ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
     }, invocationTimeout(bound));
@@ -204,11 +215,19 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
   ) => {
     const gateway = execGateway(bound);
     return gateway && gateway !== tool
-      ? invoke(bindingId, bound, gateway, { input: execGatewayProgram(wireName(tool), tool.freeform === true, payload) })
-      : invoke(bindingId, bound, tool, payload);
+      ? invoke(
+          bindingId,
+          bound,
+          gateway,
+          { input: execGatewayProgram(wireName(tool), tool.freeform === true, payload) },
+          sourceTool,
+          wireName(tool),
+        )
+      : invoke(bindingId, bound, tool, payload, sourceTool);
   };
 
   const invokeNestedNative = (
@@ -217,14 +236,20 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     nestedToolName: string,
     freeform: boolean,
     payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
   ) => {
     const gateway = execGateway(bound);
     if (!gateway) {
       throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
     }
-    return invoke(bindingId, bound, gateway, {
-      input: execGatewayProgram(nestedToolName, freeform, payload),
-    });
+    return invoke(
+      bindingId,
+      bound,
+      gateway,
+      { input: execGatewayProgram(nestedToolName, freeform, payload) },
+      sourceTool,
+      nestedToolName,
+    );
   };
 
   server.registerTool(
@@ -256,7 +281,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
     async ({ turn_token }, extra) => {
       console.error(`[lca-codex-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
-      const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, { method: "claim", token: turn_token });
+      const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, {
+        method: "claim",
+        token: turn_token,
+        sourceTool: "codex_bind_turn",
+      });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
       const expiresAt = claimed.environment.expiresAt === undefined
@@ -305,6 +334,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const context = await callTurnBroker<ContextQueryResult>(options.brokerSocketPath, {
         method: "context_query",
         bindingId: binding_id,
+        sourceTool: "codex_context",
         action,
         ...(query !== undefined ? { query } : {}),
         ...(ids !== undefined ? { ids } : {}),
@@ -351,8 +381,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
             ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
           };
       return tool
-        ? invokeNative(binding_id, bound, tool, { arguments: args })
-        : invokeNestedNative(binding_id, bound, commandName, false, { arguments: args });
+        ? invokeNative(binding_id, bound, tool, { arguments: args }, "codex_exec")
+        : invokeNestedNative(binding_id, bound, commandName, false, { arguments: args }, "codex_exec");
     },
   );
 
@@ -380,8 +410,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
       } };
       return tool
-        ? invokeNative(binding_id, bound, tool, payload)
-        : invokeNestedNative(binding_id, bound, "write_stdin", false, payload);
+        ? invokeNative(binding_id, bound, tool, payload, "codex_write_stdin")
+        : invokeNestedNative(binding_id, bound, "write_stdin", false, payload, "codex_write_stdin");
     },
   );
 
@@ -396,10 +426,17 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, patch }) => {
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "apply_patch");
-      if (!tool) return invokeNestedNative(binding_id, bound, "apply_patch", true, { input: patch });
+      if (!tool) return invokeNestedNative(
+        binding_id,
+        bound,
+        "apply_patch",
+        true,
+        { input: patch },
+        "codex_apply_patch",
+      );
       return tool.freeform
-        ? invokeNative(binding_id, bound, tool, { input: patch })
-        : invokeNative(binding_id, bound, tool, { arguments: { input: patch } });
+        ? invokeNative(binding_id, bound, tool, { input: patch }, "codex_apply_patch")
+        : invokeNative(binding_id, bound, tool, { arguments: { input: patch } }, "codex_apply_patch");
     },
   );
 
@@ -420,8 +457,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const tool = exactTool(bound, "view_image");
       const payload = { arguments: { path, ...(detail ? { detail } : {}) } };
       return tool
-        ? invokeNative(binding_id, bound, tool, payload)
-        : invokeNestedNative(binding_id, bound, "view_image", false, payload);
+        ? invokeNative(binding_id, bound, tool, payload, "codex_view_image")
+        : invokeNestedNative(binding_id, bound, "view_image", false, payload, "codex_view_image");
     },
   );
 
@@ -440,7 +477,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ binding_id, query, offset, limit, include_schema }) => {
-      const bound = await environment(binding_id);
+      const bound = await environment(binding_id, "codex_tool_inventory");
       const needle = query?.trim().toLowerCase();
       const matches = bound.tools.filter(tool => !needle || [
         wireName(tool),
@@ -483,10 +520,10 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       if (tool.freeform) {
         if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
         if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
-        return invokeNative(binding_id, bound, tool, { input });
+        return invokeNative(binding_id, bound, tool, { input }, "codex_tool_call");
       }
       if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-      return invokeNative(binding_id, bound, tool, { arguments: args ?? {} });
+      return invokeNative(binding_id, bound, tool, { arguments: args ?? {} }, "codex_tool_call");
     },
   );
 

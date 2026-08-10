@@ -11,7 +11,9 @@ const {
   bridgeStatus: vscodeAdvancedStatus,
   removeBridge: removeVsCodeAdvanced,
   repairBridge: repairVsCodeAdvanced,
+  resumeBridge: resumeVsCodeAdvanced,
   setupBridge: setupVsCodeAdvanced,
+  suspendBridge: suspendVsCodeAdvanced,
 } = require("./codex-lifecycle-bridge.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
@@ -167,6 +169,21 @@ class RuntimeHost {
       && this.activeChild.exitCode === null
       && this.activeChild.signalCode === null;
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
+  }
+
+  async waitForCodexConfigStatus() {
+    while (this.currentOperation() === "codex-config-status") {
+      const pending = this.codexConfigSnapshotInFlight;
+      if (!pending) {
+        await new Promise(resolve => setImmediate(resolve));
+        continue;
+      }
+      try {
+        await pending;
+      } catch {
+        // This read-only snapshot reports its own error. Lifecycle actions only need its lock released.
+      }
+    }
   }
 
   async cancelActiveOperation() {
@@ -695,6 +712,33 @@ class RuntimeHost {
     });
   }
 
+  resumeVsCodeAdvancedWithinOperation() {
+    return resumeVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      electronExecutable: process.execPath,
+      platform: this.platform,
+    });
+  }
+
+  suspendVsCodeAdvancedWithinOperation() {
+    return suspendVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      platform: this.platform,
+    });
+  }
+
+  suspendVsCodeAdvanced() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = "vscode-advanced-suspend";
+    try {
+      return this.suspendVsCodeAdvancedWithinOperation();
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
   async saveCodexConfig(content) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     if (typeof content !== "string") throw new Error("Codex config content must be text");
@@ -722,6 +766,22 @@ class RuntimeHost {
     };
   }
 
+  async connectBridgeRouteWithinOperation(operationName) {
+    const current = await this.bridgeStatus(operationName);
+    if (!current.installed) throw new Error("Install the Codex integration before starting the runtime");
+    if (current.active) return current;
+    const connected = await this.run(operationName, ["route", "connect"], {
+      embedded: true,
+      message: "Connecting Codex to the launcher",
+      successMessage: "Codex bridge connected",
+      timeoutMs: 15_000,
+    });
+    return {
+      ...parseBridgeRouteResult(connected.stdout, { expectedActive: true }),
+      installed: true,
+    };
+  }
+
   async restoreBridgeRoute(operationName = "bridge-route-restore") {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = operationName;
@@ -735,29 +795,73 @@ class RuntimeHost {
   async setBridgeEnabled(enabled) {
     const desired = enabled === true;
     const name = desired ? "bridge-connect" : "bridge-disconnect";
+    await this.waitForCodexConfigStatus();
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     this.lifecycleOperation = name;
     try {
-      const current = await this.bridgeStatus(name);
-      if (!current.installed) throw new Error("Install the Codex integration before changing the bridge route");
       if (desired) {
-        if (current.active) return current;
-        const connected = await this.run(name, ["route", "connect"], {
-          embedded: true,
-          message: "Connecting Codex to the launcher",
-          successMessage: "Codex bridge connected",
-          timeoutMs: 15_000,
-        });
-        return parseBridgeRouteResult(connected.stdout, { expectedActive: true });
+        return await this.connectBridgeRouteWithinOperation(name);
       }
-      if (!current.active) return current;
-      const disconnected = await this.run(name, ["route", "disconnect"], {
-        embedded: true,
-        message: "Restoring the previous Codex route",
-        successMessage: "Codex bridge disconnected",
-        timeoutMs: 15_000,
-      });
-      return parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
+      const restored = await this.restoreBridgeRouteWithinOperation(name);
+      if (!restored.installed) throw new Error("Install the Codex integration before changing the bridge route");
+      return restored;
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
+  async activateRuntimeBridge(operationName = "runtime-bridge-start") {
+    await this.waitForCodexConfigStatus();
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = operationName;
+    try {
+      const route = await this.connectBridgeRouteWithinOperation(operationName);
+      try {
+        const vscode = this.resumeVsCodeAdvancedWithinOperation();
+        return { route, vscode };
+      } catch (error) {
+        try {
+          await this.restoreBridgeRouteWithinOperation(operationName);
+          this.suspendVsCodeAdvancedWithinOperation();
+        } catch (rollbackError) {
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}; restoring native Codex after startup failure also failed:`
+            + ` ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          );
+        }
+        throw error;
+      }
+    } finally {
+      this.lifecycleOperation = null;
+    }
+  }
+
+  async deactivateRuntimeBridge(operationName = "runtime-bridge-stop") {
+    await this.waitForCodexConfigStatus();
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    this.lifecycleOperation = operationName;
+    try {
+      let route;
+      let routeError;
+      try {
+        route = await this.restoreBridgeRouteWithinOperation(operationName);
+      } catch (error) {
+        routeError = error;
+      }
+      let vscode;
+      let vscodeError;
+      try {
+        vscode = this.suspendVsCodeAdvancedWithinOperation();
+      } catch (error) {
+        vscodeError = error;
+      }
+      if (routeError || vscodeError) {
+        throw new Error([
+          routeError ? `restoring the native Codex route failed: ${routeError instanceof Error ? routeError.message : String(routeError)}` : null,
+          vscodeError ? `restoring VS Code cliExecutable failed: ${vscodeError instanceof Error ? vscodeError.message : String(vscodeError)}` : null,
+        ].filter(Boolean).join("; "));
+      }
+      return { route, vscode };
     } finally {
       this.lifecycleOperation = null;
     }
@@ -851,6 +955,7 @@ class RuntimeHost {
   }
 
   async upgradeManagedRuntime() {
+    await this.waitForCodexConfigStatus();
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
     const currentVersion = this.app.getVersion();

@@ -125,6 +125,38 @@ test("settled replay sessions expire from their last use instead of their creati
   sessions.clear();
 });
 
+test("a retryable browser failure schedules only one fresh browser attempt", async () => {
+  const sessions = new ChatGptTurnSessions();
+  const key = "bounded-retry";
+  let starts = 0;
+  let cancellations = 0;
+  const start = () => {
+    starts += 1;
+    return {
+      mode: "read-only" as const,
+      attempt: sessions.retryAttempt(key),
+      browser: Promise.reject(new Error("retryable upstream failure")),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => { cancellations += 1; },
+    };
+  };
+
+  const first = sessions.getOrCreate(key, start);
+  await first.browserOutcome;
+  expect(first.runtime.attempt).toBe(1);
+  expect(sessions.scheduleRetry(key, first)).toBe(2);
+
+  const second = sessions.getOrCreate(key, start);
+  await second.browserOutcome;
+  expect(second.runtime.attempt).toBe(2);
+  expect(sessions.scheduleRetry(key, second)).toBeNull();
+  expect(sessions.getOrCreate(key, start)).toBe(second);
+  expect(starts).toBe(2);
+  expect(cancellations).toBe(1);
+  sessions.clear();
+});
+
 test("turn broker creates its private runtime directory on a cold start", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-"));
   const socketPath = defaultBrokerEndpoint(root);

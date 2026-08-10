@@ -82,6 +82,7 @@ let browserHost = null;
 let runtimeHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
+let launcherStateStore = null;
 let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
@@ -283,6 +284,18 @@ function codexRestartPending(patch = {}) {
   };
 }
 
+function runtimeBridgeChanged(result) {
+  return result?.route?.changed === true || result?.vscode?.changed === true;
+}
+
+function updateRuntimeBridgeState(result, stateStore) {
+  if (!stateStore) return null;
+  const patch = { bridgeEnabled: result?.route?.active === true };
+  const state = stateStore.update(runtimeBridgeChanged(result) ? codexRestartPending(patch) : patch);
+  send("launcher:state-changed", state);
+  return state;
+}
+
 function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
   if (!upgrade?.updated) return;
   const state = stateStore.update(codexRestartPending({
@@ -304,26 +317,52 @@ function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
 }
 
 async function startManagedRuntime({ logger, stateStore }) {
-  const before = await runtimeSupervisor.observeRuntime();
-  if (before.lifecycle === "foreign") {
-    throw new Error(before.detail || "The configured Responses port is owned by another process");
-  }
-  if (before.lifecycle === "stale" || before.owner === "compatible-runtime") {
-    await runtimeSupervisor.stopRuntime();
-    const cleaned = await runtimeSupervisor.observeRuntime();
-    if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
-      throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
+  let runtimeStarted = false;
+  try {
+    const before = await runtimeSupervisor.observeRuntime();
+    if (before.lifecycle === "foreign") {
+      throw new Error(before.detail || "The configured Responses port is owned by another process");
     }
+    if (before.lifecycle === "stale" || before.owner === "compatible-runtime") {
+      await runtimeSupervisor.stopRuntime();
+      const cleaned = await runtimeSupervisor.observeRuntime();
+      if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
+        throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
+      }
+    }
+    const upgrade = await runtimeHost.upgradeManagedRuntime();
+    applyRuntimeUpgradeState(upgrade, { logger, stateStore });
+    const status = await runtimeSupervisor.startRuntime();
+    runtimeStarted = status.lifecycle === "ready";
+    send("launcher:runtime-state", status);
+    if (runtimeStarted) {
+      const bridge = await runtimeHost.activateRuntimeBridge();
+      updateRuntimeBridgeState(bridge, stateStore);
+      startCatalogVerificationMonitor({ logger, stateStore });
+    }
+    return status;
+  } catch (error) {
+    stopCatalogVerificationMonitor();
+    let message = error instanceof Error ? error.message : String(error);
+    try {
+      const bridge = await runtimeHost.deactivateRuntimeBridge("runtime-start-fail-safe");
+      updateRuntimeBridgeState(bridge, stateStore);
+    } catch (restoreError) {
+      message += `; restoring native Codex after startup failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
+    }
+    if (runtimeStarted) {
+      try {
+        const stopped = await runtimeSupervisor.stopRuntime();
+        send("launcher:runtime-state", stopped);
+      } catch (stopError) {
+        message += `; stopping the runtime after startup failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`;
+      }
+    }
+    throw new Error(message);
   }
-  const upgrade = await runtimeHost.upgradeManagedRuntime();
-  applyRuntimeUpgradeState(upgrade, { logger, stateStore });
-  const status = await runtimeSupervisor.startRuntime();
-  send("launcher:runtime-state", status);
-  if (status.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
-  return status;
 }
 
-async function stopManagedRuntime({ logger } = {}) {
+async function stopManagedRuntime({ logger, stateStore, restoreCodex = true } = {}) {
   browserHost?.abortAllTurns();
   stopCatalogVerificationMonitor();
   try {
@@ -333,13 +372,17 @@ async function stopManagedRuntime({ logger } = {}) {
       message: error instanceof Error ? error.message : String(error),
     });
   }
+  if (restoreCodex && runtimeHost) {
+    const bridge = await runtimeHost.deactivateRuntimeBridge();
+    updateRuntimeBridgeState(bridge, stateStore);
+  }
   const status = await runtimeSupervisor.stopRuntime();
   send("launcher:runtime-state", status);
   return status;
 }
 
 async function restartManagedRuntime({ logger, stateStore }) {
-  await stopManagedRuntime({ logger });
+  await stopManagedRuntime({ logger, stateStore, restoreCodex: false });
   return startManagedRuntime({ logger, stateStore });
 }
 
@@ -392,26 +435,6 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
   catalogVerificationTimer = setInterval(() => { void check(); }, 2_000);
   catalogVerificationTimer.unref?.();
   void check();
-}
-
-async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
-  try {
-    const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
-    if (!route.installed || route.active) return { restored: false };
-    const state = stateStore.update(codexRestartPending({
-      bridgeEnabled: false,
-    }));
-    send("launcher:state-changed", state);
-    stopCatalogVerificationMonitor();
-    logger.warn("bridge.route_restored_after_runtime_failure", {
-      changed: route.changed === true,
-    });
-    return { restored: true };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
-    return { restored: false, error: message };
-  }
 }
 
 function trayImage() {
@@ -606,7 +629,7 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:runtime-status", () => publishRuntimeStatus());
   handle("launcher:runtime-start", () => startManagedRuntime({ logger, stateStore }));
-  handle("launcher:runtime-stop", () => stopManagedRuntime({ logger }));
+  handle("launcher:runtime-stop", () => stopManagedRuntime({ logger, stateStore }));
   handle("launcher:runtime-restart", () => restartManagedRuntime({ logger, stateStore }));
 
   handle("launcher:open-external", async (_event, url) => {
@@ -680,7 +703,18 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:doctor", () => runtimeHost.doctor());
   handle("launcher:codex-config", () => runtimeHost.codexConfigSnapshot());
   handle("launcher:vscode-advanced-config", () => runtimeHost.vscodeAdvancedSnapshot());
-  handle("launcher:vscode-advanced-setup", () => runtimeHost.setupVsCodeAdvanced());
+  handle("launcher:vscode-advanced-setup", async () => {
+    const configured = runtimeHost.setupVsCodeAdvanced();
+    try {
+      const runtime = await runtimeSupervisor.observeRuntime();
+      if (runtime.lifecycle === "ready") return configured;
+    } catch (error) {
+      logger.warn("codex.vscode_runtime_status_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return runtimeHost.suspendVsCodeAdvanced();
+  });
   handle("launcher:vscode-advanced-proxy-install", () => runtimeHost.installVsCodeAdvancedProxy());
   handle("launcher:vscode-advanced-remove", () => runtimeHost.removeVsCodeAdvanced());
   handle("launcher:codex-config-save", async (_event, content) => {
@@ -693,16 +727,6 @@ function registerIpc({ logger, stateStore }) {
     return { config, state };
   });
   handle("launcher:cancel-turns", () => runtimeHost.cancelBrowserTurns());
-  handle("launcher:bridge-enabled", async (_event, enabled) => {
-    const result = await runtimeHost.setBridgeEnabled(enabled === true);
-    const state = stateStore.update(codexRestartPending({
-      bridgeEnabled: result.active,
-    }));
-    send("launcher:state-changed", state);
-    if (result.active) startCatalogVerificationMonitor({ logger, stateStore });
-    else stopCatalogVerificationMonitor();
-    return state;
-  });
   handle("launcher:uninstall-integration", async () => {
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: "warning",
@@ -902,11 +926,14 @@ async function requestQuit() {
       }
     }
     try {
-      await runtimeSupervisor?.shutdown();
+      if (runtimeSupervisor) {
+        await stopManagedRuntime({ logger: loggerForQuit(), stateStore: launcherStateStore });
+      }
     } catch (error) {
       loggerForQuit()?.error?.("runtime.shutdown_failed_on_quit", {
         message: error instanceof Error ? error.message : String(error),
       });
+      throw error;
     }
     quitting = true;
     browserHost?.destroy();
@@ -959,6 +986,7 @@ async function start() {
   };
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  launcherStateStore = stateStore;
   if (stateStore.read().sessionRefreshReminderAt === null) {
     stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
   }
@@ -1117,7 +1145,7 @@ async function start() {
       });
     }
 
-    await publishRuntimeStatus();
+    const runtime = await publishRuntimeStatus();
     startRuntimeStatusMonitor({ logger, stateStore });
     if (stateStore.read().runtimeAutoStart === true) {
       try {
@@ -1129,6 +1157,15 @@ async function start() {
         publishOperation({
           name: "runtime-start",
           status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else if (runtime.lifecycle !== "ready") {
+      try {
+        const bridge = await runtimeHost.deactivateRuntimeBridge("runtime-startup-native-restore");
+        updateRuntimeBridgeState(bridge, stateStore);
+      } catch (error) {
+        logger.warn("bridge.startup_native_restore_failed", {
           message: error instanceof Error ? error.message : String(error),
         });
       }
