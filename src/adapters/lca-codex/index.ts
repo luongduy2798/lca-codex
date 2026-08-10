@@ -183,11 +183,13 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     traceId: string,
     turnCapabilities: LcaCodexCapabilities,
     attempt: number,
+    threadId?: string,
   ): ChatGptTurnRuntime => {
     const startedAt = Date.now();
     const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     logLcaCodexActivity("lca_codex.turn_started", {
       traceId,
+      ...(threadId ? { threadId } : {}),
       attempt,
       mode: mode.localTools ? "tools" : "read-only",
     });
@@ -320,7 +322,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
       const attempt = chatGptTurnSessions.retryAttempt(executionKey);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
-        () => startRuntime(parsed, environment, traceId, turnCapabilities, attempt),
+        () => startRuntime(parsed, environment, traceId, turnCapabilities, attempt, identity.threadId),
         {
           threadId: identity.threadId,
           turnId: identity.turnId,

@@ -5,6 +5,8 @@ const { renameAtomicFile } = require("./atomic-file.cjs");
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
+const MAX_THREAD_TITLE_CHARS = 240;
+const THREAD_TITLE_REFRESH_MS = 1_000;
 const LCA_CODEX_ACTIVITY_PREFIX = "[lca-codex-activity] ";
 const LCA_CODEX_HELPER_ACTIVITY_PREFIX = `[lca-codex-helper] ${LCA_CODEX_ACTIVITY_PREFIX}`;
 const LCA_CODEX_ACTIVITY_EVENTS = new Set([
@@ -34,6 +36,7 @@ const LCA_CODEX_ACTIVITY_DETAIL_KEYS = new Set([
   "sinceSendMs",
   "status",
   "tool",
+  "threadId",
   "traceId",
 ]);
 
@@ -124,8 +127,79 @@ function readRecent(filePath) {
   }
 }
 
-function createLogger({ filePath, publish }) {
+function activityIdentifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{6,200}$/.test(value) ? value : null;
+}
+
+function createThreadTitleLookup(filePath) {
+  let indexSignature = "";
+  let nextRefreshAt = 0;
+  let titles = new Map();
+
+  const refresh = () => {
+    const now = Date.now();
+    if (!filePath || now < nextRefreshAt) return;
+    nextRefreshAt = now + THREAD_TITLE_REFRESH_MS;
+    try {
+      const stat = fs.statSync(filePath);
+      const signature = `${stat.mtimeMs}:${stat.size}`;
+      if (signature === indexSignature) return;
+      const next = new Map();
+      for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+        if (!line) continue;
+        try {
+          const item = JSON.parse(line);
+          const id = activityIdentifier(item?.id);
+          const title = typeof item?.thread_name === "string"
+            ? redactText(item.thread_name).replace(/\s+/g, " ").trim().slice(0, MAX_THREAD_TITLE_CHARS)
+            : "";
+          if (id && title) next.set(id, title);
+        } catch {}
+      }
+      titles = next;
+      indexSignature = signature;
+    } catch {
+      titles = new Map();
+      indexSignature = "";
+    }
+  };
+
+  return (threadId) => {
+    refresh();
+    return titles.get(threadId);
+  };
+}
+
+function createActivityRecordDecorator(records, threadIndexPath) {
+  const traceThreads = new Map();
+  const titleForThread = createThreadTitleLookup(threadIndexPath);
+  const threadForRecord = (record) => {
+    const traceId = activityIdentifier(record?.detail?.traceId);
+    const explicitThreadId = activityIdentifier(record?.detail?.threadId);
+    if (traceId && explicitThreadId) traceThreads.set(traceId, explicitThreadId);
+    return explicitThreadId || (traceId ? traceThreads.get(traceId) : null);
+  };
+
+  for (const record of records) threadForRecord(record);
+  return (record) => {
+    const threadId = threadForRecord(record);
+    if (!threadId) return record;
+    const chatTitle = titleForThread(threadId);
+    // Chat titles are display-only metadata; keep them out of the persisted launcher log.
+    return {
+      ...record,
+      detail: {
+        ...record.detail,
+        threadId,
+        ...(chatTitle ? { chatTitle } : {}),
+      },
+    };
+  };
+}
+
+function createLogger({ filePath, publish, threadIndexPath }) {
   const records = readRecent(filePath);
+  const decorateActivityRecord = createActivityRecordDecorator(records, threadIndexPath);
 
   const append = (level, event, detail = {}) => {
     const record = {
@@ -145,7 +219,8 @@ function createLogger({ filePath, publish }) {
       }
       fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     } catch {}
-    publish?.(record);
+    const displayRecord = decorateActivityRecord(record);
+    publish?.(displayRecord);
     return record;
   };
 
@@ -154,7 +229,9 @@ function createLogger({ filePath, publish }) {
     info: (event, detail) => append("info", event, detail),
     warn: (event, detail) => append("warning", event, detail),
     error: (event, detail) => append("error", event, detail),
-    recent: (limit = 150) => records.slice(-Math.max(1, Math.min(300, limit))),
+    recent: (limit = 150) => records
+      .slice(-Math.max(1, Math.min(300, limit)))
+      .map(decorateActivityRecord),
     filePath,
   };
 }

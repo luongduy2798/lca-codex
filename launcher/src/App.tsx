@@ -1657,6 +1657,124 @@ function RuntimeDetail({ description, label, value }: { description?: string; la
   );
 }
 
+type ActivitySource = "chatgpt" | "lca" | "codex" | "system";
+type ActivityTaskStatus = "running" | "waiting" | "stalled" | "failed" | "completed";
+
+interface ActivityToolSummary {
+  source: "lca" | "codex";
+  tool: string;
+  count: number;
+}
+
+interface ActivityTaskGroup {
+  traceId: string;
+  threadId?: string;
+  chatTitle?: string;
+  records: LogRecord[];
+  startedAt: string;
+  lastAt: string;
+  durationMs: number;
+  attempt: number;
+  tools: ActivityToolSummary[];
+  source: ActivitySource;
+  status: ActivityTaskStatus;
+}
+
+function ActivitySourceFlag({ source }: { source: ActivitySource }) {
+  return (
+    <span className={`activity-source-flag is-${source}`}>
+      {activitySourceLabel(source)}
+    </span>
+  );
+}
+
+function ActivityRecordRow({ grouped, record }: {
+  grouped: boolean;
+  record: LogRecord;
+}) {
+  const source = activityRecordSource(record);
+  return (
+    <div className={`activity-row is-source-${source}`}>
+      <ActivitySourceFlag source={source} />
+      <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
+      <div>
+        <strong>{humanEvent(record.event)}</strong>
+        <span>{logDetail(record.event, record.detail, grouped)}</span>
+      </div>
+      <time>{formatTime(record.at)}</time>
+    </div>
+  );
+}
+
+function ActivityTaskCard({ expanded, group, onToggle }: {
+  expanded: boolean;
+  group: ActivityTaskGroup;
+  onToggle: () => void;
+}) {
+  const toolMeta = activityTaskToolMeta(group);
+  return (
+    <section className={`activity-task is-${group.status}`}>
+      <button
+        aria-expanded={expanded}
+        className="activity-task-header"
+        onClick={onToggle}
+        type="button"
+      >
+        <Icon name="chevron" />
+        <span className="activity-task-heading">
+          <span className="activity-task-title-line">
+            <strong title={activityTaskTooltip(group)}>{activityTaskTitle(group)}</strong>
+            <span className={`activity-task-status is-${group.status}`}>
+              {activityTaskStatusLabel(group)}
+            </span>
+          </span>
+          <small>{activityTaskMeta(group)}</small>
+          <small className="activity-task-tools" title={toolMeta}>{toolMeta}</small>
+        </span>
+        <time>{formatTime(group.startedAt)}</time>
+      </button>
+      {expanded ? (
+        <div className="activity-task-records">
+          {[...group.records].reverse().map((record, index) => (
+            <ActivityRecordRow grouped key={`${record.at}-${record.event}-${index}`} record={record} />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SystemActivityCard({ expanded, onToggle, records }: {
+  expanded: boolean;
+  onToggle: () => void;
+  records: LogRecord[];
+}) {
+  return (
+    <section className="activity-task activity-system-task">
+      <button
+        aria-expanded={expanded}
+        className="activity-task-header"
+        onClick={onToggle}
+        type="button"
+      >
+        <Icon name="chevron" />
+        <span className="activity-task-heading">
+          <span className="activity-task-title-line"><strong>System activity</strong></span>
+          <small>{`${records.length} event${records.length === 1 ? "" : "s"}`}</small>
+        </span>
+        <ActivitySourceFlag source="system" />
+      </button>
+      {expanded ? (
+        <div className="activity-task-records">
+          {[...records].reverse().map((record, index) => (
+            <ActivityRecordRow grouped={false} key={`${record.at}-${record.event}-${index}`} record={record} />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ActivitySurface({
   copy,
   logs,
@@ -1666,6 +1784,19 @@ function ActivitySurface({
   logs: LogRecord[];
   setError: (error: string | null) => void;
 }) {
+  const [now, setNow] = useState(() => Date.now());
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const activity = useMemo(() => groupActivityLogs(logs, now), [logs, now]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const toggleGroup = (key: string, expanded: boolean) => {
+    setExpandedGroups((current) => ({ ...current, [key]: !expanded }));
+  };
+
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
       <div className="section-heading activity-heading">
@@ -1684,16 +1815,26 @@ function ActivitySurface({
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {[...logs].reverse().map((record, index) => (
-          <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
-            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
-            <div>
-              <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.event, record.detail)}</span>
-            </div>
-            <time>{formatTime(record.at)}</time>
-          </div>
-        ))}
+        {activity.tasks.map((group, index) => {
+          const key = `task:${group.traceId}`;
+          const defaultExpanded = index === 0 || !["completed", "stalled"].includes(group.status);
+          const expanded = expandedGroups[key] ?? defaultExpanded;
+          return (
+            <ActivityTaskCard
+              expanded={expanded}
+              group={group}
+              key={key}
+              onToggle={() => toggleGroup(key, expanded)}
+            />
+          );
+        })}
+        {activity.system.length > 0 ? (
+          <SystemActivityCard
+            expanded={expandedGroups.system ?? (activity.tasks.length === 0)}
+            onToggle={() => toggleGroup("system", expandedGroups.system ?? (activity.tasks.length === 0))}
+            records={activity.system}
+          />
+        ) : null}
       </div>
     </ContentSurface>
   );
@@ -2230,6 +2371,253 @@ function platformLabel(value: string): string {
   return value === "darwin" ? "macOS" : value === "win32" ? "Windows" : value === "linux" ? "Linux" : value;
 }
 
+const CHATGPT_ACTIVITY_EVENTS = new Set([
+  "lca_codex.turn_send_accepted",
+  "lca_codex.turn_first_response",
+  "lca_codex.turn_first_reasoning",
+  "lca_codex.turn_first_text",
+  "lca_codex.turn_completed",
+  "lca_codex.turn_failed",
+]);
+const ACTIVITY_STALLED_MS = 30_000;
+
+function activitySourceLabel(source: ActivitySource): string {
+  if (source === "chatgpt") return "CHATGPT";
+  if (source === "lca") return "LCA CODEX";
+  if (source === "codex") return "CODEX NATIVE";
+  return "SYSTEM";
+}
+
+function activityRecordSource(record: LogRecord): ActivitySource {
+  if (record.event === "lca_codex.tool_started" || record.event === "lca_codex.tool_completed") {
+    if (record.detail.layer === "codex") return "codex";
+    if (record.detail.layer === "lca") return "lca";
+  }
+  if (CHATGPT_ACTIVITY_EVENTS.has(record.event)) return "chatgpt";
+  if (record.event.startsWith("browser.") || record.event.startsWith("smoke.")) return "chatgpt";
+  if (record.event.startsWith("lca_codex.")) return "lca";
+  const line = typeof record.detail.line === "string" ? record.detail.line : "";
+  if (/\bbrowser (?:turn|diagnostic)\b/.test(line)) return "chatgpt";
+  if (/\bbroker\b|\[lca-codex-mcp\]/.test(line)) return "lca";
+  if (record.event.startsWith("runtime.daemon_")
+    || record.event.startsWith("connector.")
+    || record.event.startsWith("bridge.")) return "lca";
+  if (record.event.startsWith("codex.")) return "codex";
+  return "system";
+}
+
+function activityTraceId(record: LogRecord): string | null {
+  const explicit = typeof record.detail.traceId === "string" ? record.detail.traceId.trim() : "";
+  if (explicit && explicit !== "unknown") return explicit;
+  const line = typeof record.detail.line === "string" ? record.detail.line : "";
+  const browserTurn = /\bbrowser turn ([A-Za-z0-9_-]{6,128})\b/.exec(line)?.[1];
+  if (browserTurn && browserTurn !== "unknown") return browserTurn;
+  const trace = /\btrace=([A-Za-z0-9_-]{6,128})\b/.exec(line)?.[1];
+  return trace && trace !== "unknown" ? trace : null;
+}
+
+function activityTimestamp(record: LogRecord): number {
+  const timestamp = Date.parse(record.at);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function activityToolKey(record: LogRecord): string {
+  const source = activityRecordSource(record);
+  const callId = typeof record.detail.callId === "string" ? record.detail.callId : "";
+  const tool = typeof record.detail.tool === "string" ? record.detail.tool : "tool";
+  return `${source}:${callId || tool}`;
+}
+
+function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number): ActivityTaskGroup {
+  const records = [...input].sort((left, right) => activityTimestamp(left) - activityTimestamp(right));
+  const pendingTools = new Map<string, ActivitySource>();
+  const toolCounts = new Map<string, ActivityToolSummary>();
+  let status: "failed" | "completed" | undefined;
+  let terminalAt: number | undefined;
+  let phase: "running" | "waiting" = "running";
+  let source: ActivitySource = "lca";
+  let attempt = 1;
+  let threadId: string | undefined;
+  let chatTitle: string | undefined;
+  let sawStart = false;
+
+  for (const record of records) {
+    const recordSource = activityRecordSource(record);
+    const recordAttempt = record.detail.attempt;
+    const recordThreadId = record.detail.threadId;
+    const recordChatTitle = record.detail.chatTitle;
+    if (typeof recordAttempt === "number" && Number.isFinite(recordAttempt)) {
+      attempt = Math.max(attempt, Math.max(1, Math.round(recordAttempt)));
+    }
+    if (typeof recordThreadId === "string" && recordThreadId.trim()) threadId = recordThreadId.trim();
+    if (typeof recordChatTitle === "string" && recordChatTitle.trim()) chatTitle = recordChatTitle.trim();
+
+    if (record.event === "lca_codex.turn_started") {
+      sawStart = true;
+      status = undefined;
+      terminalAt = undefined;
+      pendingTools.clear();
+      phase = "running";
+      source = "lca";
+    } else if (record.event === "browser.turn_started") {
+      sawStart = true;
+      if (!status) {
+        phase = "running";
+        source = "chatgpt";
+      }
+    } else if (record.event === "browser.turn_ended") {
+      const browserStatus = record.detail.status;
+      if (browserStatus === "completed") status = "completed";
+      else if (browserStatus === "failed" || browserStatus === "aborted") status = "failed";
+      if (status) terminalAt = activityTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_send_accepted"
+      || record.event === "lca_codex.turn_first_response"
+      || record.event === "lca_codex.turn_first_reasoning") {
+      phase = "waiting";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_first_text") {
+      phase = "running";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_completed") {
+      status = "completed";
+      terminalAt = activityTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_failed") {
+      status = "failed";
+      terminalAt = activityTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_retry_scheduled") {
+      status = undefined;
+      terminalAt = undefined;
+      phase = "waiting";
+      source = "lca";
+    } else if (record.event === "lca_codex.turn_retry_stopped") {
+      status = "failed";
+      terminalAt = activityTimestamp(record);
+      source = "lca";
+    } else if (record.event === "lca_codex.tool_started") {
+      pendingTools.set(activityToolKey(record), recordSource);
+      if (recordSource === "lca" || recordSource === "codex") {
+        const tool = typeof record.detail.tool === "string" && record.detail.tool.trim()
+          ? record.detail.tool.trim()
+          : "unknown";
+        const key = `${recordSource}:${tool}`;
+        toolCounts.set(key, {
+          source: recordSource,
+          tool,
+          count: (toolCounts.get(key)?.count ?? 0) + 1,
+        });
+      }
+      phase = "waiting";
+      source = recordSource;
+    } else if (record.event === "lca_codex.tool_completed") {
+      pendingTools.delete(activityToolKey(record));
+      phase = "waiting";
+      source = recordSource === "codex" ? "lca" : "chatgpt";
+    } else if (!status && recordSource !== "system") {
+      source = recordSource;
+    }
+  }
+
+  const pendingSources = [...pendingTools.values()];
+  if (pendingSources.includes("codex")) source = "codex";
+  else if (pendingSources.includes("lca")) source = "lca";
+
+  const first = records.find(record => record.event === "lca_codex.turn_started") ?? records[0]!;
+  const last = records.at(-1)!;
+  const startedAt = activityTimestamp(first);
+  const lastAt = activityTimestamp(last);
+  // Native Codex tools can legitimately run for longer than the quiet-task threshold.
+  const stalled = status === undefined
+    && sawStart
+    && !pendingSources.includes("codex")
+    && now - lastAt >= ACTIVITY_STALLED_MS;
+  const taskStatus: ActivityTaskStatus = status
+    ?? (stalled ? "stalled" : pendingTools.size > 0 || phase === "waiting" ? "waiting" : "running");
+  const endedAt = terminalAt ?? now;
+
+  return {
+    traceId,
+    ...(threadId ? { threadId } : {}),
+    ...(chatTitle ? { chatTitle } : {}),
+    records,
+    startedAt: first.at,
+    lastAt: last.at,
+    durationMs: Math.max(0, endedAt - startedAt),
+    attempt,
+    tools: [...toolCounts.values()].sort((left, right) => (
+      left.source.localeCompare(right.source) || left.tool.localeCompare(right.tool)
+    )),
+    source,
+    status: taskStatus,
+  };
+}
+
+function groupActivityLogs(logs: LogRecord[], now: number): {
+  tasks: ActivityTaskGroup[];
+  system: LogRecord[];
+} {
+  const byTraceId = new Map<string, LogRecord[]>();
+  const system: LogRecord[] = [];
+  for (const record of logs) {
+    const traceId = activityTraceId(record);
+    if (!traceId) {
+      system.push(record);
+      continue;
+    }
+    const records = byTraceId.get(traceId) ?? [];
+    records.push(record);
+    byTraceId.set(traceId, records);
+  }
+  const tasks = [...byTraceId]
+    .map(([traceId, records]) => buildActivityTaskGroup(traceId, records, now))
+    .sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt));
+  system.sort((left, right) => activityTimestamp(left) - activityTimestamp(right));
+  return { tasks, system };
+}
+
+function activityTaskStatusLabel(group: ActivityTaskGroup): string {
+  if (group.status === "completed") return "COMPLETED";
+  if (group.status === "failed") return "FAILED";
+  if (group.status === "stalled") return `STALLED · ${activitySourceLabel(group.source)}`;
+  if (group.status === "waiting") return `WAITING FOR ${activitySourceLabel(group.source)}`;
+  return `RUNNING · ${activitySourceLabel(group.source)}`;
+}
+
+function activityTaskTitle(group: ActivityTaskGroup): string {
+  return group.chatTitle ?? (group.threadId ? `Chat ${group.threadId.slice(0, 8)}` : `Task ${group.traceId}`);
+}
+
+function activityTaskTooltip(group: ActivityTaskGroup): string {
+  return [
+    ...(group.chatTitle ? [`Chat: ${group.chatTitle}`] : []),
+    ...(group.threadId ? [`Chat ID: ${group.threadId}`] : []),
+    `Task ID: ${group.traceId}`,
+  ].join("\n");
+}
+
+function activityTaskMeta(group: ActivityTaskGroup): string {
+  const events = group.records.length === 1 ? "1 event" : `${group.records.length} events`;
+  return [
+    ...(group.threadId ? [`Chat ID ${group.threadId.slice(0, 8)}`] : []),
+    `Task ID ${group.traceId}`,
+    `Attempt ${group.attempt}`,
+    formatActivityDuration(group.durationMs),
+    events,
+  ].join(" · ");
+}
+
+function activityTaskToolMeta(group: ActivityTaskGroup): string {
+  const summary = (source: "lca" | "codex") => {
+    const count = group.tools
+      .filter(tool => tool.source === source)
+      .reduce((total, tool) => total + tool.count, 0);
+    return `${count} tool${count === 1 ? "" : "s"}`;
+  };
+  return `LCA CODEX: ${summary("lca")} · CODEX NATIVE: ${summary("codex")}`;
+}
+
 const lcaActivityEventLabels: Record<string, string> = {
   "lca_codex.turn_started": "LCA Codex turn started",
   "lca_codex.turn_send_accepted": "Prompt accepted by ChatGPT",
@@ -2277,7 +2665,7 @@ function lcaActivityDetail(key: string, value: unknown): string {
   return key === "tool" ? String(value) : `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`;
 }
 
-function logDetail(event: string, detail: Record<string, unknown>): string {
+function logDetail(event: string, detail: Record<string, unknown>, grouped = false): string {
   const entries = Object.entries(detail).filter(([, value]) => value !== undefined && value !== null);
   if (entries.length === 0) return "";
   if (event.startsWith("lca_codex.")) {
@@ -2299,11 +2687,12 @@ function logDetail(event: string, detail: Record<string, unknown>): string {
     ];
     const values = new Map(entries);
     return order
-      .filter((key) => values.has(key))
+      .filter((key) => values.has(key) && (!grouped || !["traceId", "threadId", "chatTitle", "layer"].includes(key)))
       .map((key) => lcaActivityDetail(key, values.get(key)))
       .join(" · ");
   }
   return entries
+    .filter(([key]) => !grouped || !["traceId", "threadId", "chatTitle"].includes(key))
     .slice(0, 3)
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     .join(" · ");

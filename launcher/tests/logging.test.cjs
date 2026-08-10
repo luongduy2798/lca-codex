@@ -24,12 +24,13 @@ test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", ()
   });
 });
 
-test("LCA Codex activity accepts only known payload-free timing fields", () => {
+test("LCA Codex activity accepts only known payload-free diagnostic fields", () => {
   const parsed = parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
     event: "lca_codex.tool_completed",
     level: "info",
     detail: {
       traceId: "abc123",
+      threadId: "thread_test_123",
       layer: "codex",
       tool: "mcp__files__read",
       durationMs: 1_250,
@@ -45,6 +46,7 @@ test("LCA Codex activity accepts only known payload-free timing fields", () => {
     level: "info",
     detail: {
       traceId: "abc123",
+      threadId: "thread_test_123",
       layer: "codex",
       tool: "mcp__files__read",
       durationMs: 1_250,
@@ -91,6 +93,32 @@ test("launcher activity restores valid records from the previous process", () =>
     ].join("\n"));
     const logger = createLogger({ filePath });
     assert.deepEqual(logger.recent().map((record) => record.event), ["previous"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher activity links task traces to the latest local Codex chat title", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-thread-title-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const threadIndexPath = path.join(root, "session_index.jsonl");
+  const published = [];
+  try {
+    fs.writeFileSync(threadIndexPath, [
+      JSON.stringify({ id: "thread_test_123", thread_name: "Old title" }),
+      JSON.stringify({ id: "thread_test_123", thread_name: "Current title" }),
+      "",
+    ].join("\n"));
+    const logger = createLogger({ filePath, threadIndexPath, publish: record => published.push(record) });
+    logger.info("lca_codex.turn_started", { traceId: "trace123", threadId: "thread_test_123" });
+    logger.info("browser.turn_started", { traceId: "trace123" });
+
+    assert.deepEqual(published.map(record => record.detail), [
+      { traceId: "trace123", threadId: "thread_test_123", chatTitle: "Current title" },
+      { traceId: "trace123", threadId: "thread_test_123", chatTitle: "Current title" },
+    ]);
+    assert.equal(logger.recent()[0].detail.chatTitle, "Current title");
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8").split("\n")[0]).detail.chatTitle, undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

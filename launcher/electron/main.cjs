@@ -53,6 +53,9 @@ function resolveUserPath(value) {
 const CORE_HOME = process.env.LCA_CODEX_HOME?.trim()
   ? resolveUserPath(process.env.LCA_CODEX_HOME.trim())
   : path.join(os.homedir(), ".lca-codex");
+const CODEX_HOME = process.env.CODEX_HOME?.trim()
+  ? resolveUserPath(process.env.CODEX_HOME.trim())
+  : path.join(os.homedir(), ".codex");
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
@@ -1005,6 +1008,7 @@ async function start() {
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
+    threadIndexPath: path.join(CODEX_HOME, "session_index.jsonl"),
   });
   codexUsageUpsellPatcher = new CodexUsageUpsellPatcher({ logger });
   syncCodexUsageUpsellPatch({ logger, stateStore, migrateExisting: true });
@@ -1049,6 +1053,7 @@ async function start() {
     installedRuntimeRoot,
     runtimeRootProvider,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
+    codexHome: CODEX_HOME,
     coreHome: CORE_HOME,
     publishOperation,
     supervisor: runtimeSupervisor,

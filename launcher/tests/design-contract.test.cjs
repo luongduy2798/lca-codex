@@ -64,6 +64,22 @@ test("runtime sidebar stays visible at every window width", () => {
   assert.match(styles, /\.workspace\s*\{[^}]*min-width:\s*0[^}]*flex:\s*1/s);
 });
 
+test("Activity groups task logs and labels the active execution layer", () => {
+  assert.match(appSource, /function groupActivityLogs\(/);
+  assert.match(appSource, /function activityTraceId\(/);
+  assert.match(appSource, /ACTIVITY_STALLED_MS = 30_000/);
+  assert.match(appSource, /"CHATGPT"[\s\S]*?"LCA CODEX"[\s\S]*?"CODEX NATIVE"[\s\S]*?"SYSTEM"/);
+  assert.match(appSource, /WAITING FOR \$\{activitySourceLabel\(group\.source\)\}/);
+  assert.match(appSource, /className="activity-task-header"/);
+  assert.match(appSource, /Chat ID: \$\{group\.threadId\}/);
+  assert.match(appSource, /LCA CODEX:[\s\S]*?CODEX NATIVE:/);
+  assert.match(appSource, /\[\.\.\.group\.records\]\.reverse\(\)/);
+  assert.match(styles, /\.activity-source-flag\.is-chatgpt/);
+  assert.match(styles, /\.activity-source-flag\.is-lca/);
+  assert.match(styles, /\.activity-source-flag\.is-codex/);
+  assert.match(styles, /\.activity-task-status\.is-stalled/);
+});
+
 test("embedded ChatGPT is measured after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);
