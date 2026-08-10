@@ -1113,6 +1113,23 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(buffer.finish()).toEqual({ markdown: "Alpha beta gamma delta", delta: "" });
   });
 
+  test("a stalled formatted tail does not commit closing Markdown before generation resumes", () => {
+    const buffer = new ChatGptMarkdownBuffer();
+    const stalled = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ t</strong></p>";
+    const completed = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ thuộc vào việc đang có Codex task chạy</strong>.</p>";
+
+    expect(buffer.observeHtml(stalled)).toBe("");
+    expect(buffer.observeHtml(stalled)).toBe("");
+    expect(buffer.observeHtml(completed)).toBe("Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ t");
+
+    const final = buffer.finish();
+    expect(final).toEqual({
+      markdown: "Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ thuộc vào việc đang có Codex task chạy**.",
+      delta: "huộc vào việc đang có Codex task chạy**.",
+    });
+    expect(final.markdown.indexOf("Đã tiếp và fix đúng lỗi đó", 1)).toBe(-1);
+  });
+
   test("a near-tail browser replay resumes without appending the answer from the beginning", () => {
     const stablePrefix = "Stable answer prefix that has already streamed to Codex. ".repeat(4);
     const first = `${stablePrefix}request-receivX`;

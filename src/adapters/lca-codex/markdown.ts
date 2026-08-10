@@ -103,6 +103,10 @@ function suffixPrefixOverlapLength(left: string, right: string, minimum = 32, ma
   return matched >= minimum ? matched : 0;
 }
 
+function hasMovableTrailingMarkdownClosure(markdown: string): boolean {
+  return /(?:\*{1,3}|_{1,3}|~{2}|`{1,3}|\]\([^\n)]*\))$/.test(markdown);
+}
+
 function segmentsToMarkdown(segments: ChatGptMarkdownSegment[]): string {
   let markdown = "";
   let lastGroup: string | undefined;
@@ -122,10 +126,11 @@ function segmentsToMarkdown(segments: ChatGptMarkdownSegment[]): string {
  * Mirrors the Markdown currently visible in ChatGPT into an append-only Codex stream.
  *
  * There is deliberately no block-type gating. Every poll serializes the whole visible answer. The
- * common prefix shared by the previous and current snapshots is already proven to have remained on
- * screen for one poll, so that prefix can be appended immediately. This naturally streams headings,
- * lists, bold text and code without waiting for a following DOM block: Markdown closing markers that
- * move as text grows simply fall outside the common prefix until they stop moving.
+ * common prefix shared by consecutive snapshots can be appended immediately. The one exception is
+ * an unchanged snapshot ending in synthetic Markdown closure (`**`, backticks, link destination,
+ * etc.): a temporarily stalled formatted DOM node can grow again *before* that closure. Committing
+ * the closure during the stall would make the later snapshot incompatible with the append-only
+ * Responses stream, so it waits for either real growth or explicit completion evidence.
  */
 export class ChatGptMarkdownBuffer {
   private previousSnapshot = "";
@@ -219,7 +224,9 @@ export class ChatGptMarkdownBuffer {
       return "";
     }
     this.latestSnapshot = current;
-    const stableLength = commonPrefixLength(this.previousSnapshot, current);
+    const stableLength = current === this.previousSnapshot && hasMovableTrailingMarkdownClosure(current)
+      ? this.emitted.length
+      : commonPrefixLength(this.previousSnapshot, current);
     if (stableLength < this.emitted.length) {
       this.previousSnapshot = current;
       return "";

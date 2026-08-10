@@ -98,6 +98,61 @@ test("launcher activity restores valid records from the previous process", () =>
   }
 });
 
+test("launcher activity paginates by chat, then lazily loads task summaries and one task's records", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-chat-page-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const record = (at, event, detail) => JSON.stringify({ at, level: "info", event, detail });
+  try {
+    fs.writeFileSync(`${filePath}.1`, [
+      record("2026-07-28T00:00:01.000Z", "lca_codex.turn_started", {
+        traceId: "trace_a111",
+        threadId: "thread_a111",
+      }),
+      record("2026-07-28T00:00:02.000Z", "lca_codex.turn_completed", { traceId: "trace_a111" }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(filePath, [
+      record("2026-07-28T00:00:03.000Z", "lca_codex.turn_started", {
+        traceId: "trace_a222",
+        threadId: "thread_a111",
+      }),
+      record("2026-07-28T00:00:04.000Z", "lca_codex.turn_completed", { traceId: "trace_a222" }),
+      record("2026-07-28T00:00:05.000Z", "lca_codex.turn_started", {
+        traceId: "trace_b111",
+        threadId: "thread_b111",
+      }),
+      record("2026-07-28T00:00:06.000Z", "lca_codex.turn_completed", { traceId: "trace_b111" }),
+      "",
+    ].join("\n"));
+    const logger = createLogger({ filePath });
+
+    const latest = logger.activityChatsPage({ limit: 1 });
+    assert.deepEqual(latest.chats.map(chat => chat.id), ["chat:thread_b111"]);
+    assert.equal(latest.chats[0].taskCount, 1);
+    assert.equal(latest.chats[0].eventCount, 2);
+    assert.equal(latest.hasMore, true);
+    assert.equal(typeof latest.nextCursor, "string");
+
+    logger.info("lca_codex.turn_started", { traceId: "trace_new999", threadId: "thread_new999" });
+    const older = logger.activityChatsPage({ cursor: latest.nextCursor, limit: 1 });
+    assert.deepEqual(older.chats.map(chat => chat.id), ["chat:thread_a111"]);
+    assert.equal(older.chats[0].taskCount, 2);
+    assert.equal(older.chats[0].eventCount, 4);
+    assert.equal(older.hasMore, false);
+
+    const chatTasks = logger.activityChatTasks({ chatId: "chat:thread_a111" });
+    assert.deepEqual(chatTasks.map(task => task.traceId), ["trace_a222", "trace_a111"]);
+    assert.deepEqual(chatTasks.map(task => task.eventCount), [2, 2]);
+    assert.equal(Object.hasOwn(chatTasks[0], "records"), false);
+
+    const taskRecords = logger.activityTaskRecords({ traceId: "trace_a111" });
+    assert.deepEqual(taskRecords.map(item => item.detail.traceId), ["trace_a111", "trace_a111"]);
+    assert.equal(taskRecords.length, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher activity links task traces to the latest local Codex chat title", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-thread-title-"));
   const filePath = path.join(root, "launcher.jsonl");

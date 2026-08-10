@@ -624,7 +624,7 @@ function registerIpc({ logger, stateStore }) {
     runtime: await runtimeSupervisor.observeRuntime(),
     browser: browserHost?.snapshot() ?? null,
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
-    logs: logger.recent(),
+    logs: [],
     urls: { connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
     packaged: app.isPackaged,
@@ -890,6 +890,10 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  handle("launcher:activity-chats-page", (_event, input) => logger.activityChatsPage(input));
+  handle("launcher:activity-chat-tasks", (_event, input) => logger.activityChatTasks(input));
+  handle("launcher:activity-task-records", (_event, input) => logger.activityTaskRecords(input));
+  handle("launcher:activity-system-records", () => logger.activitySystemRecords());
   handle("launcher:open-logs", async () => {
     const error = await shell.openPath(path.dirname(logger.filePath));
     if (error) throw new Error(`Could not open the launcher log directory: ${error}`);

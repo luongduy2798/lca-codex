@@ -56,6 +56,40 @@ export interface LogRecord {
   detail: Record<string, unknown>;
 }
 
+export interface ActivityChatSummary {
+  id: string;
+  kind: "chat" | "trace" | "system";
+  threadId: string | null;
+  title: string;
+  taskCount: number;
+  eventCount: number;
+  lastAt: string;
+}
+
+export interface ActivityChatPage {
+  chats: ActivityChatSummary[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface ActivityTaskSummary {
+  traceId: string;
+  threadId: string | null;
+  chatTitle: string | null;
+  startedAt: string;
+  lastAt: string;
+  durationMs: number;
+  attempt: number;
+  tools: Array<{
+    source: "lca" | "codex";
+    tool: string;
+    count: number;
+  }>;
+  source: "chatgpt" | "lca" | "codex" | "system";
+  status: "running" | "waiting" | "stalled" | "failed" | "completed";
+  eventCount: number;
+}
+
 export interface DoctorCheck {
   id: string;
   status: "ok" | "warning" | "error";
@@ -216,6 +250,10 @@ export interface LauncherApi {
   setCodexUsageUpsellHidden(enabled: boolean): Promise<{ state: LauncherState; status: CodexUsageUpsellStatus }>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
+  activityChatsPage(input?: { cursor?: string; limit?: number }): Promise<ActivityChatPage>;
+  activityChatTasks(input: { chatId: string }): Promise<ActivityTaskSummary[]>;
+  activityTaskRecords(input: { traceId: string }): Promise<LogRecord[]>;
+  activitySystemRecords(): Promise<LogRecord[]>;
   openLogs(): Promise<string>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;

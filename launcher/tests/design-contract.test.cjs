@@ -73,7 +73,11 @@ test("Activity groups task logs and labels the active execution layer", () => {
   assert.match(appSource, /className="activity-task-header"/);
   assert.match(appSource, /Chat ID: \$\{group\.threadId\}/);
   assert.match(appSource, /LCA CODEX:[\s\S]*?CODEX NATIVE:/);
-  assert.match(appSource, /\[\.\.\.group\.records\]\.reverse\(\)/);
+  assert.match(appSource, /api\.activityChatTasks\(\{ chatId: chat\.id \}\)/);
+  assert.match(appSource, /api\.activityTaskRecords\(\{ traceId: task\.traceId \}\)/);
+  assert.match(appSource, /expandedChats\[chat\.id\] === true/);
+  assert.match(appSource, /expandedTasks\[task\.traceId\] === true/);
+  assert.match(appSource, /\[\.\.\.records\]\.reverse\(\)/);
   assert.match(styles, /\.activity-source-flag\.is-chatgpt/);
   assert.match(styles, /\.activity-source-flag\.is-lca/);
   assert.match(styles, /\.activity-source-flag\.is-codex/);

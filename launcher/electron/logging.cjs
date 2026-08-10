@@ -104,27 +104,321 @@ function readRecent(filePath) {
       .filter(Boolean)
       .slice(-MAX_MEMORY_RECORDS)
       .flatMap((line) => {
-        try {
-          const record = JSON.parse(line);
-          if (!record
-            || typeof record.at !== "string"
-            || !["debug", "info", "warning", "error"].includes(record.level)
-            || typeof record.event !== "string") return [];
-          return [{
-            at: record.at,
-            level: record.level,
-            event: record.event,
-            detail: record.detail && typeof record.detail === "object"
-              ? sanitize(record.detail)
-              : {},
-          }];
-        } catch {
-          return [];
-        }
+        const record = parsePersistedRecord(line);
+        return record ? [record] : [];
       });
   } catch {
     return [];
   }
+}
+
+function parsePersistedRecord(line) {
+  try {
+    const record = JSON.parse(line);
+    if (!record
+      || typeof record.at !== "string"
+      || !["debug", "info", "warning", "error"].includes(record.level)
+      || typeof record.event !== "string") return null;
+    return {
+      at: record.at,
+      level: record.level,
+      event: record.event,
+      detail: record.detail && typeof record.detail === "object"
+        ? sanitize(record.detail)
+        : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function retainedLogEntries(filePath) {
+  const entries = [];
+  for (const candidate of [`${filePath}.1`, filePath]) {
+    try {
+      for (const line of fs.readFileSync(candidate, "utf8").split(/\r?\n/)) {
+        if (!line) continue;
+        const record = parsePersistedRecord(line);
+        if (!record) continue;
+        entries.push({ record });
+      }
+    } catch {}
+  }
+  return entries;
+}
+
+function activityTraceId(record) {
+  const explicit = activityIdentifier(record?.detail?.traceId);
+  if (explicit && explicit !== "unknown") return explicit;
+  const line = typeof record?.detail?.line === "string" ? record.detail.line : "";
+  const browserTurn = /\bbrowser turn ([A-Za-z0-9_-]{6,128})\b/.exec(line)?.[1];
+  if (browserTurn && browserTurn !== "unknown") return browserTurn;
+  const trace = /\btrace=([A-Za-z0-9_-]{6,128})\b/.exec(line)?.[1];
+  return trace && trace !== "unknown" ? trace : null;
+}
+
+function activityRecordTimestamp(record) {
+  const timestamp = Date.parse(record?.at);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function compareActivityChats(left, right) {
+  const timestamp = activityRecordTimestamp({ at: right.lastAt }) - activityRecordTimestamp({ at: left.lastAt });
+  return timestamp || left.id.localeCompare(right.id);
+}
+
+function encodeActivityChatCursor(chat) {
+  return Buffer.from(JSON.stringify({ at: chat.lastAt, id: chat.id }), "utf8").toString("base64url");
+}
+
+function decodeActivityChatCursor(value) {
+  if (typeof value !== "string" || value.length > 512) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (!decoded
+      || typeof decoded !== "object"
+      || typeof decoded.at !== "string"
+      || typeof decoded.id !== "string"
+      || !Number.isFinite(Date.parse(decoded.at))
+      || decoded.id.length > 256) return null;
+    return { at: decoded.at, id: decoded.id };
+  } catch {
+    return null;
+  }
+}
+
+function buildRetainedActivity(filePath, decorateActivityRecord) {
+  const entries = retainedLogEntries(filePath);
+  // Prime trace -> thread mappings first so records that precede the first explicit
+  // threadId for a task still receive the correct chat association.
+  for (const entry of entries) decorateActivityRecord(entry.record);
+  const records = entries.map((entry) => decorateActivityRecord(entry.record));
+  const tasksByTrace = new Map();
+  const system = [];
+
+  for (const record of records) {
+    const traceId = activityTraceId(record);
+    if (!traceId) {
+      system.push(record);
+      continue;
+    }
+    const taskRecords = tasksByTrace.get(traceId) ?? [];
+    taskRecords.push(record);
+    tasksByTrace.set(traceId, taskRecords);
+  }
+
+  const tasks = [...tasksByTrace].map(([traceId, taskRecords]) => {
+    taskRecords.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
+    let threadId = null;
+    let chatTitle = null;
+    for (const record of taskRecords) {
+      const recordThreadId = activityIdentifier(record.detail?.threadId);
+      const recordChatTitle = typeof record.detail?.chatTitle === "string" ? record.detail.chatTitle.trim() : "";
+      if (recordThreadId) threadId = recordThreadId;
+      if (recordChatTitle) chatTitle = recordChatTitle;
+    }
+    const lastAt = taskRecords.at(-1)?.at ?? new Date(0).toISOString();
+    return {
+      traceId,
+      threadId,
+      chatTitle,
+      chatId: threadId ? `chat:${threadId}` : `trace:${traceId}`,
+      records: taskRecords,
+      lastAt,
+    };
+  });
+
+  const chatsById = new Map();
+  for (const task of tasks) {
+    const current = chatsById.get(task.chatId);
+    const title = task.chatTitle
+      || (task.threadId ? `Chat ${task.threadId.slice(0, 8)}` : `Task ${task.traceId}`);
+    if (!current) {
+      chatsById.set(task.chatId, {
+        id: task.chatId,
+        kind: task.threadId ? "chat" : "trace",
+        threadId: task.threadId,
+        title,
+        taskCount: 1,
+        eventCount: task.records.length,
+        lastAt: task.lastAt,
+      });
+      continue;
+    }
+    current.taskCount += 1;
+    current.eventCount += task.records.length;
+    if (activityRecordTimestamp({ at: task.lastAt }) > activityRecordTimestamp({ at: current.lastAt })) {
+      current.lastAt = task.lastAt;
+    }
+    if (task.chatTitle) current.title = task.chatTitle;
+  }
+
+  system.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
+  if (system.length > 0) {
+    chatsById.set("system", {
+      id: "system",
+      kind: "system",
+      threadId: null,
+      title: "System activity",
+      taskCount: 0,
+      eventCount: system.length,
+      lastAt: system.at(-1).at,
+    });
+  }
+
+  return {
+    chats: [...chatsById.values()].sort(compareActivityChats),
+    tasks,
+    system,
+  };
+}
+
+function activityRecordSource(record) {
+  if (record.event === "lca_codex.tool_started" || record.event === "lca_codex.tool_completed") {
+    if (record.detail?.layer === "codex") return "codex";
+    if (record.detail?.layer === "lca") return "lca";
+  }
+  if ([
+    "lca_codex.turn_send_accepted",
+    "lca_codex.turn_first_response",
+    "lca_codex.turn_first_reasoning",
+    "lca_codex.turn_first_text",
+    "lca_codex.turn_completed",
+    "lca_codex.turn_failed",
+  ].includes(record.event)) return "chatgpt";
+  if (record.event.startsWith("browser.") || record.event.startsWith("smoke.")) return "chatgpt";
+  if (record.event.startsWith("lca_codex.")) return "lca";
+  const line = typeof record.detail?.line === "string" ? record.detail.line : "";
+  if (/\bbrowser (?:turn|diagnostic)\b/.test(line)) return "chatgpt";
+  if (/\bbroker\b|\[lca-codex-mcp\]/.test(line)) return "lca";
+  if (record.event.startsWith("runtime.daemon_")
+    || record.event.startsWith("connector.")
+    || record.event.startsWith("bridge.")) return "lca";
+  if (record.event.startsWith("codex.")) return "codex";
+  return "system";
+}
+
+function activityToolKey(record) {
+  const source = activityRecordSource(record);
+  const callId = typeof record.detail?.callId === "string" ? record.detail.callId : "";
+  const tool = typeof record.detail?.tool === "string" ? record.detail.tool : "tool";
+  return `${source}:${callId || tool}`;
+}
+
+function summarizeActivityTask(task, now = Date.now()) {
+  const pendingTools = new Map();
+  const toolCounts = new Map();
+  let status;
+  let terminalAt;
+  let phase = "running";
+  let source = "lca";
+  let attempt = 1;
+  let sawStart = false;
+
+  for (const record of task.records) {
+    const recordSource = activityRecordSource(record);
+    const recordAttempt = record.detail?.attempt;
+    if (typeof recordAttempt === "number" && Number.isFinite(recordAttempt)) {
+      attempt = Math.max(attempt, Math.max(1, Math.round(recordAttempt)));
+    }
+    if (record.event === "lca_codex.turn_started") {
+      sawStart = true;
+      status = undefined;
+      terminalAt = undefined;
+      pendingTools.clear();
+      phase = "running";
+      source = "lca";
+    } else if (record.event === "browser.turn_started") {
+      sawStart = true;
+      if (!status) {
+        phase = "running";
+        source = "chatgpt";
+      }
+    } else if (record.event === "browser.turn_ended") {
+      const browserStatus = record.detail?.status;
+      if (browserStatus === "completed") status = "completed";
+      else if (browserStatus === "failed" || browserStatus === "aborted") status = "failed";
+      if (status) terminalAt = activityRecordTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_send_accepted"
+      || record.event === "lca_codex.turn_first_response"
+      || record.event === "lca_codex.turn_first_reasoning") {
+      phase = "waiting";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_first_text") {
+      phase = "running";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_completed") {
+      status = "completed";
+      terminalAt = activityRecordTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_failed") {
+      status = "failed";
+      terminalAt = activityRecordTimestamp(record);
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.turn_retry_scheduled") {
+      status = undefined;
+      terminalAt = undefined;
+      phase = "waiting";
+      source = "lca";
+    } else if (record.event === "lca_codex.turn_retry_stopped") {
+      status = "failed";
+      terminalAt = activityRecordTimestamp(record);
+      source = "lca";
+    } else if (record.event === "lca_codex.tool_started") {
+      pendingTools.set(activityToolKey(record), recordSource);
+      if (recordSource === "lca" || recordSource === "codex") {
+        const tool = typeof record.detail?.tool === "string" && record.detail.tool.trim()
+          ? record.detail.tool.trim()
+          : "unknown";
+        const key = `${recordSource}:${tool}`;
+        toolCounts.set(key, {
+          source: recordSource,
+          tool,
+          count: (toolCounts.get(key)?.count ?? 0) + 1,
+        });
+      }
+      phase = "waiting";
+      source = recordSource;
+    } else if (record.event === "lca_codex.tool_completed") {
+      pendingTools.delete(activityToolKey(record));
+      phase = "waiting";
+      source = recordSource === "codex" ? "lca" : "chatgpt";
+    } else if (!status && recordSource !== "system") {
+      source = recordSource;
+    }
+  }
+
+  const pendingSources = [...pendingTools.values()];
+  if (pendingSources.includes("codex")) source = "codex";
+  else if (pendingSources.includes("lca")) source = "lca";
+
+  const first = task.records.find(record => record.event === "lca_codex.turn_started") ?? task.records[0];
+  const last = task.records.at(-1);
+  const startedAt = activityRecordTimestamp(first);
+  const lastAt = activityRecordTimestamp(last);
+  const stalled = status === undefined
+    && sawStart
+    && !pendingSources.includes("codex")
+    && now - lastAt >= 30_000;
+  const taskStatus = status
+    ?? (stalled ? "stalled" : pendingTools.size > 0 || phase === "waiting" ? "waiting" : "running");
+
+  return {
+    traceId: task.traceId,
+    threadId: task.threadId,
+    chatTitle: task.chatTitle,
+    startedAt: first?.at ?? task.lastAt,
+    lastAt: last?.at ?? task.lastAt,
+    durationMs: Math.max(0, (terminalAt ?? now) - startedAt),
+    attempt,
+    tools: [...toolCounts.values()].sort((left, right) => (
+      left.source.localeCompare(right.source) || left.tool.localeCompare(right.tool)
+    )),
+    source,
+    status: taskStatus,
+    eventCount: task.records.length,
+  };
 }
 
 function activityIdentifier(value) {
@@ -201,6 +495,52 @@ function createLogger({ filePath, publish, threadIndexPath }) {
   const records = readRecent(filePath);
   const decorateActivityRecord = createActivityRecordDecorator(records, threadIndexPath);
 
+  const activityChatsPage = (input = {}) => {
+    const requestedLimit = Number.isFinite(input?.limit) ? Math.floor(input.limit) : 20;
+    const limit = Math.max(1, Math.min(100, requestedLimit));
+    const cursor = input?.cursor === undefined || input?.cursor === null
+      ? null
+      : decodeActivityChatCursor(input.cursor);
+    if (input?.cursor && !cursor) return { chats: [], nextCursor: null, hasMore: false };
+
+    const { chats } = buildRetainedActivity(filePath, decorateActivityRecord);
+    const remaining = cursor
+      ? chats.filter((chat) => (
+          activityRecordTimestamp({ at: chat.lastAt }) < activityRecordTimestamp({ at: cursor.at })
+          || (chat.lastAt === cursor.at && chat.id > cursor.id)
+        ))
+      : chats;
+    const pageChats = remaining.slice(0, limit);
+    const hasMore = remaining.length > pageChats.length;
+    return {
+      chats: pageChats,
+      nextCursor: hasMore && pageChats.length > 0 ? encodeActivityChatCursor(pageChats.at(-1)) : null,
+      hasMore,
+    };
+  };
+
+  const activityChatTasks = (input = {}) => {
+    const chatId = typeof input?.chatId === "string" && input.chatId.length <= 256 ? input.chatId : null;
+    if (!chatId) return [];
+    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    return activity.tasks
+      .filter((task) => task.chatId === chatId)
+      .map((task) => summarizeActivityTask(task))
+      .sort((left, right) => activityRecordTimestamp({ at: right.lastAt }) - activityRecordTimestamp({ at: left.lastAt }));
+  };
+
+  const activityTaskRecords = (input = {}) => {
+    const traceId = typeof input?.traceId === "string" && input.traceId.length <= 256 ? input.traceId : null;
+    if (!traceId) return [];
+    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    return activity.tasks.find((task) => task.traceId === traceId)?.records ?? [];
+  };
+
+  const activitySystemRecords = () => {
+    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    return activity.system;
+  };
+
   const append = (level, event, detail = {}) => {
     const record = {
       at: new Date().toISOString(),
@@ -232,6 +572,10 @@ function createLogger({ filePath, publish, threadIndexPath }) {
     recent: (limit = 150) => records
       .slice(-Math.max(1, Math.min(300, limit)))
       .map(decorateActivityRecord),
+    activityChatsPage,
+    activityChatTasks,
+    activityTaskRecords,
+    activitySystemRecords,
     filePath,
   };
 }

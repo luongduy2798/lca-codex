@@ -11,6 +11,8 @@ import {
 import { copy, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
+  ActivityChatSummary,
+  ActivityTaskSummary,
   BrowserState,
   CodexConfigSnapshot,
   CodexToolHealthReport,
@@ -1812,27 +1814,12 @@ function RuntimeDetail({ description, label, value }: { description?: string; la
   );
 }
 
-type ActivitySource = "chatgpt" | "lca" | "codex" | "system";
-type ActivityTaskStatus = "running" | "waiting" | "stalled" | "failed" | "completed";
+type ActivitySource = ActivityTaskSummary["source"];
+type ActivityTaskStatus = ActivityTaskSummary["status"];
+type ActivityToolSummary = ActivityTaskSummary["tools"][number];
 
-interface ActivityToolSummary {
-  source: "lca" | "codex";
-  tool: string;
-  count: number;
-}
-
-interface ActivityTaskGroup {
-  traceId: string;
-  threadId?: string;
-  chatTitle?: string;
+interface ActivityTaskGroup extends ActivityTaskSummary {
   records: LogRecord[];
-  startedAt: string;
-  lastAt: string;
-  durationMs: number;
-  attempt: number;
-  tools: ActivityToolSummary[];
-  source: ActivitySource;
-  status: ActivityTaskStatus;
 }
 
 function ActivitySourceFlag({ source }: { source: ActivitySource }) {
@@ -1861,10 +1848,13 @@ function ActivityRecordRow({ grouped, record }: {
   );
 }
 
-function ActivityTaskCard({ expanded, group, onToggle }: {
+function ActivityTaskCard({ copy, expanded, group, loading, onToggle, records }: {
+  copy: Copy;
   expanded: boolean;
-  group: ActivityTaskGroup;
+  group: ActivityTaskSummary;
+  loading: boolean;
   onToggle: () => void;
+  records: LogRecord[];
 }) {
   const toolMeta = activityTaskToolMeta(group);
   return (
@@ -1890,40 +1880,123 @@ function ActivityTaskCard({ expanded, group, onToggle }: {
       </button>
       {expanded ? (
         <div className="activity-task-records">
-          {[...group.records].reverse().map((record, index) => (
-            <ActivityRecordRow grouped key={`${record.at}-${record.event}-${index}`} record={record} />
-          ))}
+          {loading ? (
+            <div className="activity-chat-loading">
+              <ButtonSpinner />
+              <span>{copy.loadingActivityTask}</span>
+            </div>
+          ) : records.length > 0 ? (
+            [...records].reverse().map((record, index) => (
+              <ActivityRecordRow grouped key={`${record.at}-${record.event}-${index}`} record={record} />
+            ))
+          ) : (
+            <div className="activity-chat-empty">{copy.noActivityEvents}</div>
+          )}
         </div>
       ) : null}
     </section>
   );
 }
 
-function SystemActivityCard({ expanded, onToggle, records }: {
+function ActivityChatCard({
+  chat,
+  copy,
+  expanded,
+  expandedTasks,
+  loading,
+  loadingTaskRecords,
+  liveRecords,
+  now,
+  onToggle,
+  onToggleTask,
+  systemRecords,
+  taskRecords,
+  tasks,
+}: {
+  chat: ActivityChatSummary;
+  copy: Copy;
   expanded: boolean;
+  expandedTasks: Record<string, boolean>;
+  loading: boolean;
+  loadingTaskRecords: Record<string, boolean>;
+  liveRecords: LogRecord[];
+  now: number;
   onToggle: () => void;
-  records: LogRecord[];
+  onToggleTask: (task: ActivityTaskSummary) => void;
+  systemRecords: LogRecord[];
+  taskRecords: Record<string, LogRecord[]>;
+  tasks: ActivityTaskSummary[];
 }) {
+  const liveActivity = useMemo(() => groupActivityLogs(liveRecords, now), [liveRecords, now]);
+  const visibleTasks = useMemo(
+    () => mergeActivityTaskSummaries(tasks, liveActivity.tasks),
+    [tasks, liveActivity.tasks],
+  );
+  const liveTaskRecords = useMemo(
+    () => new Map(liveActivity.tasks.map((task) => [task.traceId, task.records] as const)),
+    [liveActivity.tasks],
+  );
+  const visibleSystemRecords = useMemo(
+    () => mergeLogRecords(systemRecords, liveActivity.system),
+    [systemRecords, liveActivity.system],
+  );
+  const taskLabel = chat.taskCount === 1 ? "1 task" : `${chat.taskCount} tasks`;
+  const eventLabel = chat.eventCount === 1 ? "1 event" : `${chat.eventCount} events`;
+
   return (
-    <section className="activity-task activity-system-task">
+    <section className="activity-task activity-chat">
       <button
         aria-expanded={expanded}
-        className="activity-task-header"
+        className="activity-task-header activity-chat-header"
         onClick={onToggle}
         type="button"
       >
         <Icon name="chevron" />
         <span className="activity-task-heading">
-          <span className="activity-task-title-line"><strong>System activity</strong></span>
-          <small>{`${records.length} event${records.length === 1 ? "" : "s"}`}</small>
+          <span className="activity-task-title-line">
+            <strong title={chat.threadId ? `Chat ID: ${chat.threadId}` : chat.title}>{chat.title}</strong>
+          </span>
+          <small>{chat.kind === "system" ? eventLabel : `${taskLabel} · ${eventLabel}`}</small>
         </span>
-        <ActivitySourceFlag source="system" />
+        <time>{formatTime(chat.lastAt)}</time>
       </button>
       {expanded ? (
-        <div className="activity-task-records">
-          {[...records].reverse().map((record, index) => (
-            <ActivityRecordRow grouped={false} key={`${record.at}-${record.event}-${index}`} record={record} />
-          ))}
+        <div className="activity-chat-body">
+          {loading ? (
+            <div className="activity-chat-loading">
+              <ButtonSpinner />
+              <span>{chat.kind === "system" ? copy.loadingActivityTask : copy.loadingActivityChat}</span>
+            </div>
+          ) : chat.kind === "system" ? (
+            visibleSystemRecords.length > 0 ? (
+              <div className="activity-task-records activity-chat-system-records">
+                {[...visibleSystemRecords].reverse().map((record, index) => (
+                  <ActivityRecordRow grouped={false} key={`${record.at}-${record.event}-${index}`} record={record} />
+                ))}
+              </div>
+            ) : <div className="activity-chat-empty">{copy.noLogs}</div>
+          ) : visibleTasks.length > 0 ? (
+            visibleTasks.map((task) => {
+              const expandedTask = expandedTasks[task.traceId] === true;
+              const records = mergeLogRecords(
+                taskRecords[task.traceId] ?? [],
+                liveTaskRecords.get(task.traceId) ?? [],
+              );
+              return (
+                <ActivityTaskCard
+                  copy={copy}
+                  expanded={expandedTask}
+                  group={task}
+                  key={task.traceId}
+                  loading={loadingTaskRecords[task.traceId] === true}
+                  onToggle={() => onToggleTask(task)}
+                  records={records}
+                />
+              );
+            })
+          ) : (
+            <div className="activity-chat-empty">{copy.noActivityTasks}</div>
+          )}
         </div>
       ) : null}
     </section>
@@ -1940,16 +2013,80 @@ function ActivitySurface({
   setError: (error: string | null) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
-  const activity = useMemo(() => groupActivityLogs(logs, now), [logs, now]);
+  const [chats, setChats] = useState<ActivityChatSummary[]>([]);
+  const [expandedChats, setExpandedChats] = useState<Record<string, boolean>>({});
+  const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
+  const [chatTasks, setChatTasks] = useState<Record<string, ActivityTaskSummary[]>>({});
+  const [taskRecords, setTaskRecords] = useState<Record<string, LogRecord[]>>({});
+  const [systemRecords, setSystemRecords] = useState<LogRecord[] | null>(null);
+  const [loadingChats, setLoadingChats] = useState<Record<string, boolean>>({});
+  const [loadingTaskRecords, setLoadingTaskRecords] = useState<Record<string, boolean>>({});
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const liveRecordsByChat = useMemo(() => groupActivityRecordsByChat(logs), [logs]);
+  const liveChats = useMemo(() => summarizeActivityChatGroups(liveRecordsByChat), [liveRecordsByChat]);
+  const visibleChats = useMemo(() => mergeActivityChatSummaries(chats, liveChats), [chats, liveChats]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 5_000);
     return () => window.clearInterval(timer);
   }, []);
 
-  const toggleGroup = (key: string, expanded: boolean) => {
-    setExpandedGroups((current) => ({ ...current, [key]: !expanded }));
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    setLoadingHistory(true);
+    void api.activityChatsPage({ limit: 20 }).then((page) => {
+      if (cancelled) return;
+      setChats(page.chats);
+      setHistoryCursor(page.nextCursor);
+      setHasMoreHistory(page.hasMore);
+    }).catch((cause) => {
+      if (!cancelled) setError(messageOf(cause));
+    }).finally(() => {
+      if (!cancelled) setLoadingHistory(false);
+    });
+    return () => { cancelled = true; };
+  }, [setError]);
+
+  const toggleChat = (chat: ActivityChatSummary) => {
+    const expanded = expandedChats[chat.id] === true;
+    setExpandedChats((current) => ({ ...current, [chat.id]: !expanded }));
+    const loaded = chat.kind === "system" ? systemRecords !== null : chatTasks[chat.id] !== undefined;
+    if (expanded || loaded || loadingChats[chat.id] || !api) return;
+
+    setLoadingChats((current) => ({ ...current, [chat.id]: true }));
+    const request = chat.kind === "system"
+      ? api.activitySystemRecords().then((records) => setSystemRecords(records))
+      : api.activityChatTasks({ chatId: chat.id }).then((tasks) => {
+          setChatTasks((current) => ({ ...current, [chat.id]: tasks }));
+        });
+    void request.catch((cause) => setError(messageOf(cause)))
+      .finally(() => setLoadingChats((current) => ({ ...current, [chat.id]: false })));
+  };
+
+  const toggleTask = (task: ActivityTaskSummary) => {
+    const expanded = expandedTasks[task.traceId] === true;
+    setExpandedTasks((current) => ({ ...current, [task.traceId]: !expanded }));
+    if (expanded || taskRecords[task.traceId] !== undefined || loadingTaskRecords[task.traceId] || !api) return;
+
+    setLoadingTaskRecords((current) => ({ ...current, [task.traceId]: true }));
+    void api.activityTaskRecords({ traceId: task.traceId }).then((records) => {
+      setTaskRecords((current) => ({ ...current, [task.traceId]: records }));
+    }).catch((cause) => setError(messageOf(cause)))
+      .finally(() => setLoadingTaskRecords((current) => ({ ...current, [task.traceId]: false })));
+  };
+
+  const loadOlder = () => {
+    if (!api || loadingHistory || !hasMoreHistory || !historyCursor) return;
+    setLoadingHistory(true);
+    void api.activityChatsPage({ cursor: historyCursor, limit: 20 }).then((page) => {
+      setChats((current) => mergeActivityChatSummaries(current, page.chats));
+      setHistoryCursor(page.nextCursor);
+      setHasMoreHistory(page.hasMore);
+    }).catch((cause) => setError(messageOf(cause)))
+      .finally(() => setLoadingHistory(false));
   };
 
   return (
@@ -1964,31 +2101,39 @@ function ActivitySurface({
         </SecondaryButton>
       </div>
       <div className="activity-table">
-        {logs.length === 0 ? (
+        {!loadingHistory && visibleChats.length === 0 ? (
           <div className="surface-empty">
             <Icon name="logs" />
             <span>{copy.noLogs}</span>
           </div>
         ) : null}
-        {activity.tasks.map((group, index) => {
-          const key = `task:${group.traceId}`;
-          const defaultExpanded = index === 0 || !["completed", "stalled"].includes(group.status);
-          const expanded = expandedGroups[key] ?? defaultExpanded;
+        {visibleChats.map((chat) => {
+          const liveRecords = liveRecordsByChat.get(chat.id) ?? [];
           return (
-            <ActivityTaskCard
-              expanded={expanded}
-              group={group}
-              key={key}
-              onToggle={() => toggleGroup(key, expanded)}
+            <ActivityChatCard
+              chat={chat}
+              copy={copy}
+              expanded={expandedChats[chat.id] === true}
+              expandedTasks={expandedTasks}
+              key={chat.id}
+              loading={loadingChats[chat.id] === true}
+              loadingTaskRecords={loadingTaskRecords}
+              liveRecords={liveRecords}
+              now={now}
+              onToggle={() => toggleChat(chat)}
+              onToggleTask={toggleTask}
+              systemRecords={systemRecords ?? []}
+              taskRecords={taskRecords}
+              tasks={chatTasks[chat.id] ?? []}
             />
           );
         })}
-        {activity.system.length > 0 ? (
-          <SystemActivityCard
-            expanded={expandedGroups.system ?? (activity.tasks.length === 0)}
-            onToggle={() => toggleGroup("system", expandedGroups.system ?? (activity.tasks.length === 0))}
-            records={activity.system}
-          />
+        {hasMoreHistory ? (
+          <div className="activity-pagination">
+            <SecondaryButton disabled={loadingHistory} onClick={loadOlder}>
+              {loadingHistory ? copy.loadingOlderActivity : copy.loadOlderActivity}
+            </SecondaryButton>
+          </div>
         ) : null}
       </div>
     </ContentSurface>
@@ -2694,8 +2839,8 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
 
   return {
     traceId,
-    ...(threadId ? { threadId } : {}),
-    ...(chatTitle ? { chatTitle } : {}),
+    threadId: threadId ?? null,
+    chatTitle: chatTitle ?? null,
     records,
     startedAt: first.at,
     lastAt: last.at,
@@ -2706,6 +2851,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
     )),
     source,
     status: taskStatus,
+    eventCount: records.length,
   };
 }
 
@@ -2732,7 +2878,130 @@ function groupActivityLogs(logs: LogRecord[], now: number): {
   return { tasks, system };
 }
 
-function activityTaskStatusLabel(group: ActivityTaskGroup): string {
+function groupActivityRecordsByChat(logs: LogRecord[]): Map<string, LogRecord[]> {
+  const threadByTrace = new Map<string, string>();
+  for (const record of logs) {
+    const traceId = activityTraceId(record);
+    const threadId = typeof record.detail.threadId === "string" ? record.detail.threadId.trim() : "";
+    if (traceId && threadId) threadByTrace.set(traceId, threadId);
+  }
+
+  const byChat = new Map<string, LogRecord[]>();
+  for (const record of logs) {
+    const traceId = activityTraceId(record);
+    const threadId = traceId ? threadByTrace.get(traceId) : null;
+    const chatId = traceId ? (threadId ? `chat:${threadId}` : `trace:${traceId}`) : "system";
+    const records = byChat.get(chatId) ?? [];
+    records.push(record);
+    byChat.set(chatId, records);
+  }
+  return byChat;
+}
+
+function summarizeActivityChatGroups(byChat: Map<string, LogRecord[]>): ActivityChatSummary[] {
+  return [...byChat].map<ActivityChatSummary>(([id, records]) => {
+    const sorted = [...records].sort((left, right) => activityTimestamp(left) - activityTimestamp(right));
+    const last = sorted.at(-1)!;
+    if (id === "system") {
+      return {
+        id,
+        kind: "system",
+        threadId: null,
+        title: "System activity",
+        taskCount: 0,
+        eventCount: sorted.length,
+        lastAt: last.at,
+      };
+    }
+
+    const threadId = id.startsWith("chat:") ? id.slice(5) : null;
+    const traceIds = new Set(sorted.map(activityTraceId).filter((value): value is string => Boolean(value)));
+    const chatTitle = [...sorted].reverse().find((record) => (
+      typeof record.detail.chatTitle === "string" && record.detail.chatTitle.trim()
+    ))?.detail.chatTitle;
+    const fallbackTrace = [...traceIds][0] ?? id.slice(6);
+    return {
+      id,
+      kind: threadId ? "chat" : "trace",
+      threadId,
+      title: typeof chatTitle === "string" && chatTitle.trim()
+        ? chatTitle.trim()
+        : threadId ? `Chat ${threadId.slice(0, 8)}` : `Task ${fallbackTrace}`,
+      taskCount: traceIds.size,
+      eventCount: sorted.length,
+      lastAt: last.at,
+    };
+  }).sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt) || left.id.localeCompare(right.id));
+}
+
+function mergeActivityChatSummaries(...groups: ActivityChatSummary[][]): ActivityChatSummary[] {
+  const merged = new Map<string, ActivityChatSummary>();
+  for (const group of groups) {
+    for (const chat of group) {
+      const current = merged.get(chat.id);
+      if (!current) {
+        merged.set(chat.id, chat);
+        continue;
+      }
+      const newer = Date.parse(chat.lastAt) > Date.parse(current.lastAt) ? chat : current;
+      merged.set(chat.id, {
+        ...current,
+        title: newer.title,
+        lastAt: newer.lastAt,
+        taskCount: Math.max(current.taskCount, chat.taskCount),
+        eventCount: Math.max(current.eventCount, chat.eventCount),
+      });
+    }
+  }
+  return [...merged.values()].sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt) || left.id.localeCompare(right.id));
+}
+
+function mergeActivityTaskSummaries(...groups: ActivityTaskSummary[][]): ActivityTaskSummary[] {
+  const merged = new Map<string, ActivityTaskSummary>();
+  for (const group of groups) {
+    for (const task of group) {
+      const current = merged.get(task.traceId);
+      if (!current) {
+        merged.set(task.traceId, task);
+        continue;
+      }
+      const newer = Date.parse(task.lastAt) >= Date.parse(current.lastAt) ? task : current;
+      const older = newer === task ? current : task;
+      const toolCounts = new Map<string, ActivityToolSummary>();
+      for (const tool of [...older.tools, ...newer.tools]) {
+        const key = `${tool.source}:${tool.tool}`;
+        const existing = toolCounts.get(key);
+        if (!existing || tool.count > existing.count) toolCounts.set(key, tool);
+      }
+      merged.set(task.traceId, {
+        ...newer,
+        threadId: newer.threadId ?? older.threadId,
+        chatTitle: newer.chatTitle ?? older.chatTitle,
+        startedAt: Date.parse(task.startedAt) < Date.parse(current.startedAt) ? task.startedAt : current.startedAt,
+        attempt: Math.max(current.attempt, task.attempt),
+        durationMs: Math.max(current.durationMs, task.durationMs),
+        eventCount: Math.max(current.eventCount, task.eventCount),
+        tools: [...toolCounts.values()].sort((left, right) => (
+          left.source.localeCompare(right.source) || left.tool.localeCompare(right.tool)
+        )),
+      });
+    }
+  }
+  return [...merged.values()].sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt));
+}
+
+function mergeLogRecords(...groups: LogRecord[][]): LogRecord[] {
+  const merged = new Map<string, LogRecord>();
+  for (const group of groups) {
+    for (const record of group) {
+      const key = `${record.at}\u0000${record.event}\u0000${JSON.stringify(record.detail)}`;
+      merged.set(key, record);
+    }
+  }
+  return [...merged.values()].sort((left, right) => activityTimestamp(left) - activityTimestamp(right));
+}
+
+function activityTaskStatusLabel(group: ActivityTaskSummary): string {
   if (group.status === "completed") return "COMPLETED";
   if (group.status === "failed") return "FAILED";
   if (group.status === "stalled") return `STALLED · ${activitySourceLabel(group.source)}`;
@@ -2740,11 +3009,11 @@ function activityTaskStatusLabel(group: ActivityTaskGroup): string {
   return `RUNNING · ${activitySourceLabel(group.source)}`;
 }
 
-function activityTaskTitle(group: ActivityTaskGroup): string {
-  return group.chatTitle ?? (group.threadId ? `Chat ${group.threadId.slice(0, 8)}` : `Task ${group.traceId}`);
+function activityTaskTitle(group: ActivityTaskSummary): string {
+  return `Task ${group.traceId}`;
 }
 
-function activityTaskTooltip(group: ActivityTaskGroup): string {
+function activityTaskTooltip(group: ActivityTaskSummary): string {
   return [
     ...(group.chatTitle ? [`Chat: ${group.chatTitle}`] : []),
     ...(group.threadId ? [`Chat ID: ${group.threadId}`] : []),
@@ -2752,8 +3021,8 @@ function activityTaskTooltip(group: ActivityTaskGroup): string {
   ].join("\n");
 }
 
-function activityTaskMeta(group: ActivityTaskGroup): string {
-  const events = group.records.length === 1 ? "1 event" : `${group.records.length} events`;
+function activityTaskMeta(group: ActivityTaskSummary): string {
+  const events = group.eventCount === 1 ? "1 event" : `${group.eventCount} events`;
   return [
     ...(group.threadId ? [`Chat ID ${group.threadId.slice(0, 8)}`] : []),
     `Task ID ${group.traceId}`,
@@ -2763,7 +3032,7 @@ function activityTaskMeta(group: ActivityTaskGroup): string {
   ].join(" · ");
 }
 
-function activityTaskToolMeta(group: ActivityTaskGroup): string {
+function activityTaskToolMeta(group: ActivityTaskSummary): string {
   const summary = (source: "lca" | "codex") => {
     const count = group.tools
       .filter(tool => tool.source === source)
