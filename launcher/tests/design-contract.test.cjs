@@ -7,6 +7,7 @@ const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+const runtimeLifecycleSource = fs.readFileSync(path.join(launcherRoot, "electron", "runtime-lifecycle.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
@@ -126,7 +127,7 @@ test("closing the launcher follows the persisted background-launcher preference"
 test("sidebar keeps the brand prominent, runtime actions clear, and Settings free of unexplained status dots", () => {
   assert.match(appSource, /sidebar-brand-identity[\s\S]*?<BrandMark small \/>[\s\S]*?<strong>\{copy\.product\}<\/strong>/);
   assert.doesNotMatch(appSource, /sidebar-brand-identity[\s\S]{0,240}?copy\.tagline/);
-  assert.match(styles, /\.sidebar-brand-identity strong\s*\{[^}]*background:\s*linear-gradient[^}]*font-size:\s*18px[^}]*font-weight:\s*700/s);
+  assert.match(styles, /\.sidebar-brand-identity strong\s*\{[^}]*color:\s*#fff[^}]*font-size:\s*18px[^}]*font-weight:\s*700/s);
   assert.doesNotMatch(styles, /\.sidebar-brand-copy small\s*\{/);
   assert.match(appSource, /className=\{`sidebar-runtime-card is-\$\{snapshot\.runtime\.lifecycle\}/);
   assert.match(appSource, /className="sidebar-runtime-overview"[\s\S]*?navigateSurface\("runtime"\)/);
@@ -179,8 +180,8 @@ test("manual-first runtime controls are global and startup stays observe-only by
   assert.match(appSource, /function RuntimeServiceSurface/);
   assert.match(appSource, /setPreference\("runtimeAutoStart", checked\)/);
   assert.match(electronMain, /await publishRuntimeStatus\(\);\s*startRuntimeStatusMonitor\(\{ logger, stateStore \}\);\s*if \(stateStore\.read\(\)\.runtimeAutoStart === true\)/);
-  assert.match(electronMain, /const status = await runtimeSupervisor\.startRuntime\(\)/);
-  assert.match(electronMain, /const status = await runtimeSupervisor\.stopRuntime\(\)/);
+  assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.startRuntime\(\)/);
+  assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.stopRuntime\(\)/);
 });
 
 test("Codex config keeps automatic actions minimal and manual mode editable", () => {
@@ -192,7 +193,7 @@ test("Codex config keeps automatic actions minimal and manual mode editable", ()
   assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("codex-tools"\)/);
   assert.match(codexConfigSource, /function CodexToolHealthSurface[\s\S]*?api!\.checkCodexTools\(\)/);
   assert.match(codexConfigSource, /api!\.onCodexToolHealthState/);
-  assert.match(electronMain, /runtimeStarted[\s\S]*?runtimeHost\.checkCodexTools\(\)[\s\S]*?launcher:codex-tool-health-state/);
+  assert.match(runtimeLifecycleSource, /checkToolsAfterStart[\s\S]*?runtimeHost\.checkCodexTools\(\)[\s\S]*?publishToolHealth/);
   assert.match(codexConfigSource, /SectionHeading label=\{copy\.vscodeAdvancedSection\} meta=\{copy\.optional\} spaced/);
   assert.match(codexConfigSource, /className="next-surface-row"[\s\S]*?setSubview\("vscode-advanced"\)/);
   assert.match(codexConfigSource, /copy\.vscodeAdvancedTitle[\s\S]*?copy\.vscodeAdvancedSubtitle/);
@@ -282,7 +283,7 @@ test("Codex native tool health is auto-checked on runtime start and nested under
   assert.match(toolsSource, /className="text-button nested-surface-back"[\s\S]*?copy\.codexConfig/);
   assert.match(toolsSource, /api!\.checkCodexTools\(\)/);
   assert.match(toolsSource, /className="codex-tool-health-list"/);
-  assert.match(electronMain, /startManagedRuntime[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)[\s\S]*?runtimeHost\.checkCodexTools\(\)/);
+  assert.match(runtimeLifecycleSource, /runtimeHost\.activateRuntimeBridge\(\)[\s\S]*?checkToolsAfterStart\(healthGeneration\)/);
   assert.match(electronMain, /launcher:codex-tool-health-check[\s\S]*?runtimeHost\.checkCodexTools\(\)/);
   assert.match(preloadSource, /checkCodexTools:[\s\S]*?launcher:codex-tool-health-check/);
   assert.match(preloadSource, /onCodexToolHealthState:[\s\S]*?launcher:codex-tool-health-state/);
@@ -307,10 +308,13 @@ test("runtime lifecycle owns the Codex bridge without exposing a separate switch
   assert.doesNotMatch(appSource, /api!\.setBridgeEnabled|copy\.bridgeRoute/);
   assert.doesNotMatch(preloadSource, /launcher:bridge-enabled/);
   assert.doesNotMatch(i18nSource, /Codex bridge/);
-  assert.match(electronMain, /startManagedRuntime[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
-  assert.match(electronMain, /stopManagedRuntime[\s\S]*?runtimeHost\.deactivateRuntimeBridge\(\)/);
-  assert.match(electronMain, /restartManagedRuntime[\s\S]*?restoreCodex:\s*false/);
-  assert.match(electronMain, /requestQuit[\s\S]*?stopManagedRuntime\(\{\s*logger: loggerForQuit\(\),\s*stateStore: launcherStateStore\s*\}\)/);
+  assert.match(electronMain, /createRuntimeLifecycleCoordinator\(/);
+  assert.match(runtimeLifecycleSource, /const start = async \(\) => \{[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
+  assert.match(runtimeLifecycleSource, /const stop = async \(\{ restoreCodex = true \} = \{\}\) => \{[\s\S]*?runtimeHost\.deactivateRuntimeBridge\(\)/);
+  assert.match(runtimeLifecycleSource, /const restart = async \(\) => \{[\s\S]*?stop\(\{ restoreCodex: false \}\)/);
+  assert.match(runtimeLifecycleSource, /const quit = async \(\{ commit \} = \{\}\) => \{[\s\S]*?stop\(\{ restoreCodex: true \}\)[\s\S]*?await commit\(\)/);
+  assert.doesNotMatch(runtimeLifecycleSource, /await runtimeHost\.checkCodexTools\(\)/);
+  assert.match(electronMain, /requestQuit[\s\S]*?runtimeLifecycle\.quit\(\{ commit \}\)/);
   const stopLifecycle = electronMain.slice(
     electronMain.indexOf("async function stopManagedRuntime"),
     electronMain.indexOf("async function restartManagedRuntime"),

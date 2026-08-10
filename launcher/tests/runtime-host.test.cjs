@@ -20,6 +20,66 @@ test("Codex tool health probe passes approval policy before the exec subcommand"
   ]);
 });
 
+test("Codex tool health stays nonfatal when the runtime is unavailable or not in Full mode", async () => {
+  const unavailable = hostFor(null).host;
+  const before = unavailable.codexToolHealthSnapshot();
+  assert.equal(before.checkedAt, null);
+  assert.equal(before.live, false);
+  assert.equal(before.tools.every(tool => tool.status === "unknown" && tool.detail === "Not checked yet"), true);
+
+  const missingRuntime = await unavailable.checkCodexTools();
+  assert.equal(typeof missingRuntime.checkedAt, "string");
+  assert.equal(missingRuntime.live, false);
+  assert.equal(missingRuntime.tools.every(tool => (
+    tool.status === "unknown" && tool.detail === "LCA Codex runtime is not configured"
+  )), true);
+  assert.deepEqual(unavailable.codexToolHealthSnapshot(), missingRuntime);
+
+  const browserOnly = hostFor(null).host;
+  browserOnly.runtimeConfigSnapshot = () => ({
+    config: { mode: "browser-only", brokerSocketPath: "/tmp/lca-codex-unused-health.sock" },
+  });
+  const wrongMode = await browserOnly.checkCodexTools();
+  assert.equal(wrongMode.live, false);
+  assert.equal(wrongMode.tools.every(tool => (
+    tool.status === "unknown" && tool.detail === "Codex native tools require the Full runtime mode"
+  )), true);
+});
+
+test("concurrent Codex tool health checks share one probe and cache the resulting report", async () => {
+  const host = hostFor(null).host;
+  let probes = 0;
+  let release;
+  const report = {
+    checkedAt: "2026-08-10T12:00:00.000Z",
+    activeTurn: true,
+    live: true,
+    traceId: "health-test",
+    tools: [
+      { name: "exec_command", status: "working", detail: "ok" },
+      { name: "write_stdin", status: "working", detail: "ok" },
+      { name: "apply_patch", status: "available", detail: "advertised" },
+      { name: "view_image", status: "available", detail: "advertised" },
+    ],
+  };
+  host.performCodexToolHealthCheck = async () => {
+    probes += 1;
+    await new Promise(resolve => { release = resolve; });
+    return report;
+  };
+
+  const first = host.checkCodexTools();
+  const second = host.checkCodexTools();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(probes, 1);
+  release();
+
+  const [firstReport, secondReport] = await Promise.all([first, second]);
+  assert.deepEqual(firstReport, report);
+  assert.deepEqual(secondReport, report);
+  assert.deepEqual(host.codexToolHealthSnapshot(), report);
+});
+
 function hostFor(existingConfig) {
   const host = new RuntimeHost({
     app: {
@@ -255,6 +315,46 @@ test("runtime start connects the Codex route and resumes only the optional VS Co
   assert.deepEqual(fixture.calls, ["route status", "route connect", "vscode:resume"]);
 });
 
+test("runtime start rolls the Codex route back when resuming the VS Code proxy fails", async () => {
+  const fixture = bridgeFixture({ active: false });
+  let active = false;
+  fixture.host.run = async (_name, args) => {
+    const action = args.join(" ");
+    fixture.calls.push(action);
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: true, active, errors: [] }) };
+    }
+    if (action === "route connect") {
+      active = true;
+      return { stdout: JSON.stringify({ changed: true, active: true }) };
+    }
+    if (action === "route disconnect") {
+      active = false;
+      return { stdout: JSON.stringify({ changed: true, active: false }) };
+    }
+    throw new Error(`Unexpected command: ${action}`);
+  };
+  fixture.host.resumeVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:resume");
+    throw new Error("synthetic VS Code resume failure");
+  };
+  fixture.host.suspendVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:suspend");
+    return { changed: false, configured: false };
+  };
+
+  await assert.rejects(fixture.host.activateRuntimeBridge(), /synthetic VS Code resume failure/);
+  assert.equal(active, false);
+  assert.deepEqual(fixture.calls, [
+    "route status",
+    "route connect",
+    "vscode:resume",
+    "route status",
+    "route disconnect",
+    "vscode:suspend",
+  ]);
+});
+
 test("runtime start waits for an in-flight Codex config status read", async () => {
   const fixture = bridgeFixture({ active: false });
   let releaseStatus;
@@ -312,6 +412,20 @@ test("runtime stop still restores VS Code when restoring the Codex route fails",
   };
 
   await assert.rejects(fixture.host.deactivateRuntimeBridge(), /restoring the native Codex route failed/);
+  assert.deepEqual(fixture.calls, ["route status", "route disconnect", "vscode:suspend"]);
+});
+
+test("runtime stop reports a VS Code restore failure after restoring the native Codex route", async () => {
+  const fixture = bridgeFixture({ active: true });
+  fixture.host.suspendVsCodeAdvancedWithinOperation = () => {
+    fixture.calls.push("vscode:suspend");
+    throw new Error("synthetic VS Code suspend failure");
+  };
+
+  await assert.rejects(
+    fixture.host.deactivateRuntimeBridge(),
+    /restoring VS Code cliExecutable failed: synthetic VS Code suspend failure/,
+  );
   assert.deepEqual(fixture.calls, ["route status", "route disconnect", "vscode:suspend"]);
 });
 

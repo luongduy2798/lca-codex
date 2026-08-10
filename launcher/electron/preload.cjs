@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   activityChatTasks: (input) => ipcRenderer.invoke("launcher:activity-chat-tasks", input),
   activityTaskRecords: (input) => ipcRenderer.invoke("launcher:activity-task-records", input),
   activitySystemRecords: () => ipcRenderer.invoke("launcher:activity-system-records"),
+  deleteActivity: (input) => ipcRenderer.invoke("launcher:activity-delete", input),
   openLogs: () => ipcRenderer.invoke("launcher:open-logs"),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),
   windowState: () => ipcRenderer.invoke("launcher:window-state"),

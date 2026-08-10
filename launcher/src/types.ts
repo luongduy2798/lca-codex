@@ -72,6 +72,11 @@ export interface ActivityChatPage {
   hasMore: boolean;
 }
 
+export type ActivityDeleteInput =
+  | { scope: "all" }
+  | { scope: "chat"; chatId: string }
+  | { scope: "task"; traceId: string };
+
 export interface ActivityTaskSummary {
   traceId: string;
   threadId: string | null;
@@ -254,6 +259,7 @@ export interface LauncherApi {
   activityChatTasks(input: { chatId: string }): Promise<ActivityTaskSummary[]>;
   activityTaskRecords(input: { traceId: string }): Promise<LogRecord[]>;
   activitySystemRecords(): Promise<LogRecord[]>;
+  deleteActivity(input: ActivityDeleteInput): Promise<{ deleted: number }>;
   openLogs(): Promise<string>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;

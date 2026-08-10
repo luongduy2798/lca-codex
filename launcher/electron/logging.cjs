@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { renameAtomicFile } = require("./atomic-file.cjs");
+const { renameAtomicFile, writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
@@ -132,19 +132,23 @@ function parsePersistedRecord(line) {
   }
 }
 
-function retainedLogEntries(filePath) {
-  const entries = [];
-  for (const candidate of [`${filePath}.1`, filePath]) {
-    try {
-      for (const line of fs.readFileSync(candidate, "utf8").split(/\r?\n/)) {
-        if (!line) continue;
+function readPersistedRecords(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .flatMap((line) => {
         const record = parsePersistedRecord(line);
-        if (!record) continue;
-        entries.push({ record });
-      }
-    } catch {}
+        return record ? [record] : [];
+      });
+  } catch {
+    return [];
   }
-  return entries;
+}
+
+function retainedLogEntries(filePath) {
+  return [...readPersistedRecords(`${filePath}.1`), ...readPersistedRecords(filePath)]
+    .map(record => ({ record }));
 }
 
 function activityTraceId(record) {
@@ -187,12 +191,17 @@ function decodeActivityChatCursor(value) {
   }
 }
 
-function buildRetainedActivity(filePath, decorateActivityRecord) {
-  const entries = retainedLogEntries(filePath);
+function isActivityHealthRecord(record) {
+  return activityTraceId(record)?.startsWith("health-") === true;
+}
+
+function buildRetainedActivityFromRecords(retainedRecords, decorateActivityRecord) {
   // Prime trace -> thread mappings first so records that precede the first explicit
   // threadId for a task still receive the correct chat association.
-  for (const entry of entries) decorateActivityRecord(entry.record);
-  const records = entries.map((entry) => decorateActivityRecord(entry.record));
+  for (const record of retainedRecords) decorateActivityRecord(record);
+  const records = retainedRecords
+    .map((record) => decorateActivityRecord(record))
+    .filter((record) => !isActivityHealthRecord(record));
   const tasksByTrace = new Map();
   const system = [];
 
@@ -271,6 +280,55 @@ function buildRetainedActivity(filePath, decorateActivityRecord) {
     tasks,
     system,
   };
+}
+
+function createRetainedActivityIndex(filePath, decorateActivityRecord) {
+  let rotatedRecords = readPersistedRecords(`${filePath}.1`);
+  let currentRecords = readPersistedRecords(filePath);
+  let cached = null;
+  let dirty = true;
+
+  const snapshot = () => {
+    if (dirty || !cached) {
+      cached = buildRetainedActivityFromRecords(
+        [...rotatedRecords, ...currentRecords],
+        decorateActivityRecord,
+      );
+      dirty = false;
+    }
+    return cached;
+  };
+
+  const append = (record, { rotated = false } = {}) => {
+    if (rotated) {
+      // The previous current file is now the only retained .1 generation; the older
+      // .1 file was removed before rename. Keep the same bounded two-generation view
+      // in memory without rereading either JSONL file.
+      rotatedRecords = currentRecords;
+      currentRecords = [];
+    }
+    currentRecords.push(record);
+    dirty = true;
+  };
+
+  const filtered = (shouldDelete) => {
+    const nextRotatedRecords = rotatedRecords.filter((record) => !shouldDelete(record));
+    const nextCurrentRecords = currentRecords.filter((record) => !shouldDelete(record));
+    return {
+      rotatedRecords: nextRotatedRecords,
+      currentRecords: nextCurrentRecords,
+      deleted: (rotatedRecords.length - nextRotatedRecords.length)
+        + (currentRecords.length - nextCurrentRecords.length),
+    };
+  };
+
+  const replace = ({ rotatedRecords: nextRotatedRecords, currentRecords: nextCurrentRecords }) => {
+    rotatedRecords = nextRotatedRecords;
+    currentRecords = nextCurrentRecords;
+    dirty = true;
+  };
+
+  return { append, filtered, replace, snapshot };
 }
 
 function activityRecordSource(record) {
@@ -491,9 +549,18 @@ function createActivityRecordDecorator(records, threadIndexPath) {
   };
 }
 
+function writeRetainedRecords(filePath, records) {
+  if (records.length === 0) {
+    fs.rmSync(filePath, { force: true });
+    return;
+  }
+  writePrivateFileAtomic(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+}
+
 function createLogger({ filePath, publish, threadIndexPath }) {
   const records = readRecent(filePath);
   const decorateActivityRecord = createActivityRecordDecorator(records, threadIndexPath);
+  const activityIndex = createRetainedActivityIndex(filePath, decorateActivityRecord);
 
   const activityChatsPage = (input = {}) => {
     const requestedLimit = Number.isFinite(input?.limit) ? Math.floor(input.limit) : 20;
@@ -503,7 +570,7 @@ function createLogger({ filePath, publish, threadIndexPath }) {
       : decodeActivityChatCursor(input.cursor);
     if (input?.cursor && !cursor) return { chats: [], nextCursor: null, hasMore: false };
 
-    const { chats } = buildRetainedActivity(filePath, decorateActivityRecord);
+    const { chats } = activityIndex.snapshot();
     const remaining = cursor
       ? chats.filter((chat) => (
           activityRecordTimestamp({ at: chat.lastAt }) < activityRecordTimestamp({ at: cursor.at })
@@ -522,7 +589,7 @@ function createLogger({ filePath, publish, threadIndexPath }) {
   const activityChatTasks = (input = {}) => {
     const chatId = typeof input?.chatId === "string" && input.chatId.length <= 256 ? input.chatId : null;
     if (!chatId) return [];
-    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    const activity = activityIndex.snapshot();
     return activity.tasks
       .filter((task) => task.chatId === chatId)
       .map((task) => summarizeActivityTask(task))
@@ -532,13 +599,54 @@ function createLogger({ filePath, publish, threadIndexPath }) {
   const activityTaskRecords = (input = {}) => {
     const traceId = typeof input?.traceId === "string" && input.traceId.length <= 256 ? input.traceId : null;
     if (!traceId) return [];
-    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    const activity = activityIndex.snapshot();
     return activity.tasks.find((task) => task.traceId === traceId)?.records ?? [];
   };
 
   const activitySystemRecords = () => {
-    const activity = buildRetainedActivity(filePath, decorateActivityRecord);
+    const activity = activityIndex.snapshot();
     return activity.system;
+  };
+
+  const deleteActivity = (input = {}) => {
+    const scope = input?.scope;
+    let shouldDelete;
+
+    if (scope === "all") {
+      shouldDelete = () => true;
+    } else if (scope === "task") {
+      const traceId = activityIdentifier(input?.traceId);
+      if (!traceId) throw new Error("Activity task deletion requires a valid traceId");
+      shouldDelete = (record) => activityTraceId(record) === traceId;
+    } else if (scope === "chat") {
+      const chatId = typeof input?.chatId === "string" && input.chatId.length <= 256 ? input.chatId : null;
+      if (!chatId) throw new Error("Activity chat deletion requires a valid chatId");
+      const activity = activityIndex.snapshot();
+      if (chatId === "system") {
+        shouldDelete = (record) => activityTraceId(record) === null;
+      } else {
+        const traceIds = new Set(
+          activity.tasks.filter((task) => task.chatId === chatId).map((task) => task.traceId),
+        );
+        shouldDelete = (record) => {
+          const traceId = activityTraceId(record);
+          return traceId !== null && traceIds.has(traceId);
+        };
+      }
+    } else {
+      throw new Error("Activity deletion scope must be all, chat, or task");
+    }
+
+    const next = activityIndex.filtered(shouldDelete);
+    if (next.deleted === 0) return { deleted: 0 };
+
+    writeRetainedRecords(`${filePath}.1`, next.rotatedRecords);
+    writeRetainedRecords(filePath, next.currentRecords);
+    activityIndex.replace(next);
+
+    const remainingRecent = records.filter((record) => !shouldDelete(record));
+    records.splice(0, records.length, ...remainingRecent.slice(-MAX_MEMORY_RECORDS));
+    return { deleted: next.deleted };
   };
 
   const append = (level, event, detail = {}) => {
@@ -550,15 +658,18 @@ function createLogger({ filePath, publish, threadIndexPath }) {
     };
     records.push(record);
     if (records.length > MAX_MEMORY_RECORDS) records.splice(0, records.length - MAX_MEMORY_RECORDS);
+    let rotated = false;
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
       const stat = fs.statSync(filePath, { throwIfNoEntry: false });
       if (stat && stat.size >= MAX_LOG_BYTES) {
         fs.rmSync(`${filePath}.1`, { force: true });
         renameAtomicFile(filePath, `${filePath}.1`);
+        rotated = true;
       }
       fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     } catch {}
+    activityIndex.append(record, { rotated });
     const displayRecord = decorateActivityRecord(record);
     publish?.(displayRecord);
     return record;
@@ -576,6 +687,7 @@ function createLogger({ filePath, publish, threadIndexPath }) {
     activityChatTasks,
     activityTaskRecords,
     activitySystemRecords,
+    deleteActivity,
     filePath,
   };
 }

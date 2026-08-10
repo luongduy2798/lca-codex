@@ -5,6 +5,17 @@ import { dirname } from "node:path";
 import { isWindowsPipeEndpoint } from "../../config";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { activityCallId, activityDuration, logLcaCodexActivity } from "./activity";
+import {
+  CODEX_TOOL_HEALTH_ROUTE_NAMES,
+  codexToolHealthGatewayProgram,
+  codexToolHealthRegistryProgram,
+  declaredCodexToolHealthRoutes,
+  parseCodexToolHealthRegistry,
+  passiveCodexToolHealthReport,
+  runCodexToolHealthSmoke,
+  unavailableCodexToolHealthReport,
+  type CodexToolHealthReport,
+} from "./codex-tool-health";
 import { withoutRetiredTurnHandles, type ChatGptContextEntry, type ChatGptContextSnapshot } from "./prompt";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
@@ -97,21 +108,7 @@ const brokers = new Map<string, TurnBroker>();
 const MAX_BROKER_LINE_CHARS = 67_108_864;
 const MAX_RETIRED_TURN_HANDLES = 64;
 
-export type CodexToolHealthStatus = "working" | "available" | "failed" | "missing" | "unknown";
-
-export interface CodexToolHealthItem {
-  name: "exec_command" | "write_stdin" | "apply_patch" | "view_image";
-  status: CodexToolHealthStatus;
-  detail: string;
-}
-
-export interface CodexToolHealthReport {
-  checkedAt: string;
-  activeTurn: boolean;
-  live: boolean;
-  traceId: string | null;
-  tools: CodexToolHealthItem[];
-}
+export type { CodexToolHealthItem, CodexToolHealthReport, CodexToolHealthStatus } from "./codex-tool-health";
 
 export async function closeTurnBrokers(): Promise<void> {
   const active = [...brokers.values()];
@@ -723,38 +720,6 @@ export class TurnBroker {
     return tool?.freeform ? tool : undefined;
   }
 
-  private declaredHealthRoutes(environment: ChatGptTurnEnvironment): { routes: Set<string>; gatewayAdvertised: boolean } {
-    const routes = new Set(
-      environment.tools
-        .filter(tool => !tool.namespace)
-        .map(tool => tool.name),
-    );
-    const gateway = this.exactEnvironmentTool(environment, "exec");
-    if (!gateway?.freeform) return { routes, gatewayAdvertised: false };
-
-    const description = gateway.description;
-    for (const name of ["exec_command", "shell_command", "write_stdin", "apply_patch", "view_image"]) {
-      if (description.includes(`### \`${name}\``)
-        || description.includes(`tools: { ${name}(`)
-        || description.includes(`tools.${name}(`)) {
-        routes.add(name);
-      }
-    }
-    return { routes, gatewayAdvertised: true };
-  }
-
-  private gatewayProgram(
-    nestedToolName: string,
-    payload: { arguments?: Record<string, unknown>; input?: string },
-    freeform = false,
-  ): string {
-    const nestedInput = freeform ? payload.input ?? "" : payload.arguments ?? {};
-    return [
-      `const result = await tools[${JSON.stringify(nestedToolName.replace(/[^A-Za-z0-9_$]/g, "_"))}](${JSON.stringify(nestedInput)});`,
-      "text(JSON.stringify(result));",
-    ].join("\n");
-  }
-
   private invokeNativeForHealthCheck(
     channel: TurnChannel,
     toolName: string,
@@ -767,7 +732,7 @@ export class TurnBroker {
         channel,
         gateway.name,
         true,
-        { input: this.gatewayProgram(toolName, payload, freeform) },
+        { input: codexToolHealthGatewayProgram(toolName, payload, freeform) },
         toolName,
       );
     }
@@ -783,17 +748,11 @@ export class TurnBroker {
   }
 
   private async healthRoutes(channel: TurnChannel): Promise<{ routes: Set<string>; gatewayError?: string }> {
-    const { routes } = this.declaredHealthRoutes(channel.environment);
+    const { routes } = declaredCodexToolHealthRoutes(channel.environment);
     const gateway = this.execGateway(channel);
     if (!gateway) return { routes };
 
-    const names = ["exec_command", "shell_command", "write_stdin", "apply_patch", "view_image"];
-    const marker = "LCA_CODEX_TOOL_HEALTH_ROUTES:";
-    const program = [
-      `const names = ${JSON.stringify(names)};`,
-      "const availability = Object.fromEntries(names.map(name => [name, typeof tools[name.replace(/[^A-Za-z0-9_$]/g, \"_\")] === \"function\"]));",
-      `text(${JSON.stringify(marker)} + JSON.stringify(availability));`,
-    ].join("\n");
+    const program = codexToolHealthRegistryProgram();
     try {
       const result = await this.invokeChannel(
         channel,
@@ -802,14 +761,8 @@ export class TurnBroker {
         { input: program },
         "codex_tool_health_registry",
       );
-      const detail = this.resultDetail(result);
-      const markerIndex = detail.indexOf(marker);
-      if (markerIndex < 0) throw new Error("Codex exec gateway did not return its native tool registry");
-      const payload = detail.slice(markerIndex + marker.length);
-      const objectEnd = payload.indexOf("}");
-      if (objectEnd < 0) throw new Error("Codex exec gateway returned an incomplete native tool registry");
-      const parsed = JSON.parse(payload.slice(0, objectEnd + 1)) as Record<string, unknown>;
-      for (const name of names) {
+      const parsed = parseCodexToolHealthRegistry(result);
+      for (const name of CODEX_TOOL_HEALTH_ROUTE_NAMES) {
         if (parsed[name] === true) routes.add(name);
         else if (!this.exactTool(channel, name)) routes.delete(name);
       }
@@ -819,236 +772,26 @@ export class TurnBroker {
     }
   }
 
-  private resultDetail(result: BrokerToolResult): string {
-    const texts: string[] = [];
-    const visit = (value: unknown): void => {
-      if (typeof value === "string") {
-        texts.push(value);
-        return;
-      }
-      if (!value || typeof value !== "object") return;
-      if (Array.isArray(value)) {
-        for (const item of value) visit(item);
-        return;
-      }
-      const record = value as Record<string, unknown>;
-      if (typeof record.text === "string") texts.push(record.text);
-      if (record.content !== undefined) visit(record.content);
-      if (record.structuredContent !== undefined) visit(record.structuredContent);
-    };
-    visit(result.content);
-    visit(result.structuredContent);
-    return texts.join(" ").trim().slice(0, 500);
-  }
-
-  private sessionIdFromResult(result: BrokerToolResult): number | undefined {
-    const seen = new Set<object>();
-    const visit = (value: unknown): number | undefined => {
-      if (typeof value === "string") {
-        const trimmed = value.trim();
-        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-          try { return visit(JSON.parse(trimmed)); } catch { return undefined; }
-        }
-        return undefined;
-      }
-      if (!value || typeof value !== "object") return undefined;
-      if (seen.has(value)) return undefined;
-      seen.add(value);
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          const found = visit(item);
-          if (found !== undefined) return found;
-        }
-        return undefined;
-      }
-      const record = value as Record<string, unknown>;
-      if (typeof record.session_id === "number" && Number.isSafeInteger(record.session_id) && record.session_id >= 0) {
-        return record.session_id;
-      }
-      for (const nested of Object.values(record)) {
-        const found = visit(nested);
-        if (found !== undefined) return found;
-      }
-      return undefined;
-    };
-    return visit(result);
-  }
-
-  private unavailableHealthReport(detail: string): CodexToolHealthReport {
-    return {
-      checkedAt: new Date().toISOString(),
-      activeTurn: false,
-      live: false,
-      traceId: null,
-      tools: (["exec_command", "write_stdin", "apply_patch", "view_image"] as const).map(name => ({
-        name,
-        status: "unknown",
-        detail,
-      })),
-    };
-  }
-
-  private passiveHealthReport(
-    environment: ChatGptTurnEnvironment,
-    traceId: string,
-    activeTurn: boolean,
-  ): CodexToolHealthReport {
-    const { routes, gatewayAdvertised } = this.declaredHealthRoutes(environment);
-    const routeAvailable = (name: string) => routes.has(name);
-    const execRoute = routeAvailable("exec_command")
-      ? "exec_command"
-      : routeAvailable("shell_command")
-        ? "shell_command"
-        : null;
-    const idleSuffix = activeTurn
-      ? "Live smoke test will run when this turn is waiting for native tool calls."
-      : "Shown from the most recently observed Codex turn; run a new Codex task for a live smoke test.";
-    const unavailable = (name: string) => gatewayAdvertised
-      ? {
-          status: "unknown" as const,
-          detail: `The exec gateway is advertised, but ${name} is not declared in its tool description. ${idleSuffix}`,
-        }
-      : {
-          status: "missing" as const,
-          detail: `Native route is not advertised. ${idleSuffix}`,
-        };
-    const advertised = (name: string, detail = "Native route is advertised") => routeAvailable(name)
-      ? { status: "available" as const, detail: `${detail}. ${idleSuffix}` }
-      : unavailable(name);
-    return {
-      checkedAt: new Date().toISOString(),
-      activeTurn,
-      live: false,
-      traceId,
-      tools: [
-        {
-          name: "exec_command",
-          ...(execRoute
-            ? advertised(execRoute, execRoute === "exec_command" ? "Native exec_command route is advertised" : "shell_command compatibility route is advertised")
-            : unavailable("exec_command")),
-        },
-        { name: "write_stdin", ...advertised("write_stdin") },
-        { name: "apply_patch", ...advertised("apply_patch", "Native route is advertised; this check does not modify files") },
-        { name: "view_image", ...advertised("view_image", "Native route is advertised; this check does not open an image") },
-      ],
-    };
-  }
-
   private async checkCodexTools(): Promise<CodexToolHealthReport> {
     const channels = [...this.channels.values()];
     const channel = channels.slice().reverse().find(candidate => candidate.waiters.size > 0);
     if (!channel) {
       const registered = channels.at(-1);
-      if (registered) return this.passiveHealthReport(registered.environment, registered.traceId, true);
-      if (this.lastObserved) return this.passiveHealthReport(this.lastObserved.environment, this.lastObserved.traceId, false);
-      return this.unavailableHealthReport(
+      if (registered) return passiveCodexToolHealthReport(registered.environment, registered.traceId, true);
+      if (this.lastObserved) return passiveCodexToolHealthReport(this.lastObserved.environment, this.lastObserved.traceId, false);
+      return unavailableCodexToolHealthReport(
         "No Codex tool-capable turn has been observed since this runtime started. Run one Codex task, then check again.",
       );
     }
 
     const { routes, gatewayError } = await this.healthRoutes(channel);
-    const routeAvailable = (name: string) => routes.has(name);
-    const unavailableDetail = (name: string) => gatewayError
-      ? `Could not inspect the Codex exec gateway for ${name}: ${gatewayError}`
-      : "Native route is not advertised";
-    const advertised = (name: string) => routeAvailable(name)
-      ? { status: "available" as const, detail: "Native route is advertised" }
-      : { status: gatewayError ? "unknown" as const : "missing" as const, detail: unavailableDetail(name) };
-    const execRoute = routeAvailable("exec_command")
-      ? "exec_command"
-      : routeAvailable("shell_command")
-        ? "shell_command"
-        : null;
-    const report: CodexToolHealthReport = {
-      checkedAt: new Date().toISOString(),
-      activeTurn: true,
-      live: true,
+    return runCodexToolHealthSmoke({
+      environment: channel.environment,
       traceId: channel.traceId,
-      tools: [
-        { name: "exec_command", ...(execRoute ? { status: "available" as const, detail: execRoute === "exec_command" ? "Native route is advertised" : "shell_command compatibility route is advertised" } : advertised("exec_command")) },
-        { name: "write_stdin", ...advertised("write_stdin") },
-        { name: "apply_patch", ...(routeAvailable("apply_patch") ? { status: "available" as const, detail: "Native route is advertised; safety check does not modify files" } : advertised("apply_patch")) },
-        { name: "view_image", ...(routeAvailable("view_image") ? { status: "available" as const, detail: "Native route is advertised; safety check does not open an image" } : advertised("view_image")) },
-      ],
-    };
-    const item = (name: CodexToolHealthItem["name"]) => report.tools.find(tool => tool.name === name)!;
-    if (!execRoute) return report;
-
-    try {
-      const command = process.platform === "win32"
-        ? "powershell.exe -NoProfile -Command \"$line = [Console]::ReadLine(); Write-Output $line\""
-        : "sh -c 'IFS= read -r line; printf \"%s\\n\" \"$line\"'";
-      const execResult = execRoute === "exec_command"
-        ? await this.invokeNativeForHealthCheck(channel, execRoute, {
-            arguments: {
-              cmd: command,
-              workdir: channel.environment.cwd,
-              yield_time_ms: 250,
-              max_output_tokens: 1_000,
-              tty: true,
-            },
-          })
-        : await this.invokeNativeForHealthCheck(channel, execRoute, {
-            arguments: {
-              command: process.platform === "win32" ? "cmd /d /c echo LCA_CODEX_TOOL_CHECK_READY" : "printf 'LCA_CODEX_TOOL_CHECK_READY\\n'",
-              workdir: channel.environment.cwd,
-              timeout_ms: 2_000,
-            },
-          });
-      const execItem = item("exec_command");
-      if (execResult.isError) {
-        execItem.status = "failed";
-        execItem.detail = this.resultDetail(execResult) || "Native command smoke test failed";
-        return report;
-      }
-      execItem.status = "working";
-      execItem.detail = execRoute === "exec_command"
-        ? "Harmless interactive command started successfully"
-        : "Harmless shell_command compatibility smoke test completed";
-
-      if (execRoute !== "exec_command") {
-        const stdinItem = item("write_stdin");
-        if (routeAvailable("write_stdin")) {
-          stdinItem.status = "available";
-          stdinItem.detail = "Native route is advertised; shell_command cannot create a session for a live stdin smoke test";
-        }
-        return report;
-      }
-
-      const sessionId = this.sessionIdFromResult(execResult);
-      const stdinItem = item("write_stdin");
-      if (sessionId === undefined) {
-        stdinItem.status = routeAvailable("write_stdin") ? "available" : "missing";
-        stdinItem.detail = routeAvailable("write_stdin")
-          ? "Command worked, but the smoke command did not return a session to poll"
-          : "Native route is not advertised";
-        return report;
-      }
-      if (!routeAvailable("write_stdin")) return report;
-      const stdinResult = await this.invokeNativeForHealthCheck(channel, "write_stdin", {
-        arguments: {
-          session_id: sessionId,
-          chars: "LCA_CODEX_TOOL_CHECK_STDIN\n",
-          yield_time_ms: 1_000,
-          max_output_tokens: 1_000,
-        },
-      });
-      if (stdinResult.isError) {
-        stdinItem.status = "failed";
-        stdinItem.detail = this.resultDetail(stdinResult) || "Native session write failed";
-        void this.invokeNativeForHealthCheck(channel, "write_stdin", {
-          arguments: { session_id: sessionId, chars: "\u0003", yield_time_ms: 250, max_output_tokens: 500 },
-        }).catch(() => {});
-      } else {
-        stdinItem.status = "working";
-        stdinItem.detail = "Input was delivered to the harmless command session successfully";
-      }
-    } catch (error) {
-      const execItem = item("exec_command");
-      execItem.status = "failed";
-      execItem.detail = errorOf(error).message.slice(0, 500);
-    }
-    return report;
+      routes,
+      gatewayError,
+      invoke: (toolName, payload, freeform) => this.invokeNativeForHealthCheck(channel, toolName, payload, freeform),
+    });
   }
 
   private takeQueued(channel: TurnChannel): BrokerToolRequest[] {

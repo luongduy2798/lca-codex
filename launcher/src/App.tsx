@@ -12,6 +12,7 @@ import { copy, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
   ActivityChatSummary,
+  ActivityDeleteInput,
   ActivityTaskSummary,
   BrowserState,
   CodexConfigSnapshot,
@@ -101,6 +102,17 @@ export function App() {
       : current);
   }, []);
 
+  const removeActivityLogs = useCallback((input: ActivityDeleteInput) => {
+    setLogs((current) => {
+      if (input.scope === "all") return [];
+      if (input.scope === "task") {
+        return current.filter((record) => activityTraceId(record) !== input.traceId);
+      }
+      const deleted = new Set(groupActivityRecordsByChat(current).get(input.chatId) ?? []);
+      return current.filter((record) => !deleted.has(record));
+    });
+  }, []);
+
   if (!api) return <FatalMessage message="Launcher IPC is unavailable." />;
   if (!snapshot) return <LaunchLoading />;
 
@@ -110,6 +122,7 @@ export function App() {
         browser={browser}
         copy={copy}
         logs={logs}
+        onActivityDeleted={removeActivityLogs}
         operation={operation}
         setError={setError}
         snapshot={snapshot}
@@ -126,6 +139,7 @@ function LauncherShell({
   browser,
   copy,
   logs,
+  onActivityDeleted,
   operation,
   setError,
   snapshot,
@@ -134,6 +148,7 @@ function LauncherShell({
   browser: BrowserState | null;
   copy: Copy;
   logs: LogRecord[];
+  onActivityDeleted: (input: ActivityDeleteInput) => void;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -447,7 +462,9 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
-            {surface === "activity" ? <ActivitySurface copy={copy} logs={logs} setError={setError} /> : null}
+            {surface === "activity" ? (
+              <ActivitySurface copy={copy} logs={logs} onActivityDeleted={onActivityDeleted} setError={setError} />
+            ) : null}
             {surface === "settings" ? (
               <SettingsSurface
                 copy={copy}
@@ -1848,11 +1865,13 @@ function ActivityRecordRow({ grouped, record }: {
   );
 }
 
-function ActivityTaskCard({ copy, expanded, group, loading, onToggle, records }: {
+function ActivityTaskCard({ copy, deleting, expanded, group, loading, onDelete, onToggle, records }: {
   copy: Copy;
+  deleting: boolean;
   expanded: boolean;
   group: ActivityTaskSummary;
   loading: boolean;
+  onDelete: () => void;
   onToggle: () => void;
   records: LogRecord[];
 }) {
@@ -1878,6 +1897,9 @@ function ActivityTaskCard({ copy, expanded, group, loading, onToggle, records }:
         </span>
         <time>{formatTime(group.startedAt)}</time>
       </button>
+      <div className="activity-delete-action">
+        <IconButton disabled={deleting} icon="trash" label={copy.deleteTaskActivity} onClick={onDelete} />
+      </div>
       {expanded ? (
         <div className="activity-task-records">
           {loading ? (
@@ -1903,10 +1925,13 @@ function ActivityChatCard({
   copy,
   expanded,
   expandedTasks,
+  deleting,
   loading,
   loadingTaskRecords,
   liveRecords,
   now,
+  onDelete,
+  onDeleteTask,
   onToggle,
   onToggleTask,
   systemRecords,
@@ -1915,12 +1940,15 @@ function ActivityChatCard({
 }: {
   chat: ActivityChatSummary;
   copy: Copy;
+  deleting: boolean;
   expanded: boolean;
   expandedTasks: Record<string, boolean>;
   loading: boolean;
   loadingTaskRecords: Record<string, boolean>;
   liveRecords: LogRecord[];
   now: number;
+  onDelete: () => void;
+  onDeleteTask: (task: ActivityTaskSummary) => void;
   onToggle: () => void;
   onToggleTask: (task: ActivityTaskSummary) => void;
   systemRecords: LogRecord[];
@@ -1960,6 +1988,11 @@ function ActivityChatCard({
         </span>
         <time>{formatTime(chat.lastAt)}</time>
       </button>
+      {chat.kind !== "system" ? (
+        <div className="activity-delete-action">
+          <IconButton disabled={deleting} icon="trash" label={copy.deleteChatActivity} onClick={onDelete} />
+        </div>
+      ) : null}
       {expanded ? (
         <div className="activity-chat-body">
           {loading ? (
@@ -1985,10 +2018,12 @@ function ActivityChatCard({
               return (
                 <ActivityTaskCard
                   copy={copy}
+                  deleting={deleting}
                   expanded={expandedTask}
                   group={task}
                   key={task.traceId}
                   loading={loadingTaskRecords[task.traceId] === true}
+                  onDelete={() => onDeleteTask(task)}
                   onToggle={() => onToggleTask(task)}
                   records={records}
                 />
@@ -2006,10 +2041,12 @@ function ActivityChatCard({
 function ActivitySurface({
   copy,
   logs,
+  onActivityDeleted,
   setError,
 }: {
   copy: Copy;
   logs: LogRecord[];
+  onActivityDeleted: (input: ActivityDeleteInput) => void;
   setError: (error: string | null) => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
@@ -2024,6 +2061,7 @@ function ActivitySurface({
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [deletingActivity, setDeletingActivity] = useState(false);
   const liveRecordsByChat = useMemo(() => groupActivityRecordsByChat(logs), [logs]);
   const liveChats = useMemo(() => summarizeActivityChatGroups(liveRecordsByChat), [liveRecordsByChat]);
   const visibleChats = useMemo(() => mergeActivityChatSummaries(chats, liveChats), [chats, liveChats]);
@@ -2078,6 +2116,30 @@ function ActivitySurface({
       .finally(() => setLoadingTaskRecords((current) => ({ ...current, [task.traceId]: false })));
   };
 
+  const deleteActivity = async (input: ActivityDeleteInput, confirmation: string) => {
+    if (!api || deletingActivity || !window.confirm(confirmation)) return;
+    setDeletingActivity(true);
+    try {
+      await api.deleteActivity(input);
+      onActivityDeleted(input);
+      const page = await api.activityChatsPage({ limit: 20 });
+      setChats(page.chats);
+      setHistoryCursor(page.nextCursor);
+      setHasMoreHistory(page.hasMore);
+      setExpandedChats({});
+      setExpandedTasks({});
+      setChatTasks({});
+      setTaskRecords({});
+      setSystemRecords(null);
+      setLoadingChats({});
+      setLoadingTaskRecords({});
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setDeletingActivity(false);
+    }
+  };
+
   const loadOlder = () => {
     if (!api || loadingHistory || !hasMoreHistory || !historyCursor) return;
     setLoadingHistory(true);
@@ -2093,12 +2155,21 @@ function ActivitySurface({
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
-        <SecondaryButton
-          icon="external"
-          onClick={() => void api!.openLogs().catch((cause) => setError(messageOf(cause)))}
-        >
-          {copy.openLogFolder}
-        </SecondaryButton>
+        <div className="inline-actions">
+          <SecondaryButton
+            disabled={deletingActivity || visibleChats.length === 0}
+            icon="trash"
+            onClick={() => void deleteActivity({ scope: "all" }, copy.confirmDeleteAllActivity)}
+          >
+            {copy.deleteAllActivity}
+          </SecondaryButton>
+          <SecondaryButton
+            icon="external"
+            onClick={() => void api!.openLogs().catch((cause) => setError(messageOf(cause)))}
+          >
+            {copy.openLogFolder}
+          </SecondaryButton>
+        </div>
       </div>
       <div className="activity-table">
         {!loadingHistory && visibleChats.length === 0 ? (
@@ -2113,6 +2184,7 @@ function ActivitySurface({
             <ActivityChatCard
               chat={chat}
               copy={copy}
+              deleting={deletingActivity}
               expanded={expandedChats[chat.id] === true}
               expandedTasks={expandedTasks}
               key={chat.id}
@@ -2120,6 +2192,8 @@ function ActivitySurface({
               loadingTaskRecords={loadingTaskRecords}
               liveRecords={liveRecords}
               now={now}
+              onDelete={() => void deleteActivity({ scope: "chat", chatId: chat.id }, copy.confirmDeleteChatActivity)}
+              onDeleteTask={(task) => void deleteActivity({ scope: "task", traceId: task.traceId }, copy.confirmDeleteTaskActivity)}
               onToggle={() => toggleChat(chat)}
               onToggleTask={toggleTask}
               systemRecords={systemRecords ?? []}
@@ -2855,6 +2929,10 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
   };
 }
 
+function isActivityHealthRecord(record: LogRecord): boolean {
+  return activityTraceId(record)?.startsWith("health-") === true;
+}
+
 function groupActivityLogs(logs: LogRecord[], now: number): {
   tasks: ActivityTaskGroup[];
   system: LogRecord[];
@@ -2862,6 +2940,7 @@ function groupActivityLogs(logs: LogRecord[], now: number): {
   const byTraceId = new Map<string, LogRecord[]>();
   const system: LogRecord[] = [];
   for (const record of logs) {
+    if (isActivityHealthRecord(record)) continue;
     const traceId = activityTraceId(record);
     if (!traceId) {
       system.push(record);
@@ -2879,15 +2958,16 @@ function groupActivityLogs(logs: LogRecord[], now: number): {
 }
 
 function groupActivityRecordsByChat(logs: LogRecord[]): Map<string, LogRecord[]> {
+  const visibleLogs = logs.filter((record) => !isActivityHealthRecord(record));
   const threadByTrace = new Map<string, string>();
-  for (const record of logs) {
+  for (const record of visibleLogs) {
     const traceId = activityTraceId(record);
     const threadId = typeof record.detail.threadId === "string" ? record.detail.threadId.trim() : "";
     if (traceId && threadId) threadByTrace.set(traceId, threadId);
   }
 
   const byChat = new Map<string, LogRecord[]>();
-  for (const record of logs) {
+  for (const record of visibleLogs) {
     const traceId = activityTraceId(record);
     const threadId = traceId ? threadByTrace.get(traceId) : null;
     const chatId = traceId ? (threadId ? `chat:${threadId}` : `trace:${traceId}`) : "system";
@@ -2931,7 +3011,13 @@ function summarizeActivityChatGroups(byChat: Map<string, LogRecord[]>): Activity
       eventCount: sorted.length,
       lastAt: last.at,
     };
-  }).sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt) || left.id.localeCompare(right.id));
+  }).sort(compareActivityChatSummaries);
+}
+
+function compareActivityChatSummaries(left: ActivityChatSummary, right: ActivityChatSummary): number {
+  if (left.kind === "system" && right.kind !== "system") return 1;
+  if (right.kind === "system" && left.kind !== "system") return -1;
+  return Date.parse(right.lastAt) - Date.parse(left.lastAt) || left.id.localeCompare(right.id);
 }
 
 function mergeActivityChatSummaries(...groups: ActivityChatSummary[][]): ActivityChatSummary[] {
@@ -2953,7 +3039,7 @@ function mergeActivityChatSummaries(...groups: ActivityChatSummary[][]): Activit
       });
     }
   }
-  return [...merged.values()].sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt) || left.id.localeCompare(right.id));
+  return [...merged.values()].sort(compareActivityChatSummaries);
 }
 
 function mergeActivityTaskSummaries(...groups: ActivityTaskSummary[][]): ActivityTaskSummary[] {

@@ -10,6 +10,7 @@ import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "./prompt";
+import { resolveBrowserRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateLcaCodexUsage } from "./usage";
@@ -517,13 +518,15 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
           }
         });
       } catch (error) {
-        const providerRetryable = error instanceof LcaCodexAdapterError && error.retryable;
+        const adapterError = error instanceof LcaCodexAdapterError ? error : null;
         const responseStreamed = streamedFinalAnswer || hasFinalAnswerText(session.eventsForFinalReplay());
-        const nextAttempt = providerRetryable && !responseStreamed
+        const retryPolicy = resolveBrowserRetryPolicy(error, responseStreamed);
+        const nextAttempt = retryPolicy.browserGenerationAllowed
           ? chatGptTurnSessions.scheduleRetry(executionKey, session)
           : null;
-        const retryable = nextAttempt !== null;
-        if (error instanceof LcaCodexAdapterError && retryable) {
+        const browserRetryScheduled = nextAttempt !== null;
+        const retryable = retryPolicy.nativeRetryableWithoutBrowserGeneration || browserRetryScheduled;
+        if (adapterError && browserRetryScheduled) {
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
@@ -532,33 +535,33 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
             attempt: session.runtime.attempt ?? 1,
             nextAttempt,
             durationMs: activityDuration(session.runtime.startedAt ?? Date.now()),
-            reason: error.code,
-            status: error.status,
-            code: error.code,
+            reason: adapterError.code,
+            status: adapterError.status,
+            code: adapterError.code,
           }, "warning");
         } else {
           session.cancel();
-          if (providerRetryable) {
+          if (retryPolicy.providerRetryable && adapterError) {
             logLcaCodexActivity("lca_codex.turn_retry_stopped", {
               traceId,
               attempt: session.runtime.attempt ?? 1,
               durationMs: activityDuration(session.runtime.startedAt ?? Date.now()),
-              reason: responseStreamed ? "response_streamed" : "retry_limit",
-              status: error.status,
-              code: error.code,
-            }, "error");
+              reason: retryPolicy.stopReason,
+              status: adapterError.status,
+              code: adapterError.code,
+            }, retryPolicy.usageLimited ? "warning" : "error");
           }
         }
         if (session.runtime.mode === "tools") {
           void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
         }
-        if (error instanceof LcaCodexAdapterError) {
+        if (adapterError) {
           emit({
             type: "error",
-            message: error.message,
-            status: error.status,
-            errorType: error.errorType,
-            code: error.code,
+            message: adapterError.message,
+            status: adapterError.status,
+            errorType: adapterError.errorType,
+            code: adapterError.code,
             // Responses deltas are append-only. Once any final-answer text escaped this request,
             // starting a fresh browser generation would make Codex append the retry from byte 0
             // after the already-visible prefix. Keep the failed session replayable instead and

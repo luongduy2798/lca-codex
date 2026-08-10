@@ -94,6 +94,19 @@ checkpoint marker is translated into a visible Codex trace item; tool-capable tu
 same capability after that checkpoint. Visible ChatGPT status rows become reasoning summaries,
 while stable prose between rows becomes native Codex commentary.
 
+## Retry policy
+
+Provider retryability and permission to create a fresh ChatGPT browser generation are separate
+contracts. A transient provider failure may authorize one bounded fresh Temporary Chat only before
+any final-answer bytes have been emitted. Once final-answer text has entered the append-only
+Responses stream, the request is terminal so a replacement generation can never duplicate the
+visible prefix.
+
+Product usage limits are different again. Rate limits, quota exhaustion, and subscription limits may
+remain retryable to native Codex so its normal backoff or a later user retry can occur, but LCA Codex
+never opens a second Temporary Chat automatically for those errors. This preserves the product
+usage-limit invariant without misclassifying a temporary 429 as a permanent API failure.
+
 ## Installation and service lifecycle
 
 Each native desktop package contains Electron, a platform-matched pinned Bun executable, the
@@ -109,11 +122,23 @@ Codex or tunnel configuration.
 
 The launcher is the sole process supervisor on macOS, Windows, and Linux. It starts the optional
 tunnel first, waits for healthy/ready evidence, starts the Responses daemon, and then waits for its
-versioned health payload. Native login items or an owner-local XDG autostart file launch the app
-hidden after sign-in. A marker containing only launcher-owned PIDs lets doctor distinguish the
-launcher runtime from a stale or external process. Legacy macOS launchd services are drained and
-removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
-mode.
+versioned health payload. Runtime lifecycle orchestration is a separate transaction boundary from
+the Electron entry point: Start, Stop, Restart, and Quit share the same compensation rules for the
+managed daemon, reversible native Codex route, and optional VS Code proxy. A failed Start restores
+native Codex and stops a daemon that was already started; Quit commits the application exit only
+after native Codex restoration and runtime shutdown succeed.
+
+Native Codex tool health is diagnostic rather than a runtime-readiness gate. Once the daemon and
+reversible bridge are ready, Start returns immediately and launches the bounded tool-health probe
+asynchronously. Stop, Restart, or a failed Start invalidates the health generation and terminates any
+owned probe, so a late result from an older runtime generation cannot overwrite current UI state.
+The turn broker keeps only the health transport hook; native-route discovery, passive reports, and
+harmless exec/stdin smoke semantics live in the dedicated Codex tool-health module.
+
+Native login items or an owner-local XDG autostart file launch the app hidden after sign-in. A marker
+containing only launcher-owned PIDs lets doctor distinguish the launcher runtime from a stale or
+external process. Legacy macOS launchd services are drained and removed during an explicit launcher
+migration; launchd remains only for the advanced terminal-only mode.
 
 Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
 forwards the authenticated official model catalog and appends only the single routed `lca-codex`
@@ -136,6 +161,18 @@ authenticated shutdown endpoint. If the contract is unavailable, malformed, non-
 be completed, the operation fails closed and restores the drained runtime when possible. An
 unexpected child exit is recovered with a bounded restart budget; a crash loop becomes an explicit
 launcher error.
+
+## Launcher Activity retention
+
+The launcher retains at most the current `launcher.jsonl` generation plus `launcher.jsonl.1`. Those
+two files are parsed once when the logger starts, then represented by an in-memory Activity index for
+chat pagination, task summaries, task drill-down, and system records. New records update the index in
+memory, and log rotation replaces the older retained generation without rereading either JSONL file.
+This keeps Activity IPC from repeatedly parsing up to two full log generations on the Electron main
+thread.
+
+The JSONL files remain the process-restart persistence source; the in-memory index is only a derived
+runtime view and never changes the existing redaction or bounded-retention rules.
 
 ## Security invariants
 

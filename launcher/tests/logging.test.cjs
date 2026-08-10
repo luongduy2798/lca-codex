@@ -153,6 +153,121 @@ test("launcher activity paginates by chat, then lazily loads task summaries and 
   }
 });
 
+test("launcher Activity deletes one task, one chat, or all retained logs from disk and memory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-activity-delete-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const record = (at, event, detail) => JSON.stringify({ at, level: "info", event, detail });
+  try {
+    fs.writeFileSync(`${filePath}.1`, [
+      record("2026-07-28T00:00:01.000Z", "lca_codex.turn_started", { traceId: "trace_delete_a1", threadId: "thread_delete_a" }),
+      record("2026-07-28T00:00:02.000Z", "lca_codex.turn_completed", { traceId: "trace_delete_a1" }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(filePath, [
+      record("2026-07-28T00:00:03.000Z", "lca_codex.turn_started", { traceId: "trace_delete_a2", threadId: "thread_delete_a" }),
+      record("2026-07-28T00:00:04.000Z", "lca_codex.turn_completed", { traceId: "trace_delete_a2" }),
+      record("2026-07-28T00:00:05.000Z", "lca_codex.turn_started", { traceId: "trace_delete_b1", threadId: "thread_delete_b" }),
+      record("2026-07-28T00:00:06.000Z", "lca_codex.turn_completed", { traceId: "trace_delete_b1" }),
+      record("2026-07-28T00:00:07.000Z", "launcher.system_test", {}),
+      "",
+    ].join("\n"));
+    const logger = createLogger({ filePath });
+
+    assert.deepEqual(logger.deleteActivity({ scope: "task", traceId: "trace_delete_a1" }), { deleted: 2 });
+    assert.equal(logger.activityTaskRecords({ traceId: "trace_delete_a1" }).length, 0);
+    assert.deepEqual(
+      logger.activityChatTasks({ chatId: "chat:thread_delete_a" }).map(task => task.traceId),
+      ["trace_delete_a2"],
+    );
+    assert.equal(fs.existsSync(`${filePath}.1`), false);
+
+    assert.deepEqual(logger.deleteActivity({ scope: "chat", chatId: "chat:thread_delete_a" }), { deleted: 2 });
+    assert.deepEqual(logger.activityChatsPage({ limit: 20 }).chats.map(chat => chat.id), [
+      "system",
+      "chat:thread_delete_b",
+    ]);
+    assert.equal(fs.readFileSync(filePath, "utf8").includes("trace_delete_a2"), false);
+
+    assert.deepEqual(logger.deleteActivity({ scope: "all" }), { deleted: 3 });
+    assert.deepEqual(logger.activityChatsPage({ limit: 20 }).chats, []);
+    assert.deepEqual(logger.recent(), []);
+    assert.equal(fs.existsSync(filePath), false);
+    assert.equal(fs.existsSync(`${filePath}.1`), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher Activity excludes native-tool health probe traces while retaining their raw diagnostics", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-health-activity-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  try {
+    const logger = createLogger({ filePath });
+    logger.info("lca_codex.tool_started", {
+      traceId: "health-probe123",
+      layer: "codex",
+      tool: "exec_command",
+      callId: "call_health123",
+    });
+    logger.info("lca_codex.tool_completed", {
+      traceId: "health-probe123",
+      layer: "codex",
+      tool: "exec_command",
+      callId: "call_health123",
+      status: "completed",
+    });
+    logger.info("lca_codex.turn_started", {
+      traceId: "trace_visible123",
+      threadId: "thread_visible123",
+    });
+
+    assert.deepEqual(logger.activityChatsPage({ limit: 20 }).chats.map((chat) => chat.id), [
+      "chat:thread_visible123",
+    ]);
+    assert.deepEqual(logger.activityTaskRecords({ traceId: "health-probe123" }), []);
+    assert.equal(logger.recent().filter((record) => record.detail.traceId === "health-probe123").length, 2);
+    assert.match(fs.readFileSync(filePath, "utf8"), /health-probe123/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher Activity keeps its retained index in memory across repeated IPC pagination", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-activity-index-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const record = (at, event, detail) => JSON.stringify({ at, level: "info", event, detail });
+  try {
+    fs.writeFileSync(`${filePath}.1`, [
+      record("2026-07-28T00:00:01.000Z", "lca_codex.turn_started", { traceId: "trace_cached_a", threadId: "thread_cached_a" }),
+      record("2026-07-28T00:00:02.000Z", "lca_codex.turn_completed", { traceId: "trace_cached_a" }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(filePath, [
+      record("2026-07-28T00:00:03.000Z", "lca_codex.turn_started", { traceId: "trace_cached_b", threadId: "thread_cached_b" }),
+      record("2026-07-28T00:00:04.000Z", "lca_codex.turn_completed", { traceId: "trace_cached_b" }),
+      "",
+    ].join("\n"));
+    const logger = createLogger({ filePath });
+
+    // Removing the backing files after logger construction proves Activity pagination and
+    // drill-down use the retained in-memory index instead of reopening both JSONL files.
+    fs.rmSync(filePath, { force: true });
+    fs.rmSync(`${filePath}.1`, { force: true });
+
+    const first = logger.activityChatsPage({ limit: 1 });
+    assert.deepEqual(first.chats.map(chat => chat.id), ["chat:thread_cached_b"]);
+    const second = logger.activityChatsPage({ cursor: first.nextCursor, limit: 1 });
+    assert.deepEqual(second.chats.map(chat => chat.id), ["chat:thread_cached_a"]);
+    assert.deepEqual(
+      logger.activityChatTasks({ chatId: "chat:thread_cached_a" }).map(task => task.traceId),
+      ["trace_cached_a"],
+    );
+    assert.equal(logger.activityTaskRecords({ traceId: "trace_cached_a" }).length, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher activity links task traces to the latest local Codex chat title", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-thread-title-"));
   const filePath = path.join(root, "launcher.jsonl");

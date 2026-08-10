@@ -587,6 +587,52 @@ describe("ChatGPT outer-native harness v3", () => {
     sessions.clear();
   });
 
+  test("does not open a fresh Temporary Chat to retry a product usage limit", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-rate-limit-retry-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "lca-codex",
+      baseUrl: "browser://chatgpt-rate-limit-retry-test",
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: false, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
+      browserStarts += 1;
+      throw new LcaCodexAdapterError("ChatGPT rate limit: wait before retrying", {
+        status: 429,
+        errorType: "rate_limit_error",
+        code: "rate_limit_exceeded",
+        retryable: true,
+      });
+    };
+
+    try {
+      const request = rawWireRequest(environmentXml);
+      const firstEvents: AdapterEvent[] = [];
+      await createLcaCodexAdapter(provider).runTurn!(request, { headers: new Headers() }, event => firstEvents.push(event));
+      expect(firstEvents.at(-1)).toMatchObject({
+        type: "error",
+        status: 429,
+        code: "rate_limit_exceeded",
+        retryable: true,
+      });
+
+      const replayEvents: AdapterEvent[] = [];
+      await createLcaCodexAdapter(provider).runTurn!(request, { headers: new Headers() }, event => replayEvents.push(event));
+      expect(browserStarts).toBe(1);
+      expect(replayEvents.at(-1)).toMatchObject({
+        type: "error",
+        status: 429,
+        code: "rate_limit_exceeded",
+        retryable: true,
+      });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close().catch(() => {});
+    }
+  });
+
   test("does not start a fresh native retry after final-answer text has already streamed", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-partial-retry-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -1740,6 +1786,14 @@ describe("ChatGPT outer-native harness v3", () => {
       const inventory = await call("codex_tool_inventory", { binding_id: bindingId, query: "docs" });
       const discovered = (inventory.structuredContent as { tools: Array<{ wire_name: string }> }).tools;
       expect(discovered.map(tool => tool.wire_name)).toEqual(["mcp__openaiDeveloperDocs__search_openai_docs"]);
+
+      const invented = await call("codex_tool_call", {
+        binding_id: bindingId,
+        wire_name: "mcp__invented__escape_hatch",
+        arguments: {},
+      });
+      expect(invented.isError).toBe(true);
+      expect(JSON.stringify(invented.content)).toContain("Codex tool is not available in this turn");
 
       const execPromise = call("codex_exec", { binding_id: bindingId, cmd: "pwd", workdir: tempRoot });
       const [execRequest] = await broker.nextToolBatch(token);
