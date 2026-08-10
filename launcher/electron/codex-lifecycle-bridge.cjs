@@ -288,6 +288,21 @@ function setupBridge({ coreHome, proxySourcePath, electronExecutable = process.e
   return bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
 }
 
+function repairBridge({ coreHome, proxySourcePath, electronExecutable = process.execPath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
+  const status = bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
+  if (status.installed || !status.configured) return { ...status, repaired: false };
+  const repaired = setupBridge({
+    coreHome,
+    proxySourcePath,
+    electronExecutable,
+    homeDir,
+    platform,
+    appData,
+    configureSettings: false,
+  });
+  return { ...repaired, repaired: true };
+}
+
 function removeBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), platform = process.platform, appData = process.env.APPDATA } = {}) {
   const paths = bridgePaths({ coreHome, platform });
   const state = readState(paths.statePath);
@@ -317,4 +332,4 @@ function removeBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), platf
   return bridgeStatus({ coreHome, proxySourcePath, homeDir, platform, appData });
 }
 
-module.exports = { SETTING_KEY, bridgePaths, bridgeStatus, readCliSetting, removeBridge, removeCliSetting, setCliSetting, setupBridge, vscodeSettingsCandidates };
+module.exports = { SETTING_KEY, bridgePaths, bridgeStatus, readCliSetting, removeBridge, removeCliSetting, repairBridge, setCliSetting, setupBridge, vscodeSettingsCandidates };

@@ -7,6 +7,7 @@ const {
   bridgeStatus,
   readCliSetting,
   removeBridge,
+  repairBridge,
   removeCliSetting,
   setCliSetting,
   setupBridge,
@@ -42,6 +43,35 @@ test("legacy manual Lca proxy configuration migrates to managed state and remove
     setupBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
     removeBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
     assert.equal(readCliSetting(fs.readFileSync(settingsPath, "utf8")), undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Configured VS Code proxy self-heals when the renamed executable is missing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-vscode-proxy-repair-"));
+  const coreHome = path.join(root, ".lca-codex");
+  const homeDir = path.join(root, "user");
+  const settingsPath = path.join(homeDir, "Library", "Application Support", "Code", "User", "settings.json");
+  const extensionRoot = path.join(homeDir, ".vscode", "extensions", "openai.chatgpt-test");
+  const expectedProxy = path.join(coreHome, "bin", "lca-codex-proxy");
+  fs.mkdirSync(extensionRoot, { recursive: true });
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, `{\n  "chatgpt.cliExecutable": ${JSON.stringify(expectedProxy)}\n}\n`);
+  try {
+    const before = bridgeStatus({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
+    assert.equal(before.configured, true);
+    assert.equal(before.installed, false);
+
+    const repaired = repairBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
+    assert.equal(repaired.repaired, true);
+    assert.equal(repaired.installed, true);
+    assert.equal(repaired.configured, true);
+    assert.equal(fs.existsSync(expectedProxy), true);
+
+    const second = repairBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
+    assert.equal(second.repaired, false);
+    assert.equal(second.state, "configured");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

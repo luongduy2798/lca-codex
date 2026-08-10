@@ -906,8 +906,7 @@ function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): 
   return renderDocument(document);
 }
 
-function readJournal(): AnyCodexIntegrationJournal | undefined {
-  const path = getCodexJournalPath();
+function readJournalFile(path: string): AnyCodexIntegrationJournal | undefined {
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   if (value.version === 6
@@ -943,6 +942,66 @@ function readJournal(): AnyCodexIntegrationJournal | undefined {
     return value as unknown as LegacyCodexIntegrationJournal;
   }
   throw new Error(`Invalid Codex integration journal: ${path}`);
+}
+
+function legacyLcaTokenJournalPath(): string | undefined {
+  const currentHome = getConfigDir();
+  if (dirname(currentHome) === currentHome || currentHome.split(/[\\/]/).at(-1) !== ".lca-codex") return undefined;
+  return join(dirname(currentHome), ".lca-token", "codex", "integration-journal.json");
+}
+
+function observedManagedState(
+  text: string,
+  journal: AnyCodexIntegrationJournal,
+): "active" | "inactive" | undefined {
+  if (journal.version === 2) return undefined;
+  try {
+    verifyInstalledRoute(text, journal);
+    return "active";
+  } catch {
+    // A renamed install may already have restored the user's prior Codex config while the old
+    // journal still says active. Only accept that predecessor when the restored state matches too.
+  }
+  if (journal.version === 4 || journal.version === 5 || journal.version === 6) {
+    try {
+      verifyRestoredRoute(text, journal);
+      return "inactive";
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function withObservedActiveState(
+  journal: AnyCodexIntegrationJournal,
+  state: "active" | "inactive",
+): AnyCodexIntegrationJournal {
+  if (journal.version === 4 || journal.version === 5 || journal.version === 6) {
+    return { ...journal, active: state === "active" };
+  }
+  return journal;
+}
+
+function readJournal(): AnyCodexIntegrationJournal | undefined {
+  const currentPath = getCodexJournalPath();
+  const current = readJournalFile(currentPath);
+  const legacyPath = legacyLcaTokenJournalPath();
+  if (!legacyPath || !existsSync(legacyPath)) return current;
+
+  const configPath = getCodexConfigPath();
+  const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  if (current && observedManagedState(currentText, current)) return current;
+
+  const legacy = readJournalFile(legacyPath);
+  if (!legacy) return current;
+  try {
+    assertJournalTargetsConfig(legacy, configPath);
+  } catch {
+    return current;
+  }
+  const legacyState = observedManagedState(currentText, legacy);
+  return legacyState ? withObservedActiveState(legacy, legacyState) : current;
 }
 
 function assertJournalTargetsConfig(

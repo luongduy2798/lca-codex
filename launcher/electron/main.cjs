@@ -1092,6 +1092,17 @@ async function start() {
   }
   void (async () => {
     try {
+      const advanced = runtimeHost.repairVsCodeAdvanced();
+      if (advanced.repaired) {
+        logger.info("codex.vscode_proxy_repaired", { proxyPath: advanced.proxyPath });
+      }
+    } catch (error) {
+      logger.warn("codex.vscode_proxy_repair_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
       const route = await runtimeHost.bridgeStatus();
       if (route.installed) {
         const current = stateStore.read();

@@ -41,6 +41,70 @@ describe("reversible native Codex route integration", () => {
     expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
   });
 
+  test("migrates the renamed lca-token journal without treating its managed route as a user edit", () => {
+    const root = join(tmpdir(), `lca-codex-rename-migration-${process.pid}-${Date.now()}-${Math.random()}`);
+    roots.push(root);
+    const codexHome = join(root, "codex");
+    const legacyHome = join(root, ".lca-token");
+    const currentHome = join(root, ".lca-codex");
+    mkdirSync(codexHome, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+    process.env.LCA_CODEX_HOME = legacyHome;
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+
+    const legacy = installCodexIntegration(defaultConfig("browser-only"));
+    expect(legacy.previous.openai_base_url.present).toBe(false);
+    writeFileSync(configPath, original);
+
+    process.env.LCA_CODEX_HOME = currentHome;
+    const currentJournalPath = getCodexJournalPath();
+    mkdirSync(join(currentHome, "codex"), { recursive: true });
+    writeFileSync(currentJournalPath, `${JSON.stringify({
+      ...legacy,
+      active: true,
+      previous: {
+        ...legacy.previous,
+        openai_base_url: {
+          present: true,
+          rawLine: `openai_base_url = ${JSON.stringify(legacy.installed.openai_base_url)}`,
+          value: legacy.installed.openai_base_url,
+          index: 1,
+        },
+      },
+    }, null, 2)}\n`);
+
+    expect(() => preflightCodexIntegration(defaultConfig("browser-only"))).not.toThrow();
+    const migrated = installCodexIntegration(defaultConfig("browser-only"));
+    expect(migrated.active).toBe(true);
+    expect(migrated.previous.openai_base_url.present).toBe(false);
+    expect(readFileSync(configPath, "utf8")).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  test("does not use the lca-token predecessor to overwrite a genuine newer Codex route", () => {
+    const root = join(tmpdir(), `lca-codex-rename-user-edit-${process.pid}-${Date.now()}-${Math.random()}`);
+    roots.push(root);
+    const codexHome = join(root, "codex");
+    const legacyHome = join(root, ".lca-token");
+    const currentHome = join(root, ".lca-codex");
+    mkdirSync(codexHome, { recursive: true });
+    process.env.CODEX_HOME = codexHome;
+    process.env.LCA_CODEX_HOME = legacyHome;
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    installCodexIntegration(defaultConfig("browser-only"));
+
+    process.env.LCA_CODEX_HOME = currentHome;
+    const edited = 'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:29999/v1"\n';
+    writeFileSync(configPath, edited);
+    expect(() => preflightCodexIntegration(defaultConfig("browser-only"))).toThrow("--replace-codex-route");
+    expect(readFileSync(configPath, "utf8")).toBe(edited);
+  });
+
   test("reads the selected model's explicit context override from Codex config", () => {
     const { codexHome } = fixture();
     writeFileSync(

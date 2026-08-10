@@ -10,6 +10,7 @@ const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tre
 const {
   bridgeStatus: vscodeAdvancedStatus,
   removeBridge: removeVsCodeAdvanced,
+  repairBridge: repairVsCodeAdvanced,
   setupBridge: setupVsCodeAdvanced,
 } = require("./codex-lifecycle-bridge.cjs");
 
@@ -649,6 +650,16 @@ class RuntimeHost {
     return vscodeAdvancedStatus({
       coreHome: this.coreHome,
       proxySourcePath: this.codexLifecycleProxySource,
+      platform: this.platform,
+    });
+  }
+
+  repairVsCodeAdvanced() {
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    return repairVsCodeAdvanced({
+      coreHome: this.coreHome,
+      proxySourcePath: this.codexLifecycleProxySource,
+      electronExecutable: process.execPath,
       platform: this.platform,
     });
   }
