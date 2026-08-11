@@ -8,12 +8,11 @@ import { activityCallId, activityDuration, logLcaCodexActivity } from "./activit
 import {
   CODEX_TOOL_HEALTH_ROUTE_NAMES,
   codexToolHealthGatewayProgram,
-  codexToolHealthRegistryProgram,
   declaredCodexToolHealthRoutes,
-  parseCodexToolHealthRegistry,
   passiveCodexToolHealthReport,
   runCodexToolHealthSmoke,
   unavailableCodexToolHealthReport,
+  waitForCodexToolGatewayRoutes,
   type CodexToolHealthReport,
 } from "./codex-tool-health";
 import { withoutRetiredTurnHandles, type ChatGptContextEntry, type ChatGptContextSnapshot } from "./prompt";
@@ -752,24 +751,21 @@ export class TurnBroker {
     const gateway = this.execGateway(channel);
     if (!gateway) return { routes };
 
-    const program = codexToolHealthRegistryProgram();
-    try {
-      const result = await this.invokeChannel(
+    const inspected = await waitForCodexToolGatewayRoutes({
+      names: CODEX_TOOL_HEALTH_ROUTE_NAMES,
+      inspect: program => this.invokeChannel(
         channel,
         gateway.name,
         true,
         { input: program },
         "codex_tool_health_registry",
-      );
-      const parsed = parseCodexToolHealthRegistry(result);
-      for (const name of CODEX_TOOL_HEALTH_ROUTE_NAMES) {
-        if (parsed[name] === true) routes.add(name);
-        else if (!this.exactTool(channel, name)) routes.delete(name);
-      }
-      return { routes };
-    } catch (error) {
-      return { routes, gatewayError: errorOf(error).message.slice(0, 500) };
+      ),
+    });
+    for (const name of CODEX_TOOL_HEALTH_ROUTE_NAMES) {
+      if (inspected.availability[name]) routes.add(name);
+      else if (!this.exactTool(channel, name)) routes.delete(name);
     }
+    return { routes, ...(inspected.gatewayError ? { gatewayError: inspected.gatewayError } : {}) };
   }
 
   private async checkCodexTools(): Promise<CodexToolHealthReport> {

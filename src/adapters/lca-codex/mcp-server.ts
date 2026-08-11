@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
+import { waitForCodexToolGatewayRoutes } from "./codex-tool-health";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { callTurnBroker, type BrokerToolResult } from "./turn-broker";
 
@@ -175,6 +176,7 @@ function execGatewayProgram(
 
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
   const server = new McpServer({ name: "codex-native", version: "3.0.0" });
+  const readyGatewayTools = new Map<string, Set<string>>();
 
   const environment = async (
     bindingId: string,
@@ -210,7 +212,43 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     return asMcpResult(response);
   };
 
-  const invokeNative = (
+  const ensureGatewayToolReady = async (
+    bindingId: string,
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
+    gateway: CodexTool,
+    nestedToolName: string,
+    sourceTool: string,
+  ) => {
+    const cached = readyGatewayTools.get(bindingId);
+    if (cached?.has(nestedToolName)) return;
+
+    const inspected = await waitForCodexToolGatewayRoutes({
+      names: [nestedToolName],
+      inspect: program => invoke(
+        bindingId,
+        bound,
+        gateway,
+        { input: program },
+        sourceTool,
+        "codex_nested_tool_readiness",
+      ),
+    });
+    if (!inspected.availability[nestedToolName]) {
+      throw new Error(inspected.gatewayError
+        ? `Could not inspect ${nestedToolName} through the native exec gateway: ${inspected.gatewayError}`
+        : `The native exec gateway did not expose ${nestedToolName} within the readiness grace period`);
+    }
+
+    const ready = cached ?? new Set<string>();
+    ready.add(nestedToolName);
+    readyGatewayTools.set(bindingId, ready);
+    if (readyGatewayTools.size > 128) {
+      const oldest = readyGatewayTools.keys().next().value;
+      if (oldest) readyGatewayTools.delete(oldest);
+    }
+  };
+
+  const invokeNative = async (
     bindingId: string,
     bound: ChatGptTurnEnvironment & { expiresAt?: number },
     tool: CodexTool,
@@ -218,19 +256,20 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     sourceTool: string,
   ) => {
     const gateway = execGateway(bound);
-    return gateway && gateway !== tool
-      ? invoke(
-          bindingId,
-          bound,
-          gateway,
-          { input: execGatewayProgram(wireName(tool), tool.freeform === true, payload) },
-          sourceTool,
-          wireName(tool),
-        )
-      : invoke(bindingId, bound, tool, payload, sourceTool);
+    if (!gateway || gateway === tool) return invoke(bindingId, bound, tool, payload, sourceTool);
+    const nestedToolName = wireName(tool);
+    await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);
+    return invoke(
+      bindingId,
+      bound,
+      gateway,
+      { input: execGatewayProgram(nestedToolName, tool.freeform === true, payload) },
+      sourceTool,
+      nestedToolName,
+    );
   };
 
-  const invokeNestedNative = (
+  const invokeNestedNative = async (
     bindingId: string,
     bound: ChatGptTurnEnvironment & { expiresAt?: number },
     nestedToolName: string,
@@ -242,6 +281,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     if (!gateway) {
       throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
     }
+    await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);
     return invoke(
       bindingId,
       bound,

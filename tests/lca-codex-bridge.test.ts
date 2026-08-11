@@ -8,6 +8,7 @@ import { buildResponseJSON } from "../src/bridge";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/lca-codex/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
 import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
+import { waitForCodexToolGatewayRoutes } from "../src/adapters/lca-codex/codex-tool-health";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
 import {
   createLcaCodexAdapter,
@@ -24,10 +25,6 @@ import { estimateLcaCodexUsage } from "../src/adapters/lca-codex/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
-
-function observeHtml(buffer: ChatGptMarkdownBuffer, html: string): string {
-  return buffer.observeRoots([{ key: "root", html }]);
-}
 
 const tempRoot = join(tmpdir(), `lca-codex-bridge-${process.pid}-${Date.now()}`);
 mkdirSync(tempRoot, { recursive: true });
@@ -138,7 +135,31 @@ function toolResult(value: Record<string, unknown>): BrokerToolResult {
   };
 }
 
+function gatewayRegistryResult(availability: Record<string, boolean>): BrokerToolResult {
+  return {
+    content: [{
+      type: "text",
+      text: `LCA_CODEX_TOOL_HEALTH_ROUTES:${JSON.stringify(availability)}`,
+    }],
+  };
+}
+
 describe("LCA Codex ChatGPT Web bridge v3", () => {
+  test("nested tool readiness retries a transiently incomplete exec registry", async () => {
+    const inspections = [
+      gatewayRegistryResult({ apply_patch: false }),
+      gatewayRegistryResult({ apply_patch: true }),
+    ];
+    const inspected = await waitForCodexToolGatewayRoutes({
+      names: ["apply_patch"],
+      retryDelaysMs: [0, 0],
+      inspect: async () => inspections.shift()!,
+    });
+
+    expect(inspected).toEqual({ availability: { apply_patch: true } });
+    expect(inspections).toHaveLength(0);
+  });
+
   test("rejects an opaque MultiAgent V2 child payload before starting the browser", async () => {
     const request = parseRequest({
       model: "lca-codex",
@@ -1039,271 +1060,61 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(tracker.update({ ...state, running: true }, 8_100)).toBe(false);
   });
 
-  test("preserves GFM formatting in complete visible snapshots", () => {
-    const html = [
-      '<h2 data-start="0" data-end="15">Format Probe</h2>',
-      '<p data-start="16" data-end="24"><strong>bold</strong></p>',
-      '<ul><li><p>alpha</p></li><li><p>beta</p></li></ul>',
-    ].join("");
+  test("preserves GFM formatting while streaming only completed stable DOM blocks", () => {
+    const heading = '<h2 data-start="0" data-end="15">Format Probe</h2>';
+    const bold = '<p data-start="16" data-end="24"><strong>bold</strong></p>';
+    const alpha = '<ul><li><p>alpha</p></li></ul>';
+    const beta = '<ul><li><p>beta</p></li></ul>';
+    const list = '<ul><li><p>alpha</p></li><li><p>beta</p></li></ul>';
+    const html = `${heading}${bold}${list}`;
     expect(chatGptHtmlToMarkdown(html)).toBe("## Format Probe\n\n**bold**\n\n- alpha\n- beta");
-  });
 
-  test("completion snapshot replaces speculative flat DOM without duplicating an open code fence", () => {
-    const firstHtml = "<p>Plan</p><pre><code>lib/\n├── main.dart</code></pre>";
-    const growingHtml = "<p>Plan</p><pre><code>lib/\n├── main.dart\n└── core/</code></pre>";
-    const completedHtml = [
-      "<p>Plan</p>",
-      "<h3>1. Protocol</h3>",
-      "<p>Details</p>",
-      "<pre><code>lib/\n├── main.dart\n└── core/</code></pre>",
-    ].join("");
-    const buffer = ChatGptMarkdownBuffer.completionOnly();
-
-    expect(observeHtml(buffer, firstHtml)).toBe("");
-    const speculativeDelta = observeHtml(buffer, growingHtml);
-    expect(speculativeDelta).toBe("");
-    expect(observeHtml(buffer, completedHtml)).toBe("");
-
-    const completedMarkdown = chatGptHtmlToMarkdown(completedHtml);
-    const final = buffer.finish();
-    expect(final).toEqual({ markdown: completedMarkdown, delta: completedMarkdown });
-    expect(final.markdown.match(/```/g)).toHaveLength(2);
-    expect(final.markdown.match(/Plan/g)).toHaveLength(1);
-  });
-
-  test("stable block streaming rejects flat DOM and progressively emits hydrated Markdown", () => {
-    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
-    const flatRoot = (html: string) => [{
-      key: "root:0",
-      html,
-      streamable: false,
-    }];
-    const completedRoots = [
-      { key: "root:0:0", html: "<p>Plan</p>", streamable: true },
-      { key: "root:0:1", html: "<h3>1. Protocol</h3>", streamable: true },
-      { key: "root:0:2", html: "<p>Details</p>", streamable: true },
-      {
-        key: "root:0:3",
-        html: "<pre><code>lib/\n├── main.dart\n└── core/</code></pre>",
-        streamable: true,
-      },
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    const first = [
+      { key: "heading", html: heading, text: "Format Probe", streamable: true },
+      { key: "bold", html: bold, text: "bold", streamable: false },
     ];
+    expect(buffer.observe(first, 0)).toBe("");
+    expect(buffer.observe(first, 100)).toBe("## Format Probe");
 
-    expect(buffer.observeRoots(flatRoot("<p>Plan</p><pre><code>lib/\n├── main.dart</code></pre>"), 1_000)).toBe("");
-    expect(buffer.observeRoots(flatRoot("<p>Plan</p><pre><code>lib/\n├── main.dart\n└── core/</code></pre>"), 1_500)).toBe("");
-    expect(buffer.observeRoots(completedRoots, 2_000)).toBe("");
-    expect(buffer.observeRoots(completedRoots, 2_500)).toBe(
-      completedRoots.slice(0, 2).map(root => chatGptHtmlToMarkdown(root.html)).join("\n\n"),
-    );
-
-    const final = buffer.finish();
-    const completedMarkdown = completedRoots
-      .map(root => chatGptHtmlToMarkdown(root.html))
-      .join("\n\n");
-    expect(final.markdown).toBe(completedMarkdown);
-    expect(final.markdown.match(/```/g)).toHaveLength(2);
-    expect(final.markdown.match(/Plan/g)).toHaveLength(1);
-  });
-
-  test("stable block streaming keeps two active tail blocks while releasing earlier paragraphs", () => {
-    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
-    const roots = ["One", "Two", "Three"].map((text, index) => ({
-      key: `root:0:${index}`,
-      html: `<p>${text}</p>`,
-      streamable: true,
-    }));
-
-    expect(buffer.observeRoots(roots, 1_000)).toBe("");
-    expect(buffer.observeRoots(roots, 1_500)).toBe("One");
     const expanded = [
-      ...roots,
-      { key: "root:0:3", html: "<p>Four is still active</p>", streamable: true },
+      { key: "heading", html: heading, text: "Format Probe", streamable: true },
+      { key: "bold", html: bold, text: "bold", streamable: true },
+      { key: "alpha", html: alpha, text: "alpha", group: "list", streamable: true },
+      { key: "beta", html: beta, text: "beta", group: "list", streamable: false },
     ];
-    expect(buffer.observeRoots(expanded, 1_750)).toBe("\n\nTwo");
-    expect(buffer.flush()).toEqual({
-      markdown: "One\n\nTwo\n\nThree\n\nFour is still active",
-      delta: "\n\nThree\n\nFour is still active",
-    });
-  });
-
-  test("stable block streaming emits a fenced code block only as a complete block", () => {
-    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
-    const roots = [
-      { key: "root:0:0", html: "<h2>Example</h2>", streamable: true },
-      { key: "root:0:1", html: "<p>Use this tree:</p>", streamable: true },
-      { key: "root:0:2", html: "<pre><code>lib/\n└── main.dart</code></pre>", streamable: true },
-      { key: "root:0:3", html: "<p>Explanation</p>", streamable: true },
-      { key: "root:0:4", html: "<p>Growing tail</p>", streamable: true },
-    ];
-
-    expect(buffer.observeRoots(roots, 1_000)).toBe("");
-    const delta = buffer.observeRoots(roots, 1_500);
-    expect(delta).toContain("## Example");
-    expect(delta).toContain("Use this tree:");
-    expect(delta).toContain("lib/\n└── main.dart");
-    expect(delta.match(/```/g)).toHaveLength(2);
-    expect(delta).not.toContain("Explanation");
-  });
-
-  test("mirrors structured Markdown after one poll without waiting for blocks to complete", () => {
-    const prefixLength = (left: string, right: string) => {
-      let index = 0;
-      while (index < left.length && index < right.length && left[index] === right[index]) index++;
-      return index;
-    };
-    const firstHtml = [
-      "<div>",
-      "<h2>Plan</h2>",
-      "<p><strong>Runtime</strong>: inspect</p>",
-      "<ul><li>alpha</li><li>beta</li></ul>",
-      "<p>Use <code>run()</code> now</p>",
-      "<pre><code>const x = 1;</code></pre>",
-      "</div>",
-    ].join("");
-    const secondHtml = firstHtml.replace("const x = 1;", "const x = 1;\nconst y = 2;");
-    const thirdHtml = firstHtml.replace("const x = 1;", "const x = 1;\nconst y = 2;\nconst z = 3;");
-    const firstMarkdown = chatGptHtmlToMarkdown(firstHtml);
-    const secondMarkdown = chatGptHtmlToMarkdown(secondHtml);
-    const thirdMarkdown = chatGptHtmlToMarkdown(thirdHtml);
-    const firstStable = firstMarkdown.slice(0, prefixLength(firstMarkdown, secondMarkdown));
-    const secondStable = secondMarkdown.slice(0, prefixLength(secondMarkdown, thirdMarkdown));
-
-    const buffer = new ChatGptMarkdownBuffer();
-    expect(observeHtml(buffer, firstHtml)).toBe("");
-    expect(observeHtml(buffer, secondHtml)).toBe(firstStable);
-    expect(firstStable).toContain("## Plan");
-    expect(firstStable).toContain("**Runtime**");
-    expect(firstStable).toContain("- alpha\n- beta");
-    expect(firstStable).toContain("`run()`");
-    expect(firstStable).toContain("const x = 1;");
-    expect(observeHtml(buffer, thirdHtml)).toBe(secondStable.slice(firstStable.length));
-    const final = buffer.finish();
-    expect(final.markdown).toBe(thirdMarkdown);
-    expect(`${firstStable}${secondStable.slice(firstStable.length)}${final.delta}`).toBe(thirdMarkdown);
-  });
-
-  test("unchanged Markdown roots reuse cached serialization and only changed roots rerun Turndown", () => {
-    let serializations = 0;
-    const buffer = new ChatGptMarkdownBuffer(html => {
-      serializations += 1;
-      return chatGptHtmlToMarkdown(html);
-    });
-    const roots = [
-      { key: "root:0", html: "<h2>Plan</h2><p>Stable section</p>" },
-      { key: "root:1", html: "<p>Growing tail</p>" },
-    ];
-    expect(buffer.observeRoots(roots)).toBe("");
-    expect(serializations).toBe(2);
-    buffer.observeRoots(roots);
-    expect(serializations).toBe(2);
-    buffer.observeRoots([
-      roots[0]!,
-      { key: "root:1", html: "<p>Growing tail with more text</p>" },
-    ]);
-    expect(serializations).toBe(3);
-    buffer.observeRoots([{ key: "root:1", html: "<p>Growing tail with more text</p>" }]);
-    expect(serializations).toBe(3);
-  });
-
-  test("large answers keep Markdown serialization proportional to changed roots", () => {
-    let serializations = 0;
-    const buffer = new ChatGptMarkdownBuffer(html => {
-      serializations += 1;
-      return chatGptHtmlToMarkdown(html);
-    });
-    const roots = Array.from({ length: 40 }, (_unused, index) => ({
-      key: `root:${index}`,
-      html: `<p>Section ${index} ${"x".repeat(2_000)}</p>`,
-    }));
-    buffer.observeRoots(roots);
-    expect(serializations).toBe(40);
-    for (let revision = 1; revision <= 20; revision += 1) {
-      buffer.observeRoots([
-        ...roots.slice(0, -1),
-        { key: "root:39", html: `<p>Section 39 ${"x".repeat(2_000)} revision ${revision}</p>` },
-      ]);
-    }
-    expect(serializations).toBe(60);
-  });
-
-  test("virtualized DOM prefixes reconnect through emitted suffix overlap", () => {
-    const head = "Head section remains cached before virtualization. ";
-    const overlap = "Shared overlap that is comfortably longer than thirty two characters. ";
-    const buffer = new ChatGptMarkdownBuffer();
-    expect(observeHtml(buffer, `<p>${head}${overlap}</p>`)).toBe("");
-    expect(observeHtml(buffer, `<p>${head}${overlap}Tail one.</p>`)).toBe(`${head}${overlap}`.trimEnd());
-    expect(observeHtml(buffer, `<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail one.");
-    expect(observeHtml(buffer, `<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail two.");
+    expect(buffer.observe(expanded, 150)).toBe("");
+    expect(buffer.observe(expanded, 250)).toBe("\n\n**bold**\n\n- alpha");
     expect(buffer.finish()).toEqual({
-      markdown: `${head}${overlap}Tail one. Tail two.`,
-      delta: "",
+      delta: "\n- beta",
+      markdown: "## Format Probe\n\n**bold**\n\n- alpha\n- beta",
     });
   });
 
-  test("nested renderer wrappers do not turn a multi-section answer into one delayed block", () => {
-    const firstHtml = "<div><div><h3>Feature plan</h3><p>First section</p></div></div>";
-    const secondHtml = "<div><div><h3>Feature plan</h3><p>First section grows while visible</p></div></div>";
-    const buffer = new ChatGptMarkdownBuffer();
-    expect(observeHtml(buffer, firstHtml)).toBe("");
-    const delta = observeHtml(buffer, secondHtml);
-    expect(delta).toContain("### Feature plan");
-    expect(delta).toContain("First section");
-  });
+  test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
+    const plain = "<p>Source</p>";
+    const linked = '<p><a href="https://example.com">Source</a></p>';
+    const hydrated = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    expect(hydrated.observe([
+      { key: "source", html: plain, text: "Source", streamable: true },
+    ], 0)).toBe("");
+    expect(hydrated.observe([
+      { key: "source", html: linked, text: "Source", streamable: true },
+    ], 50)).toBe("");
+    expect(hydrated.observe([
+      { key: "source", html: linked, text: "Source", streamable: true },
+    ], 150)).toBe("[Source](https://example.com)");
+    expect(hydrated.observe([
+      { key: "source", html: `${linked}<button>Copy</button>`, text: "Source", streamable: true },
+    ], 200)).toBe("");
 
-  test("temporary visible rewrites pause append-only mirroring and resume when the emitted prefix returns", () => {
-    const buffer = new ChatGptMarkdownBuffer();
-    expect(observeHtml(buffer, "<p>Alpha beta</p>")).toBe("");
-    expect(observeHtml(buffer, "<p>Alpha beta gamma</p>")).toBe("Alpha beta");
-    expect(observeHtml(buffer, "<p>Alpha zeta gamma</p>")).toBe("");
-    expect(observeHtml(buffer, "<p>Alpha beta gamma delta</p>")).toBe("");
-    expect(observeHtml(buffer, "<p>Alpha beta gamma delta</p>")).toBe(" gamma delta");
-    expect(buffer.finish()).toEqual({ markdown: "Alpha beta gamma delta", delta: "" });
-  });
-
-  test("a stalled formatted tail does not commit closing Markdown before generation resumes", () => {
-    const buffer = new ChatGptMarkdownBuffer();
-    const stalled = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ t</strong></p>";
-    const completed = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ thuộc vào việc đang có Codex task chạy</strong>.</p>";
-
-    expect(observeHtml(buffer, stalled)).toBe("");
-    expect(observeHtml(buffer, stalled)).toBe("");
-    expect(observeHtml(buffer, completed)).toBe("Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ t");
-
-    const final = buffer.finish();
-    expect(final).toEqual({
-      markdown: "Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ thuộc vào việc đang có Codex task chạy**.",
-      delta: "huộc vào việc đang có Codex task chạy**.",
-    });
-    expect(final.markdown.indexOf("Đã tiếp và fix đúng lỗi đó", 1)).toBe(-1);
-  });
-
-  test("a near-tail browser replay is surfaced intact as an explicit correction", () => {
-    const stablePrefix = "Stable answer prefix that has already streamed to Codex. ".repeat(4);
-    const first = `${stablePrefix}request-receivX`;
-    const growing = `${first} old tail`;
-    const replayed = `${stablePrefix}request-received new tail and completed answer`;
-    const buffer = new ChatGptMarkdownBuffer();
-
-    expect(observeHtml(buffer, `<p>${first}</p>`)).toBe("");
-    expect(observeHtml(buffer, `<p>${growing}</p>`)).toBe(first);
-    expect(observeHtml(buffer, `<p>${replayed}</p>`)).toBe("");
-    const final = buffer.finish();
-
-    expect(final).toEqual({
-      delta: `\n\n${replayed}`,
-      markdown: `${first}\n\n${replayed}`,
-    });
-  });
-
-  test("a permanent late rewrite is appended as a final correction instead of crashing the turn", () => {
-    const buffer = new ChatGptMarkdownBuffer();
-    expect(observeHtml(buffer, "<p>Original answer</p>")).toBe("");
-    expect(observeHtml(buffer, "<p>Original answer grows</p>")).toBe("Original answer");
-    expect(observeHtml(buffer, "<p>Rewritten final answer</p>")).toBe("");
-    expect(buffer.finish()).toEqual({
-      delta: "\n\nRewritten final answer",
-      markdown: "Original answer\n\nRewritten final answer",
-    });
+    const rewritten = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    const source = [{ key: "source", html: plain, text: "Source", streamable: true }];
+    expect(rewritten.observe(source, 0)).toBe("");
+    expect(rewritten.observe(source, 100)).toBe("Source");
+    expect(() => rewritten.observe([
+      { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
+    ], 200)).toThrow("completed text block");
   });
 
   test("drops decorative HTML images without removing textual links", () => {
@@ -1885,6 +1696,14 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect((bound.structuredContent as { outer_tool_gateway: string }).outer_tool_gateway).toBe("exec");
       expect((bound.structuredContent as { command_tool: string }).command_tool).toBe("exec_command");
 
+      const completeReadiness = async (availability: Record<string, boolean>) => {
+        const [readinessRequest] = await broker.nextToolBatch(token);
+        expect(readinessRequest).toMatchObject({ wireName: "exec", freeform: true });
+        expect(readinessRequest?.input).toContain("LCA_CODEX_TOOL_HEALTH_ROUTES:");
+        broker.completeTool(token, readinessRequest!.callId, gatewayRegistryResult(availability));
+        return readinessRequest;
+      };
+
       const inventory = await call("codex_tool_inventory", { binding_id: bindingId, query: "docs" });
       const discovered = (inventory.structuredContent as { tools: Array<{ wire_name: string }> }).tools;
       expect(discovered.map(tool => tool.wire_name)).toEqual(["mcp__openaiDeveloperDocs__search_openai_docs"]);
@@ -1898,6 +1717,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(JSON.stringify(invented.content)).toContain("Codex tool is not available in this turn");
 
       const execPromise = call("codex_exec", { binding_id: bindingId, cmd: "pwd", workdir: tempRoot });
+      await completeReadiness({ exec_command: true });
       const [execRequest] = await broker.nextToolBatch(token);
       expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(execRequest?.input).toContain(`tools["exec_command"](${JSON.stringify({ cmd: "pwd", workdir: tempRoot })})`);
@@ -1906,6 +1726,8 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
 
       const patchText = "*** Begin Patch\n*** Add File: test.txt\n+ok\n*** End Patch";
       const patchPromise = call("codex_apply_patch", { binding_id: bindingId, patch: patchText });
+      await completeReadiness({ apply_patch: false });
+      await completeReadiness({ apply_patch: true });
       const [patchRequest] = await broker.nextToolBatch(token);
       expect(patchRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(patchRequest?.input).toContain(`tools["apply_patch"](${JSON.stringify(patchText)})`);
@@ -1917,6 +1739,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         wire_name: "mcp__openaiDeveloperDocs__search_openai_docs",
         arguments: { query: "Responses API" },
       });
+      await completeReadiness({ mcp__openaiDeveloperDocs__search_openai_docs: true });
       const [docsRequest] = await broker.nextToolBatch(token);
       expect(docsRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(docsRequest?.input).toContain('tools["mcp__openaiDeveloperDocs__search_openai_docs"]({"query":"Responses API"})');
@@ -1972,12 +1795,17 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(JSON.stringify(confused.content)).toContain("never pass turn_token here");
 
       const execPromise = call("codex_exec", { binding_id: binding.binding_id, cmd: "pwd", workdir: tempRoot });
-      const [execRequest] = await Promise.race([
+      const [readinessRequest] = await Promise.race([
         broker.nextToolBatch(token),
         execPromise.then(response => {
           throw new Error(`codex_exec settled before reaching the broker: ${JSON.stringify(response.content)}`);
         }),
       ]);
+      expect(readinessRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(readinessRequest?.input).toContain("LCA_CODEX_TOOL_HEALTH_ROUTES:");
+      broker.completeTool(token, readinessRequest!.callId, gatewayRegistryResult({ exec_command: true }));
+
+      const [execRequest] = await broker.nextToolBatch(token);
       expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(execRequest?.input).toContain(`tools["exec_command"](${JSON.stringify({ cmd: "pwd", workdir: tempRoot })})`);
       broker.completeTool(token, execRequest!.callId, toolResult({ output: tempRoot, exit_code: 0 }));

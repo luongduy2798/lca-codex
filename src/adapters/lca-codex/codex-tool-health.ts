@@ -30,6 +30,8 @@ export const CODEX_TOOL_HEALTH_ROUTE_NAMES = [
   "view_image",
 ] as const;
 
+export const CODEX_TOOL_GATEWAY_READINESS_RETRY_DELAYS_MS = [0, 75, 150, 300] as const;
+
 const CODEX_TOOL_HEALTH_REGISTRY_MARKER = "LCA_CODEX_TOOL_HEALTH_ROUTES:";
 
 export function declaredCodexToolHealthRoutes(environment: ChatGptTurnEnvironment): {
@@ -66,9 +68,11 @@ export function codexToolHealthGatewayProgram(
   ].join("\n");
 }
 
-export function codexToolHealthRegistryProgram(): string {
+export function codexToolHealthRegistryProgram(
+  names: readonly string[] = CODEX_TOOL_HEALTH_ROUTE_NAMES,
+): string {
   return [
-    `const names = ${JSON.stringify(CODEX_TOOL_HEALTH_ROUTE_NAMES)};`,
+    `const names = ${JSON.stringify(names)};`,
     "const availability = Object.fromEntries(names.map(name => [name, typeof tools[name.replace(/[^A-Za-z0-9_$]/g, \"_\")] === \"function\"]));",
     `text(${JSON.stringify(CODEX_TOOL_HEALTH_REGISTRY_MARKER)} + JSON.stringify(availability));`,
   ].join("\n");
@@ -104,6 +108,40 @@ export function parseCodexToolHealthRegistry(result: CodexHealthToolResult): Rec
   const objectEnd = payload.indexOf("}");
   if (objectEnd < 0) throw new Error("Codex exec gateway returned an incomplete native tool registry");
   return JSON.parse(payload.slice(0, objectEnd + 1)) as Record<string, unknown>;
+}
+
+export async function waitForCodexToolGatewayRoutes({
+  names,
+  inspect,
+  retryDelaysMs = CODEX_TOOL_GATEWAY_READINESS_RETRY_DELAYS_MS,
+}: {
+  names: readonly string[];
+  inspect: (program: string) => Promise<CodexHealthToolResult>;
+  retryDelaysMs?: readonly number[];
+}): Promise<{ availability: Record<string, boolean>; gatewayError?: string }> {
+  const availability = Object.fromEntries(names.map(name => [name, false])) as Record<string, boolean>;
+  let successfulInspection = false;
+  let gatewayError: string | undefined;
+
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    try {
+      const parsed = parseCodexToolHealthRegistry(await inspect(codexToolHealthRegistryProgram(names)));
+      successfulInspection = true;
+      gatewayError = undefined;
+      for (const name of names) {
+        if (parsed[name] === true) availability[name] = true;
+      }
+      if (names.every(name => availability[name])) break;
+    } catch (error) {
+      gatewayError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return {
+    availability,
+    ...(!successfulInspection && gatewayError ? { gatewayError: gatewayError.slice(0, 500) } : {}),
+  };
 }
 
 function sessionIdFromResult(result: CodexHealthToolResult): number | undefined {

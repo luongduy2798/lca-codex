@@ -5,7 +5,7 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
-import { ChatGptMarkdownBuffer, type ChatGptMarkdownRoot } from "./markdown";
+import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "./markdown";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities, type LcaCodexModelMode } from "./model";
 import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaCodexPrompt, type LcaCodexPromptImage } from "./prompt";
 import { estimateCompiledLcaCodexInputTokens } from "./usage";
@@ -53,7 +53,6 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 500;
 export const CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_MARKDOWN_BLOCK_STABILITY_MS = 750;
-export const CHATGPT_MARKDOWN_TAIL_GUARD_BLOCKS = 2;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const CHATGPT_RESPONSE_POLL_MS = 250;
 export const CHATGPT_RESPONSE_IDLE_POLL_MS = 500;
@@ -364,8 +363,9 @@ export interface ChatGptVisibleTraceEvent {
 interface ChatGptResponseDomSnapshot {
   responsePresent: boolean;
   visibleText: string;
-  markdownRoots: ChatGptMarkdownRoot[];
-  renderSignature: string;
+  fullHtml: string;
+  markdownSegments: ChatGptMarkdownSegment[];
+  hasUnstructuredMarkdown: boolean;
   completionActionVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -373,11 +373,19 @@ interface ChatGptResponseDomSnapshot {
 const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   responsePresent: false,
   visibleText: "",
-  markdownRoots: [],
-  renderSignature: "",
+  fullHtml: "",
+  markdownSegments: [],
+  hasUnstructuredMarkdown: false,
   completionActionVisible: false,
   traceBlocks: [],
 });
+
+export function chatGptResponseHasStructuredMarkdown(state: {
+  markdownSegments: ChatGptMarkdownSegment[];
+  hasUnstructuredMarkdown: boolean;
+}): boolean {
+  return state.markdownSegments.length > 0 && !state.hasUnstructuredMarkdown;
+}
 
 interface ChatGptTraceStreamingOptions {
   tailGuardChars?: number;
@@ -1365,13 +1373,11 @@ export class ChatGptBrowserWorker {
     const snapshot = await responseTurn.evaluate((element, completionActionSelector) => {
       const root = element as HTMLElement;
       const visible = (candidate: HTMLElement): boolean => {
+        if (!candidate.isConnected) return false;
         const style = getComputedStyle(candidate);
-        const rect = candidate.getBoundingClientRect();
         return style.display !== "none"
           && style.visibility !== "hidden"
-          && style.opacity !== "0"
-          && rect.width > 0
-          && rect.height > 0;
+          && style.opacity !== "0";
       };
 
       // ChatGPT uses the same Markdown renderer for intermediate commentary and for the final
@@ -1474,71 +1480,63 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
-      const markdownRoots: ChatGptMarkdownRoot[] = [];
-      const markdownBlockTags = new Set([
-        "ADDRESS", "BLOCKQUOTE", "DL", "FIGURE", "H1", "H2", "H3", "H4", "H5", "H6",
-        "HR", "OL", "P", "PRE", "TABLE", "UL",
-      ]);
-      const ignoredMarkdownTags = new Set(["BUTTON", "IMG", "PICTURE", "SCRIPT", "SOURCE", "STYLE", "SVG"]);
-      const hasDirectText = (candidate: HTMLElement): boolean => [...candidate.childNodes].some(node => (
-        node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
-      ));
-      const collectMarkdownBlocks = (candidate: HTMLElement, key: string): void => {
-        if (ignoredMarkdownTags.has(candidate.tagName)) return;
-        if (markdownBlockTags.has(candidate.tagName)) {
-          markdownRoots.push({ key, html: candidate.outerHTML, streamable: true });
-          return;
+      let hasUnstructuredMarkdown = false;
+      const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) => {
+        const rootIsComplete = rootIndex < renderedRoots.length - 1;
+        const hasDirectText = [...markdownRoot.childNodes].some(node => (
+          node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
+        ));
+        const children = [...markdownRoot.children] as HTMLElement[];
+        if (hasDirectText || children.length === 0) {
+          if (markdownRoot.innerHTML.trim()) hasUnstructuredMarkdown = true;
+          return markdownRoot.innerHTML.trim() ? [{
+            key: `${rootIndex}:root`,
+            html: markdownRoot.innerHTML,
+            text: markdownRoot.innerText.trim(),
+            streamable: rootIsComplete,
+          }] : [];
         }
 
-        // Code blocks include language/copy chrome in generic wrappers. Keep that wrapper atomic;
-        // splitting it can leak the language label or emit an unfinished fence separately.
-        const nestedPre = candidate.querySelector("pre");
-        const hasOtherSemanticContent = [...candidate.querySelectorAll<HTMLElement>(
-          "address, blockquote, dl, figure, h1, h2, h3, h4, h5, h6, hr, ol, p, table, ul",
-        )].some(block => !nestedPre?.contains(block));
-        if (nestedPre && !hasOtherSemanticContent) {
-          markdownRoots.push({ key, html: candidate.outerHTML, streamable: true });
-          return;
-        }
+        return children.flatMap((child, childIndex) => {
+          const tag = child.tagName.toLowerCase();
+          const childIsComplete = rootIsComplete || childIndex < children.length - 1;
+          const listItems = tag === "ol" || tag === "ul"
+            ? [...child.children].filter(candidate => candidate.tagName === "LI") as HTMLElement[]
+            : [];
+          if (listItems.length === 0) {
+            return [{
+              key: `${rootIndex}:${childIndex}:${tag}`,
+              html: child.outerHTML,
+              text: child.innerText.trim(),
+              streamable: childIsComplete,
+            }];
+          }
 
-        const children = [...candidate.children]
-          .filter((child): child is HTMLElement => child instanceof HTMLElement)
-          .filter(child => !ignoredMarkdownTags.has(child.tagName));
-        if (!hasDirectText(candidate) && children.length > 0) {
-          children.forEach((child, index) => collectMarkdownBlocks(child, `${key}:${index}`));
-          return;
-        }
-        // Raw streaming text is deliberately final-only: ChatGPT may hydrate it later into
-        // headings, lists and fenced code, which cannot replace an already-emitted Codex delta.
-        markdownRoots.push({ key, html: candidate.outerHTML, streamable: false });
-      };
-      renderedRoots.forEach((candidate, rootIndex) => {
-        const children = [...candidate.children]
-          .filter((child): child is HTMLElement => child instanceof HTMLElement)
-          .filter(child => !ignoredMarkdownTags.has(child.tagName));
-        if (!hasDirectText(candidate) && children.length > 0) {
-          children.forEach((child, index) => collectMarkdownBlocks(child, `root:${rootIndex}:${index}`));
-        } else if (candidate.innerHTML.trim()) {
-          markdownRoots.push({
-            key: `root:${rootIndex}`,
-            html: candidate.innerHTML,
-            streamable: false,
+          const group = `${rootIndex}:${childIndex}:${tag}`;
+          const orderedStart = tag === "ol" ? Number(child.getAttribute("start") ?? "1") : undefined;
+          return listItems.map((item, itemIndex) => {
+            const shell = child.cloneNode(false) as HTMLElement;
+            shell.removeAttribute("data-is-last-node");
+            if (orderedStart !== undefined && Number.isFinite(orderedStart)) {
+              shell.setAttribute("start", String(orderedStart + itemIndex));
+            }
+            shell.append(item.cloneNode(true));
+            return {
+              key: `${rootIndex}:${childIndex}:${tag}:${itemIndex}`,
+              html: shell.outerHTML,
+              text: item.innerText.trim(),
+              group,
+              streamable: childIsComplete || itemIndex < listItems.length - 1,
+            };
           });
-        }
+        });
       });
-      const fingerprint = (value: string): string => {
-        let hash = 2166136261;
-        for (let index = 0; index < value.length; index += 1) {
-          hash ^= value.charCodeAt(index);
-          hash = Math.imul(hash, 16777619);
-        }
-        return `${value.length}:${hash >>> 0}`;
-      };
       return {
         responsePresent: true,
         visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
-        markdownRoots,
-        renderSignature: markdownRoots.map(candidate => fingerprint(candidate.html)).join("|"),
+        fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
+        markdownSegments,
+        hasUnstructuredMarkdown,
         completionActionVisible: completionAction !== undefined,
         traceBlocks,
       };
@@ -1780,9 +1778,9 @@ export class ChatGptBrowserWorker {
       let firstReasoningLogged = false;
       let firstTextLogged = false;
       const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = ChatGptMarkdownBuffer.stableBlocks(
+      const markdownBuffer = new ChatGptMarkdownBuffer(
+        markdown => markdown,
         CHATGPT_MARKDOWN_BLOCK_STABILITY_MS,
-        CHATGPT_MARKDOWN_TAIL_GUARD_BLOCKS,
       );
       const pollScheduler = new ChatGptAdaptivePollScheduler();
       const completionTracker = new ChatGptCompletionTracker();
@@ -1830,7 +1828,7 @@ export class ChatGptBrowserWorker {
         const activitySignature = [
           running ? "1" : "0",
           snapshot.completionActionVisible ? "1" : "0",
-          snapshot.renderSignature,
+          snapshot.fullHtml,
           ...snapshot.traceBlocks.map(block => `${block.kind}:${block.key ?? ""}:${block.text}`),
         ].join("\0");
         const activityChanged = activitySignature !== previousActivitySignature;
@@ -1848,10 +1846,9 @@ export class ChatGptBrowserWorker {
             });
             await diagnostics.capture(page, "response-visible");
           }
-          // Emit only complete blocks that have stayed unchanged and are safely behind the active
-          // tail. Raw text, the two newest blocks and growing lists/code fences remain local until
-          // ChatGPT's renderer settles, preserving Codex's append-only Markdown contract.
-          const markdownDelta = markdownBuffer.observeRoots(snapshot.markdownRoots, observedAt);
+          // Match upstream: emit only semantic blocks that ChatGPT has structurally completed
+          // and kept byte-stable for the configured window. Once emitted, visible text is immutable.
+          const markdownDelta = markdownBuffer.observe(snapshot.markdownSegments, observedAt);
           if (markdownDelta) turn.onTextDelta(markdownDelta);
           if (!firstTextLogged && snapshot.visibleText) {
             firstTextLogged = true;
@@ -1889,11 +1886,10 @@ export class ChatGptBrowserWorker {
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
-            currentHtml: snapshot.renderSignature,
+            currentHtml: snapshot.fullHtml,
             completionActionVisible: snapshot.completionActionVisible,
           };
-          const hasStructuredMarkdown = snapshot.markdownRoots.length > 0
-            && snapshot.markdownRoots.every(root => root.streamable === true);
+          const hasStructuredMarkdown = chatGptResponseHasStructuredMarkdown(snapshot);
           // A scoped completion action plus three unchanged structured-DOM observations is strong
           // finality evidence. Keep the conservative window only while ChatGPT still exposes raw
           // text that may hydrate into headings, lists or code after generation stops.
