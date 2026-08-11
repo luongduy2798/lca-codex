@@ -56,7 +56,7 @@ describe("native /models augmentation", () => {
     const limits = resolveLcaCodexContextLimits("low");
     expect(routed).toMatchObject({
       slug: "lca-codex",
-      display_name: "LCA Codex",
+      display_name: "LCA-5.6 Sol",
       tool_mode: "code_mode_only",
       default_reasoning_level: "high",
       supported_reasoning_levels: [

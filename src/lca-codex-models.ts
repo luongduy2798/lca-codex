@@ -1,6 +1,6 @@
 export const LCA_CODEX_MODEL_SLUG = "lca-codex";
 export const LCA_CODEX_MODEL_PREFIX = `${LCA_CODEX_MODEL_SLUG}/`;
-export const LCA_CODEX_MODEL_DISPLAY_NAME = "LCA Codex";
+export const LCA_CODEX_MODEL_DISPLAY_NAME = "LCA-5.6 Sol";
 export const LCA_CODEX_MODEL_DESCRIPTION = "LCA Codex through the native Codex harness.";
 export const LCA_CODEX_BASE_MODEL = "gpt-5.6-sol";
 

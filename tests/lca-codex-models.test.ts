@@ -26,7 +26,7 @@ describe("single LCA Codex model", () => {
   test("exposes one stable model and maps reasoning to browser modes", () => {
     expect(LCA_CODEX_MODEL).toEqual({
       slug: "lca-codex",
-      displayName: "LCA Codex",
+      displayName: "LCA-5.6 Sol",
       description: "LCA Codex through the native Codex harness.",
     });
     expect(LCA_CODEX_REASONING_MODES.map(mode => [mode.codexEffort, mode.adapterEffort, mode.displayLabel])).toEqual([
