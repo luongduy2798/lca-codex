@@ -17,11 +17,18 @@ import { estimateLcaCodexUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 export const LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT = "LCA_CODEX_NATIVE_TOOL_HEALTH_PROBE_V1";
+const MAX_ACTIVITY_TASK_TITLE_CHARS = 240;
 
 function messageText(content: string | CodexContentPart[]): string {
   return typeof content === "string"
     ? content
     : content.filter(part => part.type === "text").map(part => part.text).join("\n");
+}
+
+function activityTaskTitle(parsed: CodexParsedRequest): string | undefined {
+  const latestUser = parsed.context.messages.findLast(message => message.role === "user");
+  const title = latestUser ? messageText(latestUser.content).replace(/\s+/g, " ").trim() : "";
+  return title ? title.slice(0, MAX_ACTIVITY_TASK_TITLE_CHARS) : undefined;
 }
 
 export function isLcaCodexToolHealthProbe(parsed: CodexParsedRequest): boolean {
@@ -202,9 +209,11 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
   ): ChatGptTurnRuntime => {
     const startedAt = Date.now();
     const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+    const taskTitle = activityTaskTitle(parsed);
     logLcaCodexActivity("lca_codex.turn_started", {
       traceId,
       ...(threadId ? { threadId } : {}),
+      ...(taskTitle ? { taskTitle } : {}),
       attempt,
       mode: mode.localTools ? "tools" : "read-only",
     });

@@ -39,6 +39,7 @@ const LCA_CODEX_ACTIVITY_DETAIL_KEYS = new Set([
   "responseChars",
   "sinceSendMs",
   "status",
+  "taskTitle",
   "tool",
   "threadId",
   "traceId",
@@ -259,17 +260,21 @@ function buildRetainedActivityFromRecords(retainedRecords, decorateActivityRecor
     taskRecords.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
     let threadId = null;
     let chatTitle = null;
+    let taskTitle = null;
     for (const record of taskRecords) {
       const recordThreadId = activityIdentifier(record.detail?.threadId);
       const recordChatTitle = typeof record.detail?.chatTitle === "string" ? record.detail.chatTitle.trim() : "";
+      const recordTaskTitle = typeof record.detail?.taskTitle === "string" ? record.detail.taskTitle.trim() : "";
       if (recordThreadId) threadId = recordThreadId;
       if (recordChatTitle) chatTitle = recordChatTitle;
+      if (recordTaskTitle) taskTitle = recordTaskTitle;
     }
     const lastAt = taskRecords.at(-1)?.at ?? new Date(0).toISOString();
     return {
       traceId,
       threadId,
       chatTitle,
+      taskTitle,
       chatId: threadId ? `chat:${threadId}` : `trace:${traceId}`,
       records: taskRecords,
       lastAt,
@@ -341,11 +346,15 @@ function createRetainedActivityIndex(filePath, decorateActivityRecord, initialRe
     const chatTitle = typeof decorated.detail?.chatTitle === "string"
       ? decorated.detail.chatTitle.trim()
       : "";
+    const taskTitle = typeof decorated.detail?.taskTitle === "string"
+      ? decorated.detail.taskTitle.trim()
+      : "";
     if (!task) {
       task = {
         traceId,
         threadId,
         chatTitle: chatTitle || null,
+        taskTitle: taskTitle || null,
         chatId: threadId ? `chat:${threadId}` : `trace:${traceId}`,
         records: [],
         lastAt: decorated.at,
@@ -355,18 +364,21 @@ function createRetainedActivityIndex(filePath, decorateActivityRecord, initialRe
     }
     const threadChanged = Boolean(threadId && task.threadId !== threadId);
     const titleChanged = Boolean(chatTitle && task.chatTitle !== chatTitle);
+    const taskTitleChanged = Boolean(taskTitle && task.taskTitle !== taskTitle);
     if (threadId) {
       task.threadId = threadId;
       task.chatId = `chat:${threadId}`;
     }
     if (chatTitle) task.chatTitle = chatTitle;
-    if ((threadChanged || titleChanged) && task.records.length > 0) {
+    if (taskTitle) task.taskTitle = taskTitle;
+    if ((threadChanged || titleChanged || taskTitleChanged) && task.records.length > 0) {
       task.records = task.records.map(previous => ({
         ...previous,
         detail: {
           ...previous.detail,
           ...(threadChanged ? { threadId } : {}),
           ...(titleChanged ? { chatTitle } : {}),
+          ...(taskTitleChanged ? { taskTitle } : {}),
         },
       }));
     }
@@ -545,6 +557,7 @@ function summarizeActivityTask(task, now = Date.now()) {
     traceId: task.traceId,
     threadId: task.threadId,
     chatTitle: task.chatTitle,
+    taskTitle: task.taskTitle,
     startedAt: first?.at ?? task.lastAt,
     lastAt: last?.at ?? task.lastAt,
     durationMs: Math.max(0, (terminalAt ?? now) - startedAt),

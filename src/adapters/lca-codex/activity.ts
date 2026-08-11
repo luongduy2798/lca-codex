@@ -5,7 +5,7 @@ export type LcaCodexActivityLevel = "info" | "warning" | "error";
 export type LcaCodexActivityDetail = Record<string, string | number | boolean | null | undefined>;
 
 /**
- * Emit a bounded, payload-free activity record. The launcher recognizes this prefix and stores
+ * Emit a bounded, payload-minimized activity record. The launcher recognizes this prefix and stores
  * the JSON as a first-class Activity entry; other hosts still receive a readable diagnostic line.
  * Logging is deliberately best-effort and must never affect a browser turn or native tool call.
  */

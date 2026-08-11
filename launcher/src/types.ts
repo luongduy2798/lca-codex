@@ -81,6 +81,7 @@ export interface ActivityTaskSummary {
   traceId: string;
   threadId: string | null;
   chatTitle: string | null;
+  taskTitle: string | null;
   startedAt: string;
   lastAt: string;
   durationMs: number;

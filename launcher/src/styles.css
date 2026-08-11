@@ -2115,6 +2115,8 @@ code {
 }
 
 .activity-task-title-line > strong {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--color-text-primary);
   font-size: var(--text-sm);

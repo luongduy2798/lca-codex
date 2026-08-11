@@ -2780,6 +2780,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
   let attempt = 1;
   let threadId: string | undefined;
   let chatTitle: string | undefined;
+  let taskTitle: string | undefined;
   let sawStart = false;
 
   for (const record of records) {
@@ -2787,11 +2788,13 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
     const recordAttempt = record.detail.attempt;
     const recordThreadId = record.detail.threadId;
     const recordChatTitle = record.detail.chatTitle;
+    const recordTaskTitle = record.detail.taskTitle;
     if (typeof recordAttempt === "number" && Number.isFinite(recordAttempt)) {
       attempt = Math.max(attempt, Math.max(1, Math.round(recordAttempt)));
     }
     if (typeof recordThreadId === "string" && recordThreadId.trim()) threadId = recordThreadId.trim();
     if (typeof recordChatTitle === "string" && recordChatTitle.trim()) chatTitle = recordChatTitle.trim();
+    if (typeof recordTaskTitle === "string" && recordTaskTitle.trim()) taskTitle = recordTaskTitle.trim();
 
     if (record.event === "lca_codex.turn_started") {
       sawStart = true;
@@ -2889,6 +2892,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
     traceId,
     threadId: threadId ?? null,
     chatTitle: chatTitle ?? null,
+    taskTitle: taskTitle ?? null,
     records,
     startedAt: first.at,
     lastAt: last.at,
@@ -3037,6 +3041,7 @@ function mergeActivityTaskSummaries(...groups: ActivityTaskSummary[][]): Activit
         ...newer,
         threadId: newer.threadId ?? older.threadId,
         chatTitle: newer.chatTitle ?? older.chatTitle,
+        taskTitle: newer.taskTitle ?? older.taskTitle,
         startedAt: Date.parse(task.startedAt) < Date.parse(current.startedAt) ? task.startedAt : current.startedAt,
         attempt: Math.max(current.attempt, task.attempt),
         durationMs: Math.max(current.durationMs, task.durationMs),
@@ -3070,11 +3075,12 @@ function activityTaskStatusLabel(group: ActivityTaskSummary): string {
 }
 
 function activityTaskTitle(group: ActivityTaskSummary): string {
-  return `Task ${group.traceId}`;
+  return group.taskTitle || `Task ${group.traceId}`;
 }
 
 function activityTaskTooltip(group: ActivityTaskSummary): string {
   return [
+    ...(group.taskTitle ? [`Task: ${group.taskTitle}`] : []),
     ...(group.chatTitle ? [`Chat: ${group.chatTitle}`] : []),
     ...(group.threadId ? [`Chat ID: ${group.threadId}`] : []),
     `Task ID: ${group.traceId}`,
