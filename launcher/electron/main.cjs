@@ -188,17 +188,12 @@ function publishCodexUsageUpsellStatus(status = codexUsageUpsellStatus()) {
   return status;
 }
 
-function syncCodexUsageUpsellPatch({ logger, stateStore, migrateExisting = false } = {}) {
+function syncCodexUsageUpsellPatch({ logger, stateStore } = {}) {
   if (!codexUsageUpsellPatcher || codexUsageUpsellInFlight) return codexUsageUpsellStatus();
   codexUsageUpsellInFlight = true;
   try {
     let status = codexUsageUpsellPatcher.inspect();
-    let state = stateStore.read();
-    if (migrateExisting && status.state === "applied" && state.hideCodexUsageUpsell !== true) {
-      state = stateStore.update({ hideCodexUsageUpsell: true });
-      send("launcher:state-changed", state);
-      logger.info("codex.ui_usage_upsell_preference_migrated", { version: status.version });
-    }
+    const state = stateStore.read();
     if (state.hideCodexUsageUpsell === true && status.state !== "applied") {
       const result = codexUsageUpsellPatcher.apply();
       if (result.mutated) codexUsageUpsellReloadRequired = true;
@@ -851,11 +846,33 @@ function registerIpc({ logger, stateStore }) {
       if (!(smokePassedThisSession || smokePassedForCurrentVersion(beforeState))) {
         throw new Error("Run the browser smoke test before installing the Codex integration");
       }
-      const result = await runtimeHost.setupCore();
-      const state = stateStore.update(codexRestartPending({
-        bridgeEnabled: true,
+      const connect = beforeState.bridgeEnabled === true && beforeState.mcpRuntimeInstalled === true;
+      let result;
+      try {
+        result = await runtimeHost.setupCore({ connect });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("--replace-codex-route")) throw error;
+        const confirmation = await dialog.showMessageBox(mainWindow, {
+          type: "warning",
+          buttons: ["Cancel", "Replace existing route"],
+          defaultId: 0,
+          cancelId: 0,
+          title: "Replace the existing Codex route?",
+          message: "Codex already uses another model route.",
+          detail: "LCA Codex can replace it reversibly and restore the current route when you uninstall or restore native Codex.",
+          noLink: true,
+        });
+        if (confirmation.response !== 1) {
+          throw new Error("Codex integration setup was cancelled; the existing route was preserved");
+        }
+        result = await runtimeHost.setupCore({ connect, replaceExistingRoute: true });
+      }
+      const coreState = {
+        bridgeEnabled: connect,
         coreSetupComplete: true,
-      }));
+      };
+      const state = stateStore.update(connect ? codexRestartPending(coreState) : coreState);
       send("launcher:state-changed", state);
       await browserHost.returnToIdle().catch((error) => {
         logger.warn("browser.idle_cleanup_failed", {
@@ -864,7 +881,7 @@ function registerIpc({ logger, stateStore }) {
       });
       await publishRuntimeStatus();
       stopCatalogVerificationMonitor();
-      return { ok: true, stdout: result.stdout, restartRequired: true };
+      return { ok: true, stdout: result.stdout, restartRequired: connect };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       stopCatalogVerificationMonitor();
@@ -895,12 +912,13 @@ function registerIpc({ logger, stateStore }) {
       replace: input?.replace === true,
       appName: typeof input?.connectorName === "string" ? input.connectorName : "",
     });
-    const state = stateStore.update({
+    const state = stateStore.update(codexRestartPending({
+      bridgeEnabled: true,
       connectorName: runtimeHost.mcpConnectorName(),
       mcpRuntimeInstalled: true,
       mcpSetupComplete: false,
       mcpGuideStep: 2,
-    });
+    }));
     send("launcher:state-changed", state);
     const runtime = await publishRuntimeStatus();
     if (runtime.lifecycle === "ready") startCatalogVerificationMonitor({ logger, stateStore });
@@ -1001,15 +1019,15 @@ async function requestQuit() {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
-  stopCatalogVerificationMonitor();
-  stopRuntimeStatusMonitor();
-  stopCodexUsageUpsellMonitor();
   try {
     const activeOperation = runtimeHost?.currentOperation();
     if (activeOperation) {
       loggerForQuit()?.warn?.("launcher.quit_during_operation", { operation: activeOperation });
     }
     const commit = async () => {
+      stopCatalogVerificationMonitor();
+      stopRuntimeStatusMonitor();
+      stopCodexUsageUpsellMonitor();
       quitting = true;
       browserHost?.destroy();
       await browserControl?.close().catch(() => {});
@@ -1075,14 +1093,6 @@ async function start() {
   if (stateStore.read().sessionRefreshReminderAt === null) {
     stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
   }
-  const persistedState = stateStore.read();
-  if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
-    stateStore.update({
-      coreSetupComplete: false,
-      codexCatalogVerified: false,
-      codexRestartRequired: false,
-    });
-  }
   const autostart = getAutostart(app);
   if (autostart.supported && stateStore.read().autoStart !== autostart.enabled) {
     setAutostart(app, stateStore.read().autoStart);
@@ -1096,7 +1106,7 @@ async function start() {
     threadIndexPath: path.join(CODEX_HOME, "session_index.jsonl"),
   });
   codexUsageUpsellPatcher = new CodexUsageUpsellPatcher({ logger });
-  syncCodexUsageUpsellPatch({ logger, stateStore, migrateExisting: true });
+  syncCodexUsageUpsellPatch({ logger, stateStore });
   startCodexUsageUpsellMonitor({ logger, stateStore });
   const startHidden = process.argv.includes("--hidden");
   nativeTheme.themeSource = "system";
@@ -1146,7 +1156,6 @@ async function start() {
   runtimeLifecycle = createRuntimeLifecycleCoordinator({
     runtimeHost,
     runtimeSupervisor,
-    getBrowserHost: () => browserHost,
     logger,
     publishRuntimeState: (state) => send("launcher:runtime-state", state),
     publishToolHealth: (state) => send("launcher:codex-tool-health-state", state),

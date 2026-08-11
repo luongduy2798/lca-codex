@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   availableLcaCodexReasoningModes,
-  LCA_CODEX_BACKEND_MODEL,
+  LCA_CODEX_BASE_MODEL,
   LCA_CODEX_MODEL,
   LCA_CODEX_REASONING_MODES,
   requireLcaCodexModel,
@@ -79,13 +79,13 @@ describe("single LCA Codex model", () => {
     const model = routeLcaCodexRequest(request, defaultConfig());
 
     expect(model.slug).toBe("lca-codex");
-    expect(request.modelId).toBe(LCA_CODEX_BACKEND_MODEL);
+    expect(request.modelId).toBe(LCA_CODEX_BASE_MODEL);
     expect(request.options.reasoning).toBe("low");
     expect(request._rawBody).toEqual(rawSnapshot);
   });
 
-  test("maps Pro to the browser max effort and fails closed for stale routed slugs", () => {
-    const config = defaultConfig("full");
+  test("maps Pro to the browser max effort and fails closed for unsupported routed slugs", () => {
+    const config = defaultConfig();
     config.proAvailable = true;
     const request = parsed("lca-codex", "max");
     expect(routeLcaCodexRequest(request, config).slug).toBe("lca-codex");

@@ -184,11 +184,11 @@ test("authenticated Codex lifecycle interrupt cancels only the matching browser 
   }
 });
 
-test("a full-mode runtime exposes its broker endpoint before any turn registers", async () => {
+test("the bridge runtime exposes its broker endpoint before any turn registers", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));
   // The endpoint is a Unix socket on POSIX and a named pipe on Windows, so liveness is proven by
   // the broker answering its own protocol, never by a path existing.
-  const config = { ...defaultConfig("full"), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
+  const config = { ...defaultConfig(), port: 0, brokerSocketPath: defaultBrokerEndpoint(root) };
   const server = startServer(config);
   try {
     const deadline = Date.now() + 5_000;

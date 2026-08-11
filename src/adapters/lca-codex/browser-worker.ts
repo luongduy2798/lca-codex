@@ -939,23 +939,22 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("effort-menu-open-requested");
 
-    // ChatGPT's current composer uses an ARIA slider for effort. Prefer it, then fall back to the
-    // legacy menuitemradio list so older deployments remain supported. Never clamp a mode that is
-    // outside the slider's advertised range: Extra High/Pro must not silently degrade to High.
+    // ChatGPT exposes either an ARIA slider or a menuitemradio list for effort. Prefer the slider.
+    // Never clamp a mode outside its advertised range: Extra High/Pro must not degrade to High.
     const effortSlider = effortMenu.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(mode.uiEffortIndex);
     let sliderReady = await effortSlider.isVisible().catch(() => false);
-    let legacyReady = await effortChoice.isVisible().catch(() => false);
-    if (!sliderReady && !legacyReady) {
+    let choiceReady = await effortChoice.isVisible().catch(() => false);
+    if (!sliderReady && !choiceReady) {
       // Do not spend five seconds proving the slider is absent. Whichever supported control
       // hydrates first wins; the slider is still checked synchronously first when already present.
       const firstReady = await Promise.any([
         effortSlider.waitFor({ state: "visible", timeout: 1_000 }).then(() => "slider" as const),
-        effortChoice.waitFor({ state: "visible", timeout: 1_000 }).then(() => "legacy" as const),
+        effortChoice.waitFor({ state: "visible", timeout: 1_000 }).then(() => "choice" as const),
       ]).catch(() => undefined);
       sliderReady = firstReady === "slider";
-      legacyReady = firstReady === "legacy";
+      choiceReady = firstReady === "choice";
     }
     if (sliderReady) {
       const min = Number(await effortSlider.getAttribute("aria-valuemin") ?? "0");
@@ -992,7 +991,7 @@ export class ChatGptBrowserWorker {
     const waitAbort = new AbortController();
     try {
       const ready = await Promise.race([
-        (legacyReady
+        (choiceReady
           ? Promise.resolve("effort" as const)
           : effortChoice.waitFor({ state: "visible", timeout: sliderReady ? 1_000 : 70_000, signal: waitAbort.signal }).then(() => "effort" as const)),
         chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: sliderReady ? 1_000 : 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
@@ -1007,7 +1006,7 @@ export class ChatGptBrowserWorker {
         : "none";
       throw new LcaCodexAdapterError(
         `ChatGPT effort UI does not expose ${mode.displayLabel}`
-        + ` (sliderRange=${sliderRange}; legacyItemCount=${await effortChoices.count().catch(() => 0)})`,
+        + ` (sliderRange=${sliderRange}; effortItemCount=${await effortChoices.count().catch(() => 0)})`,
         { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
       );
     } finally {

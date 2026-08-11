@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "test": "bun test tests/*.test.ts",
-    "audit": "bun audit",
+    "audit": "bun run scripts/audit-dependencies.ts",
     "check-version": "bun run scripts/check-version.ts",
     "typecheck": "bunx tsc --noEmit",
     "licenses": "bun run scripts/generate-third-party-notices.ts --include-launcher",

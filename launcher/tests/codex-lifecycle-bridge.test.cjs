@@ -31,16 +31,16 @@ test("VS Code setting edits preserve JSONC comments and can restore absence", ()
   assert.match(restored, /keep this comment/);
 });
 
-test("legacy manual Lca proxy configuration migrates to managed state and removes cleanly", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-lifecycle-legacy-"));
+test("an orphaned managed proxy setting is adopted and removes cleanly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-lifecycle-orphaned-"));
   const coreHome = path.join(root, "lca-home");
   const homeDir = path.join(root, "user");
   const settingsPath = path.join(homeDir, "Library", "Application Support", "Code", "User", "settings.json");
   const extensionRoot = path.join(homeDir, ".vscode", "extensions", "openai.chatgpt-test");
-  const legacyProxyPath = path.join(coreHome, "bin", "lca-codex-proxy");
+  const managedProxyPath = path.join(coreHome, "bin", "lca-codex-proxy");
   fs.mkdirSync(extensionRoot, { recursive: true });
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `{\n  "chatgpt.cliExecutable": ${JSON.stringify(legacyProxyPath)}\n}\n`);
+  fs.writeFileSync(settingsPath, `{\n  "chatgpt.cliExecutable": ${JSON.stringify(managedProxyPath)}\n}\n`);
   try {
     setupBridge({ coreHome, proxySourcePath, electronExecutable: process.execPath, homeDir, platform: "darwin" });
     removeBridge({ coreHome, proxySourcePath, homeDir, platform: "darwin" });
@@ -50,7 +50,7 @@ test("legacy manual Lca proxy configuration migrates to managed state and remove
   }
 });
 
-test("Configured VS Code proxy self-heals when the renamed executable is missing", () => {
+test("Configured VS Code proxy self-heals when its executable is missing", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-vscode-proxy-repair-"));
   const coreHome = path.join(root, ".lca-codex");
   const homeDir = path.join(root, "user");

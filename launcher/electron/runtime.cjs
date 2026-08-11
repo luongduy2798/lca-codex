@@ -851,7 +851,7 @@ class RuntimeHost {
       return codexToolHealthFallback("LCA Codex runtime is not configured", new Date().toISOString());
     }
     if (config.mode !== "full" || !config.tunnel) {
-      return codexToolHealthFallback("The full Codex harness is not configured", new Date().toISOString());
+      return codexToolHealthFallback("The ChatGPT Web bridge is not configured", new Date().toISOString());
     }
     const current = await requestCodexToolHealth(config.brokerSocketPath);
     return current.live ? current : this.probeCodexTools(config);
@@ -1160,9 +1160,12 @@ class RuntimeHost {
     }
   }
 
-  setupCore() {
+  setupCore({ replaceExistingRoute = false, connect = false } = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    return this.run("core-setup", ["route", "install"], {
+    const args = ["route", "install"];
+    if (replaceExistingRoute) args.push("--replace-codex-route");
+    if (connect) args.push("--connect");
+    return this.run("core-setup", args, {
       message: "Installing LCA Codex models into Codex",
       successMessage: "Codex integration installed",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
@@ -1177,7 +1180,6 @@ class RuntimeHost {
     if (existing.owner !== "launcher" || existing.config?.releaseVersion === currentVersion) {
       return { updated: false };
     }
-    const route = await this.bridgeStatus("runtime-upgrade-route");
     const args = [
       "setup",
       "--browser-host-descriptor",
@@ -1189,12 +1191,12 @@ class RuntimeHost {
       message: `Upgrading launcher runtime from ${existing.config.releaseVersion} to ${currentVersion}`,
       successMessage: `Launcher runtime upgraded to ${currentVersion}`,
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
+      disconnectRouteForSetup: true,
     });
-    if (!route.active) await this.setBridgeEnabled(false);
     return {
       updated: true,
       mode: existing.mode,
-      bridgeEnabled: route.active,
+      bridgeEnabled: false,
       fromVersion: existing.config.releaseVersion,
       toVersion: currentVersion,
       stdout: result.stdout,
@@ -1224,10 +1226,12 @@ class RuntimeHost {
     if (reuseSavedCredentials) {
       args.push("--acknowledge-unofficial", "--restart-service");
       return this.runSetup("mcp-setup", args, {
-        message: "Connecting the native Codex harness with saved tunnel credentials",
+        message: "Configuring the ChatGPT Web bridge with saved tunnel credentials",
         successMessage: "Local MCP tools are ready",
         timeoutMs: CORE_SETUP_TIMEOUT_MS,
         startAfterSetup: true,
+        connectAfterSetup: true,
+        disconnectRouteForSetup: true,
       });
     }
     const secretsDir = path.join(this.app.getPath("userData"), "secrets");
@@ -1244,16 +1248,23 @@ class RuntimeHost {
       "--restart-service",
     );
     return this.runSetup("mcp-setup", args, {
-      message: "Connecting the native Codex harness",
+      message: "Configuring the ChatGPT Web bridge",
       successMessage: "Local MCP tools are ready",
       timeoutMs: CORE_SETUP_TIMEOUT_MS,
       startAfterSetup: true,
+      connectAfterSetup: true,
+      disconnectRouteForSetup: true,
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
   async runSetup(name, args, options = {}) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    const { startAfterSetup = false, ...runOptions } = options;
+    const {
+      startAfterSetup = false,
+      connectAfterSetup = false,
+      disconnectRouteForSetup = false,
+      ...runOptions
+    } = options;
     const previousRuntime = this.runtimeConfigSnapshot();
     const previousLive = previousRuntime.owner === "launcher"
       ? await this.supervisor.observeRuntime()
@@ -1263,6 +1274,7 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     try {
+      if (disconnectRouteForSetup) await this.restoreBridgeRouteWithinOperation(name);
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
@@ -1270,9 +1282,13 @@ class RuntimeHost {
       if (wasRunning || startAfterSetup) {
         const runtime = await this.supervisor.startIfConfigured();
         if (runtime.status !== "ready") {
-          throw new Error(`Setup completed, but the full harness could not be started: ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
+          throw new Error(`Setup completed, but the ChatGPT Web bridge could not be started: ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
         }
+        if (connectAfterSetup) await this.connectBridgeRouteWithinOperation(name);
       } else {
+        if (connectAfterSetup) {
+          throw new Error("Setup cannot activate the Codex route before the runtime is ready");
+        }
         await this.supervisor.stopForSetup();
       }
       return result;

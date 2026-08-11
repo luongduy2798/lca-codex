@@ -297,7 +297,7 @@ function LauncherShell({
               </div>
             </div>
 
-            <div className={`sidebar-runtime-card is-${snapshot.runtime.lifecycle} is-codex`}>
+          <div className={`sidebar-runtime-card is-${snapshot.runtime.lifecycle}`}>
               <button
                 className="sidebar-runtime-overview"
                 onClick={() => navigateSurface("runtime")}
@@ -778,8 +778,7 @@ function SetupSurface({
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
   });
-  const codexRouteActive = snapshot.state.coreSetupComplete === true
-    && snapshot.state.bridgeEnabled === true;
+  const codexIntegrationInstalled = snapshot.state.coreSetupComplete === true;
   return (
     <ContentSurface
       eyebrow={copy.required}
@@ -811,10 +810,10 @@ function SetupSurface({
           title={copy.stepSmoke}
         />
         <SetupRow
-          action={codexRouteActive
+          action={codexIntegrationInstalled
             ? copy.installed
             : activeAction === "install" ? copy.installingModels : copy.install}
-          complete={codexRouteActive}
+          complete={codexIntegrationInstalled}
           description={copy.stepInstallBody}
           disabled={busy || !snapshot.smokePassed}
           index={3}
@@ -828,7 +827,7 @@ function SetupSurface({
             : snapshot.state.mcpRuntimeInstalled ? copy.finishMcpSetup : copy.configureMcp}
           complete={snapshot.state.mcpSetupComplete === true}
           description={copy.stepMcpBody}
-          disabled={busy || !codexRouteActive}
+          disabled={busy || !codexIntegrationInstalled}
           index={4}
           onAction={showMcp}
           title={copy.stepMcp}
@@ -1706,7 +1705,7 @@ function McpSurface({
             loading={activeAction === "connect"}
             onClick={() => void install()}
           >
-            {activeAction === "connect" ? copy.connectingHarness : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
+            {activeAction === "connect" ? copy.connectingBridge : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
           </PrimaryButton>
         ) : null}
         {step === 2 ? (

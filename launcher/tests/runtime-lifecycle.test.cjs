@@ -35,7 +35,6 @@ function fixture() {
   const coordinator = createRuntimeLifecycleCoordinator({
     runtimeHost,
     runtimeSupervisor,
-    getBrowserHost: () => ({ abortAllTurns() { calls.push("browser:abort"); } }),
     logger: { warn() {} },
     publishRuntimeState: state => runtimeStates.push(state),
     publishToolHealth: state => toolHealth.push(state),
@@ -72,13 +71,12 @@ test("runtime stop invalidates a slow health result so stale diagnostics cannot 
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(current.toolHealth, [{ checkedAt: null, live: false, tools: [] }]);
-  assert.deepEqual(current.calls.slice(-7), [
+  assert.deepEqual(current.calls.slice(-6), [
     "health:stop",
-    "browser:abort",
-    "catalog:stop",
     "runtime:cancel-operation",
     "bridge:deactivate",
     "bridge:state:false",
+    "catalog:stop",
     "runtime:stop",
   ]);
   assert.equal(current.runtimeStates.at(-1).lifecycle, "stopped");
@@ -104,6 +102,39 @@ test("runtime restart keeps the Codex route managed between stop and fresh start
   assert.equal(current.calls.includes("bridge:deactivate"), false);
   assert.equal(current.calls.includes("runtime:stop"), true);
   assert.equal(current.calls.includes("bridge:activate"), true);
+});
+
+test("a failed restart stop restores the catalog monitor for the still-active route", async () => {
+  const current = fixture();
+  current.runtimeSupervisor.stopRuntime = async () => {
+    current.calls.push("runtime:stop");
+    throw new Error("active turn still running");
+  };
+
+  await assert.rejects(current.coordinator.restart(), /active turn still running/);
+  assert.equal(current.calls.includes("bridge:deactivate"), false);
+  assert.equal(current.calls.at(-1), "catalog:start");
+});
+
+test("a failed normal stop reconnects the route only after runtime compensation is ready", async () => {
+  const current = fixture();
+  current.runtimeSupervisor.stopRuntime = async () => {
+    current.calls.push("runtime:stop");
+    throw new Error("active turn still running");
+  };
+  current.runtimeSupervisor.observeRuntime = async () => {
+    current.calls.push("runtime:observe-compensation");
+    return { lifecycle: "ready", owner: "current-launcher" };
+  };
+
+  await assert.rejects(current.coordinator.stop(), /active turn still running/);
+  assert.deepEqual(current.calls.slice(-5), [
+    "runtime:stop",
+    "runtime:observe-compensation",
+    "bridge:activate",
+    "bridge:state:true",
+    "catalog:start",
+  ]);
 });
 
 test("launcher quit commits only after native Codex and the runtime are stopped", async () => {

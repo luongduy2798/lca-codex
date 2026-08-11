@@ -13,9 +13,13 @@ cpSync(sourceBundle, firstLocation, { recursive: true });
 renameSync(firstLocation, runtimeRoot);
 
 const manifest = JSON.parse(readFileSync(join(runtimeRoot, "manifest.json"), "utf8")) as Record<string, unknown>;
+const bundledPlaywright = JSON.parse(
+  readFileSync(join(runtimeRoot, "app", "node_modules", "playwright-core", "package.json"), "utf8"),
+) as { version?: unknown };
 if (manifest.schemaVersion !== 1
   || manifest.appVersion !== VERSION
-  || manifest.playwright !== "1.62.0"
+  || typeof bundledPlaywright.version !== "string"
+  || manifest.playwright !== bundledPlaywright.version
   || !/^[a-f0-9]{64}$/.test(String(manifest.bundleId ?? ""))) {
   throw new Error(`Unexpected runtime manifest: ${JSON.stringify(manifest)}`);
 }

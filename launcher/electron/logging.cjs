@@ -6,6 +6,9 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
 const MAX_THREAD_TITLE_CHARS = 240;
+const MAX_THREAD_INDEX_BYTES = 4 * 1024 * 1024;
+const MAX_THREAD_TITLES = 20_000;
+const MAX_ACTIVITY_TRACE_THREADS = 20_000;
 const THREAD_TITLE_REFRESH_MS = 1_000;
 const ACTIVITY_STALL_MS = 30_000;
 const LCA_CODEX_ACTIVITY_PREFIX = "[lca-codex-activity] ";
@@ -147,11 +150,6 @@ function readPersistedRecords(filePath) {
   }
 }
 
-function retainedLogEntries(filePath) {
-  return [...readPersistedRecords(`${filePath}.1`), ...readPersistedRecords(filePath)]
-    .map(record => ({ record }));
-}
-
 function activityTraceId(record) {
   const explicit = activityIdentifier(record?.detail?.traceId);
   if (explicit && explicit !== "unknown") return explicit;
@@ -196,6 +194,46 @@ function isActivityHealthRecord(record) {
   return activityTraceId(record)?.startsWith("health-") === true;
 }
 
+function buildActivityChats(tasks, system) {
+  const chatsById = new Map();
+  for (const task of tasks) {
+    const current = chatsById.get(task.chatId);
+    const title = task.chatTitle
+      || (task.threadId ? `Chat ${task.threadId.slice(0, 8)}` : `Task ${task.traceId}`);
+    if (!current) {
+      chatsById.set(task.chatId, {
+        id: task.chatId,
+        kind: task.threadId ? "chat" : "trace",
+        threadId: task.threadId,
+        title,
+        taskCount: 1,
+        eventCount: task.records.length,
+        lastAt: task.lastAt,
+      });
+      continue;
+    }
+    current.taskCount += 1;
+    current.eventCount += task.records.length;
+    if (activityRecordTimestamp({ at: task.lastAt }) > activityRecordTimestamp({ at: current.lastAt })) {
+      current.lastAt = task.lastAt;
+    }
+    if (task.chatTitle) current.title = task.chatTitle;
+  }
+
+  if (system.length > 0) {
+    chatsById.set("system", {
+      id: "system",
+      kind: "system",
+      threadId: null,
+      title: "System activity",
+      taskCount: 0,
+      eventCount: system.length,
+      lastAt: system.at(-1).at,
+    });
+  }
+  return [...chatsById.values()].sort(compareActivityChats);
+}
+
 function buildRetainedActivityFromRecords(retainedRecords, decorateActivityRecord) {
   // Prime trace -> thread mappings first so records that precede the first explicit
   // threadId for a task still receive the correct chat association.
@@ -238,55 +276,21 @@ function buildRetainedActivityFromRecords(retainedRecords, decorateActivityRecor
     };
   });
 
-  const chatsById = new Map();
-  for (const task of tasks) {
-    const current = chatsById.get(task.chatId);
-    const title = task.chatTitle
-      || (task.threadId ? `Chat ${task.threadId.slice(0, 8)}` : `Task ${task.traceId}`);
-    if (!current) {
-      chatsById.set(task.chatId, {
-        id: task.chatId,
-        kind: task.threadId ? "chat" : "trace",
-        threadId: task.threadId,
-        title,
-        taskCount: 1,
-        eventCount: task.records.length,
-        lastAt: task.lastAt,
-      });
-      continue;
-    }
-    current.taskCount += 1;
-    current.eventCount += task.records.length;
-    if (activityRecordTimestamp({ at: task.lastAt }) > activityRecordTimestamp({ at: current.lastAt })) {
-      current.lastAt = task.lastAt;
-    }
-    if (task.chatTitle) current.title = task.chatTitle;
-  }
-
   system.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
-  if (system.length > 0) {
-    chatsById.set("system", {
-      id: "system",
-      kind: "system",
-      threadId: null,
-      title: "System activity",
-      taskCount: 0,
-      eventCount: system.length,
-      lastAt: system.at(-1).at,
-    });
-  }
 
   return {
-    chats: [...chatsById.values()].sort(compareActivityChats),
+    chats: buildActivityChats(tasks, system),
     tasks,
     system,
   };
 }
 
-function createRetainedActivityIndex(filePath, decorateActivityRecord) {
-  let rotatedRecords = readPersistedRecords(`${filePath}.1`);
-  let currentRecords = readPersistedRecords(filePath);
+function createRetainedActivityIndex(filePath, decorateActivityRecord, initialRecords = {}) {
+  let rotatedRecords = initialRecords.rotatedRecords ?? readPersistedRecords(`${filePath}.1`);
+  let currentRecords = initialRecords.currentRecords ?? readPersistedRecords(filePath);
   let cached = null;
+  let cachedTasksByTrace = new Map();
+  let chatsDirty = false;
   let dirty = true;
 
   const snapshot = () => {
@@ -295,7 +299,12 @@ function createRetainedActivityIndex(filePath, decorateActivityRecord) {
         [...rotatedRecords, ...currentRecords],
         decorateActivityRecord,
       );
+      cachedTasksByTrace = new Map(cached.tasks.map(task => [task.traceId, task]));
       dirty = false;
+      chatsDirty = false;
+    } else if (chatsDirty) {
+      cached.chats = buildActivityChats(cached.tasks, cached.system);
+      chatsDirty = false;
     }
     return cached;
   };
@@ -309,7 +318,65 @@ function createRetainedActivityIndex(filePath, decorateActivityRecord) {
       currentRecords = [];
     }
     currentRecords.push(record);
-    dirty = true;
+    if (rotated || dirty || !cached) {
+      dirty = true;
+      return;
+    }
+
+    const decorated = decorateActivityRecord(record);
+    if (isActivityHealthRecord(decorated)) return;
+    const traceId = activityTraceId(decorated);
+    if (!traceId) {
+      const previousLast = cached.system.at(-1);
+      cached.system.push(decorated);
+      if (previousLast && activityRecordTimestamp(previousLast) > activityRecordTimestamp(decorated)) {
+        cached.system.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
+      }
+      chatsDirty = true;
+      return;
+    }
+
+    let task = cachedTasksByTrace.get(traceId);
+    const threadId = activityIdentifier(decorated.detail?.threadId);
+    const chatTitle = typeof decorated.detail?.chatTitle === "string"
+      ? decorated.detail.chatTitle.trim()
+      : "";
+    if (!task) {
+      task = {
+        traceId,
+        threadId,
+        chatTitle: chatTitle || null,
+        chatId: threadId ? `chat:${threadId}` : `trace:${traceId}`,
+        records: [],
+        lastAt: decorated.at,
+      };
+      cached.tasks.push(task);
+      cachedTasksByTrace.set(traceId, task);
+    }
+    const threadChanged = Boolean(threadId && task.threadId !== threadId);
+    const titleChanged = Boolean(chatTitle && task.chatTitle !== chatTitle);
+    if (threadId) {
+      task.threadId = threadId;
+      task.chatId = `chat:${threadId}`;
+    }
+    if (chatTitle) task.chatTitle = chatTitle;
+    if ((threadChanged || titleChanged) && task.records.length > 0) {
+      task.records = task.records.map(previous => ({
+        ...previous,
+        detail: {
+          ...previous.detail,
+          ...(threadChanged ? { threadId } : {}),
+          ...(titleChanged ? { chatTitle } : {}),
+        },
+      }));
+    }
+    const previousLast = task.records.at(-1);
+    task.records.push(decorated);
+    if (previousLast && activityRecordTimestamp(previousLast) > activityRecordTimestamp(decorated)) {
+      task.records.sort((left, right) => activityRecordTimestamp(left) - activityRecordTimestamp(right));
+    }
+    task.lastAt = task.records.at(-1)?.at ?? decorated.at;
+    chatsDirty = true;
   };
 
   const filtered = (shouldDelete) => {
@@ -326,6 +393,9 @@ function createRetainedActivityIndex(filePath, decorateActivityRecord) {
   const replace = ({ rotatedRecords: nextRotatedRecords, currentRecords: nextCurrentRecords }) => {
     rotatedRecords = nextRotatedRecords;
     currentRecords = nextCurrentRecords;
+    cached = null;
+    cachedTasksByTrace = new Map();
+    chatsDirty = false;
     dirty = true;
   };
 
@@ -485,9 +555,62 @@ function activityIdentifier(value) {
 }
 
 function createThreadTitleLookup(filePath) {
-  let indexSignature = "";
+  let fileIdentity = "";
+  let lastMtimeMs = -1;
+  let readOffset = 0;
   let nextRefreshAt = 0;
+  let pendingLine = "";
   let titles = new Map();
+
+  const rememberTitle = (line) => {
+    if (!line) return;
+    try {
+      const item = JSON.parse(line);
+      const id = activityIdentifier(item?.id);
+      const title = typeof item?.thread_name === "string"
+        ? redactText(item.thread_name).replace(/\s+/g, " ").trim().slice(0, MAX_THREAD_TITLE_CHARS)
+        : "";
+      if (!id || !title) return;
+      // Refresh insertion order on updates so the bounded map retains the newest titles.
+      titles.delete(id);
+      titles.set(id, title);
+      while (titles.size > MAX_THREAD_TITLES) titles.delete(titles.keys().next().value);
+    } catch {}
+  };
+
+  const readSlice = (start, length) => {
+    if (length <= 0) return Buffer.alloc(0);
+    const descriptor = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(length);
+      let total = 0;
+      while (total < length) {
+        const count = fs.readSync(descriptor, buffer, total, length - total, start + total);
+        if (count === 0) break;
+        total += count;
+      }
+      return buffer.subarray(0, total);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  };
+
+  const applySlice = (buffer, { reset = false, discardPartialFirstLine = false } = {}) => {
+    if (reset) titles = new Map();
+    if (reset || discardPartialFirstLine) pendingLine = "";
+    let complete = buffer;
+    if (discardPartialFirstLine) {
+      const newline = complete.indexOf(0x0a);
+      complete = newline >= 0 ? complete.subarray(newline + 1) : Buffer.alloc(0);
+    }
+    const lines = `${pendingLine}${complete.toString("utf8")}`.split(/\r?\n/);
+    pendingLine = lines.pop() ?? "";
+    for (const line of lines) rememberTitle(line);
+    // JSONL normally ends in a newline, but retain compatibility with a valid final record that
+    // has not been terminated yet. Reprocessing it after a later append is harmless and updates
+    // the same bounded map entry.
+    if (pendingLine) rememberTitle(pendingLine);
+  };
 
   const refresh = () => {
     const now = Date.now();
@@ -495,25 +618,44 @@ function createThreadTitleLookup(filePath) {
     nextRefreshAt = now + THREAD_TITLE_REFRESH_MS;
     try {
       const stat = fs.statSync(filePath);
-      const signature = `${stat.mtimeMs}:${stat.size}`;
-      if (signature === indexSignature) return;
-      const next = new Map();
-      for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-        if (!line) continue;
-        try {
-          const item = JSON.parse(line);
-          const id = activityIdentifier(item?.id);
-          const title = typeof item?.thread_name === "string"
-            ? redactText(item.thread_name).replace(/\s+/g, " ").trim().slice(0, MAX_THREAD_TITLE_CHARS)
-            : "";
-          if (id && title) next.set(id, title);
-        } catch {}
+      const identity = `${stat.dev}:${stat.ino}`;
+      if (identity === fileIdentity && stat.size === readOffset && stat.mtimeMs === lastMtimeMs) return;
+
+      const replaced = fileIdentity !== "" && identity !== fileIdentity;
+      const rewritten = identity === fileIdentity
+        && (stat.size < readOffset || (stat.size === readOffset && stat.mtimeMs !== lastMtimeMs));
+      const cold = fileIdentity === "";
+      let start;
+      let reset = false;
+      let discardPartialFirstLine = false;
+      if (cold || replaced || rewritten) {
+        start = Math.max(0, stat.size - MAX_THREAD_INDEX_BYTES);
+        reset = true;
+        discardPartialFirstLine = start > 0;
+      } else if (stat.size > readOffset) {
+        const growth = stat.size - readOffset;
+        start = growth > MAX_THREAD_INDEX_BYTES
+          ? stat.size - MAX_THREAD_INDEX_BYTES
+          : readOffset;
+        discardPartialFirstLine = growth > MAX_THREAD_INDEX_BYTES;
+      } else {
+        fileIdentity = identity;
+        lastMtimeMs = stat.mtimeMs;
+        readOffset = stat.size;
+        return;
       }
-      titles = next;
-      indexSignature = signature;
+
+      const content = readSlice(start, stat.size - start);
+      applySlice(content, { reset, discardPartialFirstLine });
+      fileIdentity = identity;
+      lastMtimeMs = stat.mtimeMs;
+      readOffset = start + content.length;
     } catch {
       titles = new Map();
-      indexSignature = "";
+      fileIdentity = "";
+      lastMtimeMs = -1;
+      readOffset = 0;
+      pendingLine = "";
     }
   };
 
@@ -529,7 +671,13 @@ function createActivityRecordDecorator(records, threadIndexPath) {
   const threadForRecord = (record) => {
     const traceId = activityIdentifier(record?.detail?.traceId);
     const explicitThreadId = activityIdentifier(record?.detail?.threadId);
-    if (traceId && explicitThreadId) traceThreads.set(traceId, explicitThreadId);
+    if (traceId && explicitThreadId) {
+      traceThreads.delete(traceId);
+      traceThreads.set(traceId, explicitThreadId);
+      while (traceThreads.size > MAX_ACTIVITY_TRACE_THREADS) {
+        traceThreads.delete(traceThreads.keys().next().value);
+      }
+    }
     return explicitThreadId || (traceId ? traceThreads.get(traceId) : null);
   };
 
@@ -559,9 +707,17 @@ function writeRetainedRecords(filePath, records) {
 }
 
 function createLogger({ filePath, publish, threadIndexPath }) {
-  const records = readRecent(filePath);
-  const decorateActivityRecord = createActivityRecordDecorator(records, threadIndexPath);
-  const activityIndex = createRetainedActivityIndex(filePath, decorateActivityRecord);
+  const rotatedRecords = readPersistedRecords(`${filePath}.1`);
+  const currentRecords = readPersistedRecords(filePath);
+  const records = currentRecords.slice(-MAX_MEMORY_RECORDS);
+  const decorateActivityRecord = createActivityRecordDecorator(
+    [...rotatedRecords, ...currentRecords],
+    threadIndexPath,
+  );
+  const activityIndex = createRetainedActivityIndex(filePath, decorateActivityRecord, {
+    rotatedRecords,
+    currentRecords,
+  });
 
   const activityChatsPage = (input = {}) => {
     const requestedLimit = Number.isFinite(input?.limit) ? Math.floor(input.limit) : 20;

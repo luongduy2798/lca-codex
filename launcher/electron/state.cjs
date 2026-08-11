@@ -21,6 +21,13 @@ const DEFAULT_STATE = Object.freeze({
   sessionRefreshReminderAt: null,
   codexRestartRequestedAt: null,
 });
+const OPTIONAL_BOOLEAN_STATE_KEYS = [
+  "coreSetupComplete",
+  "codexCatalogVerified",
+  "mcpSetupComplete",
+  "mcpRuntimeInstalled",
+  "codexRestartRequired",
+];
 
 function nextSessionRefreshReminderAt(now = Date.now()) {
   if (!Number.isFinite(now)) throw new Error("Session refresh reminder time must be finite");
@@ -31,15 +38,12 @@ function readState(filePath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     if (!parsed || parsed.version !== 1) return { ...DEFAULT_STATE };
-    const legacyRuntimeLifecycle = !Object.prototype.hasOwnProperty.call(parsed, "runtimeAutoStart");
-    const state = { ...DEFAULT_STATE, ...parsed };
-    delete state.language;
-    delete state.onboardingComplete;
-    delete state.githubOpened;
-    if (legacyRuntimeLifecycle) {
-      // Keep runtime startup manual while preserving any explicit background-window choice.
-      // If the old state never stored that choice, the current default remains enabled.
-      state.runtimeAutoStart = false;
+    const state = { ...DEFAULT_STATE };
+    for (const key of Object.keys(DEFAULT_STATE)) {
+      if (Object.prototype.hasOwnProperty.call(parsed, key)) state[key] = parsed[key];
+    }
+    for (const key of OPTIONAL_BOOLEAN_STATE_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(parsed, key)) state[key] = parsed[key];
     }
     for (const key of [
       "autoStart",
@@ -80,13 +84,7 @@ function readState(filePath) {
         || !Number.isFinite(Date.parse(state.codexRestartRequestedAt)))) {
       state.codexRestartRequestedAt = DEFAULT_STATE.codexRestartRequestedAt;
     }
-    for (const key of [
-      "coreSetupComplete",
-      "codexCatalogVerified",
-      "mcpSetupComplete",
-      "mcpRuntimeInstalled",
-      "codexRestartRequired",
-    ]) {
+    for (const key of OPTIONAL_BOOLEAN_STATE_KEYS) {
       if (state[key] !== undefined && typeof state[key] !== "boolean") delete state[key];
     }
     return state;

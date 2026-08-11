@@ -1,7 +1,7 @@
 <h1 align="center">LCA Codex</h1>
 
 <p align="center">
-  <strong>ChatGPT Web reasoning backend for Codex</strong><br>
+  <strong>ChatGPT Web bridge for Codex</strong><br>
   Use LCA Codex (including Pro) as native Codex models.
 </p>
 
@@ -15,10 +15,10 @@
 
 Pick the single **LCA Codex** model in Codex's native model picker, then choose its reasoning level
 to select Instant, Medium, High, Extra High, or Pro behavior. Every turn still uses a fresh ChatGPT
-Temporary Chat. In full mode, the composer receives only active instructions, the latest user
-request, and current-turn images. Older history/images stay in the immutable broker snapshot and are
-retrieved through the `lca-codex` connector only when needed. Visible reasoning, native Codex tool
-activity, and Markdown stream back into the same Codex task.
+Temporary Chat. With the tool bridge active, the composer receives only active instructions, the
+latest user request, and current-turn images. Older history/images stay in the immutable broker
+snapshot and are retrieved through the `lca-codex` connector only when needed. Visible reasoning,
+native Codex tool activity, and Markdown stream back into the same Codex task.
 
 <p align="center">
   <img src="assets/demo.gif" alt="LCA Codex running inside the native Codex harness" width="960">
@@ -31,8 +31,8 @@ Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──
 ```
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
-routes only the selected model turn through a fresh ChatGPT Temporary Chat; in full mode, MCP
-connects ChatGPT back to the tools of that same Codex task.
+routes only the selected model turn through a fresh ChatGPT Temporary Chat; MCP connects ChatGPT
+back to the tools of that same Codex task.
 
 ## Highlights
 
@@ -44,10 +44,10 @@ connects ChatGPT back to the tools of that same Codex task.
   another host model. The original model picker, task lifecycle, streaming, tracing, and tool UI
   remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
-  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat. Full-mode tool-capable
+  computer. Every browser turn starts in a fresh ChatGPT Temporary Chat. Tool-capable bridge
   turns freeze that accumulated context into an immutable per-turn snapshot and pull it over MCP in
   ordered chunks; browser chats are never reused as a second history authority.
-- **The full Codex harness over MCP.** In full mode, Instant through Extra High can use the active
+- **A ChatGPT Web bridge into the Codex harness.** Instant through Extra High can use the active
   Codex task's filesystem, shell, images, approvals, and configured tools/apps through MCP. Calls
   and real results stay inside the same browser response—nothing is simulated as text.
 - **Pro stays useful.** Pro is the one exception: ChatGPT's current Pro mode does not expose the
@@ -74,11 +74,11 @@ Then complete the three required checks in the app:
 
 1. Sign in to ChatGPT in the embedded browser.
 2. Run the browser smoke test.
-3. Configure the **full Codex harness**: provide the tunnel credentials, start the harness, attach the
+3. Configure the **Codex tool bridge**: provide the tunnel credentials, start the bridge, attach the
    ChatGPT MCP connector, verify it, then restart Codex once so the LCA Codex model appears.
 
 Pro appears only when the signed-in account exposes it. MCP/tunnel setup is part of core setup and is
-required; the launcher supports only the full-harness runtime.
+required; the launcher supports only the ChatGPT Web bridge runtime.
 
 The packaged launcher includes its own browser/runtime dependencies and does not require a system
 Node/Bun installation.
@@ -95,17 +95,17 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 
 ## Runtime contract
 
-LCA Codex has one runtime shape: the **full harness**. The OpenAI tunnel and ChatGPT MCP connector are
-required before setup is complete. Instant through Extra High can use the active Codex tool registry;
-Pro remains intentionally read-only for local workspace tools.
+LCA Codex has one runtime shape: the **ChatGPT Web bridge**. The OpenAI tunnel and ChatGPT MCP
+connector are required before setup is complete. Instant through Extra High can use the active
+Codex tool registry; Pro remains intentionally read-only for local workspace tools.
 
 Every picker entry has one fixed ChatGPT reasoning mode. Codex still displays its built-in Effort and
 Speed rows, but changing them cannot silently change the selected browser model. Pro receives the full
 context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
 
-## Full harness
+## Codex tool bridge
 
-The full harness connects ChatGPT back to the current Codex task through the official
+The bridge connects ChatGPT back to the current Codex task through the official
 [OpenAI tunnel-client](https://github.com/openai/tunnel-client). Each fresh Temporary Chat receives
 only a projected active bootstrap: active system/custom developer overrides, the AGENTS/project
 instructions already resolved by Codex, the latest user request, and current-turn images. Standard
@@ -116,15 +116,15 @@ round trip, while native file/command/MCP work
 still executes through the exact active Codex harness tool registry. The tunnel is outbound: it does
 not expose a public IP, open an inbound port, or require router forwarding.
 
-1. In the required **Configure full Codex harness** setup step, create the Tunnel and a regular API
+1. In the required **Configure Codex tool bridge** setup step, create the Tunnel and a regular API
    key on the same OpenAI account that will use the ChatGPT connector; creating the key is free and
    does not consume model API credits.
 2. Enter the ChatGPT connector name, paste the Tunnel ID and API key, then press
-   **Configure & start harness**. The launcher waits for the tunnel to become ready before starting
+   **Configure & start bridge**. The launcher waits for the tunnel to become ready before starting
    the Responses runtime.
 3. Enable **Developer Mode** in ChatGPT settings. Create a connector using **Tunnel**, select that
    exact Tunnel, set **Authentication** to **None**, and give it exactly the connector name shown by the launcher.
-5. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
+4. Scan its tools, choose the intended action permissions, and run **Verify runtime**. Verification
    selects the configured connector name exactly and confirms the connector pill.
 
 Write/modify actions require a ChatGPT workspace and admin policy that permit them. OpenAI
@@ -155,8 +155,8 @@ route is restored.
   published SHA-256 manifest before installation.
 
 Read the complete [architecture](docs/architecture.md) and
-[security model](docs/security-model.md) before enabling full mode. Report vulnerabilities through
-[SECURITY.md](SECURITY.md).
+[security model](docs/security-model.md) before enabling the tool bridge. Report vulnerabilities
+through [SECURITY.md](SECURITY.md).
 
 ## Development
 

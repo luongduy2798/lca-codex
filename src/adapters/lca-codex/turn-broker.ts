@@ -774,9 +774,10 @@ export class TurnBroker {
 
   private async checkCodexTools(): Promise<CodexToolHealthReport> {
     const channels = [...this.channels.values()];
-    const channel = channels.slice().reverse().find(candidate => candidate.waiters.size > 0);
+    const healthChannels = channels.filter(candidate => candidate.traceId.startsWith("health-"));
+    const channel = healthChannels.slice().reverse().find(candidate => candidate.waiters.size > 0);
     if (!channel) {
-      const registered = channels.at(-1);
+      const registered = healthChannels.at(-1);
       if (registered) return passiveCodexToolHealthReport(registered.environment, registered.traceId, true);
       if (this.lastObserved) return passiveCodexToolHealthReport(this.lastObserved.environment, this.lastObserved.traceId, false);
       return unavailableCodexToolHealthReport(

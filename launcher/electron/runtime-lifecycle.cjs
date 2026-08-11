@@ -1,7 +1,6 @@
 function createRuntimeLifecycleCoordinator({
   runtimeHost,
   runtimeSupervisor,
-  getBrowserHost = () => null,
   logger,
   publishRuntimeState = () => {},
   publishToolHealth = () => {},
@@ -45,7 +44,7 @@ function createRuntimeLifecycleCoordinator({
       if (before.lifecycle === "foreign") {
         throw new Error(before.detail || "The configured Responses port is owned by another process");
       }
-      if (before.lifecycle === "stale" || before.owner === "compatible-runtime") {
+      if (before.lifecycle === "stale" || before.owner === "external-runtime") {
         await runtimeSupervisor.stopRuntime();
         const cleaned = await runtimeSupervisor.observeRuntime();
         if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
@@ -90,8 +89,6 @@ function createRuntimeLifecycleCoordinator({
 
   const stop = async ({ restoreCodex = true } = {}) => {
     invalidateToolHealth();
-    getBrowserHost()?.abortAllTurns();
-    stopCatalogVerificationMonitor();
     try {
       await runtimeHost.cancelActiveOperation();
     } catch (error) {
@@ -99,13 +96,38 @@ function createRuntimeLifecycleCoordinator({
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    if (restoreCodex) {
-      const bridge = await runtimeHost.deactivateRuntimeBridge();
-      updateBridgeState(bridge);
+    let bridgeDeactivated = false;
+    try {
+      if (restoreCodex) {
+        const bridge = await runtimeHost.deactivateRuntimeBridge();
+        updateBridgeState(bridge);
+        bridgeDeactivated = true;
+      }
+      stopCatalogVerificationMonitor();
+      const status = await runtimeSupervisor.stopRuntime();
+      publishRuntimeState(status);
+      return status;
+    } catch (error) {
+      // A restart keeps the route active. If its stop phase fails, restore the monitor that was
+      // paused for the transition. A normal stop with a successfully restored native route does
+      // not reconnect unless the supervisor proves its compensation returned the runtime to ready.
+      let message = error instanceof Error ? error.message : String(error);
+      let restoreCatalogMonitor = !restoreCodex || !bridgeDeactivated;
+      if (restoreCodex && bridgeDeactivated) {
+        try {
+          const runtime = await runtimeSupervisor.observeRuntime();
+          if (runtime.lifecycle === "ready") {
+            const bridge = await runtimeHost.activateRuntimeBridge("runtime-stop-rollback");
+            updateBridgeState(bridge);
+            restoreCatalogMonitor = true;
+          }
+        } catch (rollbackError) {
+          message += `; restoring the Codex route after stop failure also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+        }
+      }
+      if (restoreCatalogMonitor) startCatalogVerificationMonitor();
+      throw new Error(message);
     }
-    const status = await runtimeSupervisor.stopRuntime();
-    publishRuntimeState(status);
-    return status;
   };
 
   const restart = async () => {

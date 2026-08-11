@@ -107,7 +107,7 @@ export function atomicWriteFile(path: string, data: string | Uint8Array): void {
   try { chmodSync(path, 0o600); } catch { /* Windows ACLs are managed by the installer. */ }
 }
 
-export function defaultConfig(_legacyMode?: string): AppConfig {
+export function defaultConfig(): AppConfig {
   const home = getConfigDir();
   return {
     version: 3,
@@ -250,28 +250,12 @@ export function loadConfig(): AppConfig {
   return parseConfig(JSON.parse(readFileSync(path, "utf8")), path);
 }
 
-export function loadConfigForSetup(): AppConfig {
-  const path = getConfigPath();
-  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-codex setup first.`);
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  if (raw.version === 1 && raw.mode === "pro-only") {
-    raw.version = 2;
-    raw.mode = "full";
-  }
-  if (raw.mode === "browser-only") raw.mode = "full";
-  if (raw.version === 2) {
-    raw.version = 3;
-    raw.browserHost = "managed-chrome";
-  }
-  return parseConfig(raw, path, true);
-}
-
-function parseConfig(value: unknown, path: string, allowIncompleteTunnel = false): AppConfig {
+function parseConfig(value: unknown, path: string): AppConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid configuration object in ${path}`);
   const parsed = value as Partial<AppConfig>;
-  if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
+  if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}`);
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
-  if (parsed.mode !== "full") throw new Error(`LCA Codex requires the full harness runtime in ${path}`);
+  if (parsed.mode !== "full") throw new Error(`LCA Codex requires the ChatGPT Web bridge runtime in ${path}`);
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
   if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
     throw new Error(`Invalid browserHost in ${path}`);
@@ -309,25 +293,24 @@ function parseConfig(value: unknown, path: string, allowIncompleteTunnel = false
   }
   if (!/^[A-Za-z0-9_-]{40,}$/.test(parsed.controlToken!)) throw new Error(`Invalid controlToken in ${path}`);
   if (!parsed.tunnel || typeof parsed.tunnel !== "object") {
-    if (!allowIncompleteTunnel) throw new Error("Full harness requires tunnel configuration");
-  } else {
-    for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"] as const) {
-      if (typeof parsed.tunnel[key] !== "string" || !parsed.tunnel[key].trim()) {
-        throw new Error(`Missing tunnel.${key} in ${path}`);
-      }
+    throw new Error("The ChatGPT Web bridge requires tunnel configuration");
+  }
+  for (const key of ["binaryPath", "tunnelId", "runtimeKeyFile", "profileDir", "profileName", "alias"] as const) {
+    if (typeof parsed.tunnel[key] !== "string" || !parsed.tunnel[key].trim()) {
+      throw new Error(`Missing tunnel.${key} in ${path}`);
     }
-    if (!/^tunnel_[a-f0-9]{32}$/.test(parsed.tunnel.tunnelId)) {
-      throw new Error(`Invalid tunnel.tunnelId in ${path}`);
+  }
+  if (!/^tunnel_[a-f0-9]{32}$/.test(parsed.tunnel.tunnelId)) {
+    throw new Error(`Invalid tunnel.tunnelId in ${path}`);
+  }
+  for (const key of ["profileName", "alias"] as const) {
+    if (!/^[A-Za-z0-9._-]+$/.test(parsed.tunnel[key])) {
+      throw new Error(`Invalid tunnel.${key} in ${path}`);
     }
-    for (const key of ["profileName", "alias"] as const) {
-      if (!/^[A-Za-z0-9._-]+$/.test(parsed.tunnel[key])) {
-        throw new Error(`Invalid tunnel.${key} in ${path}`);
-      }
-    }
-    for (const key of ["binaryPath", "runtimeKeyFile", "profileDir"] as const) {
-      if (!isAbsolute(expandUserPath(parsed.tunnel[key]))) {
-        throw new Error(`tunnel.${key} must be absolute in ${path}`);
-      }
+  }
+  for (const key of ["binaryPath", "runtimeKeyFile", "profileDir"] as const) {
+    if (!isAbsolute(expandUserPath(parsed.tunnel[key]))) {
+      throw new Error(`tunnel.${key} must be absolute in ${path}`);
     }
   }
   if (!Array.isArray(parsed.runtimeCommand) || parsed.runtimeCommand.length === 0
@@ -335,10 +318,45 @@ function parseConfig(value: unknown, path: string, allowIncompleteTunnel = false
     throw new Error(`Invalid runtimeCommand in ${path}`);
   }
   assertDurableRuntimeCommand(parsed.runtimeCommand as string[]);
-  if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
+  if (typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
-  return { ...parsed, proAvailable: parsed.proAvailable === true } as AppConfig;
+  if (parsed.acknowledgedUnofficialAt !== undefined
+    && (typeof parsed.acknowledgedUnofficialAt !== "string" || !parsed.acknowledgedUnofficialAt.trim())) {
+    throw new Error(`Invalid acknowledgedUnofficialAt in ${path}`);
+  }
+  return {
+    version: 3,
+    releaseVersion: parsed.releaseVersion,
+    mode: "full",
+    host: "127.0.0.1",
+    port: parsed.port!,
+    contextWindow: parsed.contextWindow!,
+    appName: parsed.appName!,
+    browserHost: parsed.browserHost,
+    ...(parsed.browserHostDescriptorPath
+      ? { browserHostDescriptorPath: parsed.browserHostDescriptorPath }
+      : {}),
+    chromeExecutablePath: parsed.chromeExecutablePath!,
+    storageStatePath: parsed.storageStatePath!,
+    brokerSocketPath: parsed.brokerSocketPath!,
+    headed: parsed.headed,
+    proAvailable: parsed.proAvailable,
+    autoApproveToolCalls: parsed.autoApproveToolCalls,
+    controlToken: parsed.controlToken!,
+    runtimeCommand: [...parsed.runtimeCommand],
+    ...(parsed.acknowledgedUnofficialAt
+      ? { acknowledgedUnofficialAt: parsed.acknowledgedUnofficialAt }
+      : {}),
+    tunnel: {
+      binaryPath: parsed.tunnel.binaryPath,
+      tunnelId: parsed.tunnel.tunnelId,
+      runtimeKeyFile: parsed.tunnel.runtimeKeyFile,
+      profileDir: parsed.tunnel.profileDir,
+      profileName: parsed.tunnel.profileName,
+      alias: parsed.tunnel.alias,
+    },
+  };
 }
 
 export function saveConfig(config: AppConfig): void {

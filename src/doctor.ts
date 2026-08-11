@@ -153,7 +153,7 @@ export async function runDoctor(): Promise<DoctorReport> {
       ? {
           id: "service",
           status: "warning",
-          message: "A legacy OS background service still exists; rerun launcher setup to migrate ownership",
+          message: "A terminal-owned OS background service still exists; rerun launcher setup to transfer ownership",
           detail: JSON.stringify(service),
         }
       : { id: "service", status: "ok", message: "Launcher owns the background runtime" });
@@ -186,7 +186,7 @@ export async function runDoctor(): Promise<DoctorReport> {
         ? {
             id: "tunnel-service",
             status: "warning",
-            message: "A legacy OS tunnel service still exists; rerun launcher MCP setup to migrate ownership",
+            message: "A terminal-owned OS tunnel service still exists; rerun launcher MCP setup to transfer ownership",
             detail: JSON.stringify(tunnelService),
           }
         : { id: "tunnel-service", status: "ok", message: "Launcher owns the tunnel runtime" });

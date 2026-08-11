@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
+// Reversible compatibility profile for ChatGPT Web constraints. Codex remains the agent harness;
+// LCA Codex only transports turns and native tool capabilities across the bridge.
 const MANAGED_COMMENT = "# Managed by lca-codex; `lca-codex uninstall` restores prior values.";
 const MANAGED_REMOTE_COMPACTION_LINE =
   "remote_compaction_v2 = false # Managed by lca-codex: bounds retained Web image history.";
@@ -43,79 +44,7 @@ export interface CodexIntegrationJournal {
   previousRemoteCompactionV2: PreviousFeatureAssignment;
   previousMultiAgent: PreviousFeatureAssignment;
   previousMultiAgentV2: PreviousFeatureAssignment;
-  format?: {
-    lineEnding: "\n" | "\r\n";
-    trailingNewline: boolean;
-  };
 }
-
-interface LegacyCodexIntegrationJournalV5 {
-  version: 5;
-  active: boolean;
-  configPath: string;
-  installed: {
-    openai_base_url: string;
-    remote_compaction_v2: false;
-    multi_agent: true;
-  };
-  previous: Record<ManagedAssignmentKey, PreviousAssignment>;
-  previousRemoteCompactionV2: PreviousFeatureAssignment;
-  previousMultiAgent: PreviousFeatureAssignment;
-  format?: {
-    lineEnding: "\n" | "\r\n";
-    trailingNewline: boolean;
-  };
-}
-
-interface LegacyCodexIntegrationJournalV4 {
-  version: 4;
-  active: boolean;
-  configPath: string;
-  installed: {
-    openai_base_url: string;
-  };
-  previous: Record<ManagedAssignmentKey, PreviousAssignment>;
-  format?: {
-    lineEnding: "\n" | "\r\n";
-    trailingNewline: boolean;
-  };
-}
-
-interface LegacyCodexIntegrationJournalV3 {
-  version: 3;
-  configPath: string;
-  installed: {
-    openai_base_url: string;
-  };
-  previous: Record<ManagedAssignmentKey, PreviousAssignment>;
-  format?: {
-    lineEnding: "\n" | "\r\n";
-    trailingNewline: boolean;
-  };
-}
-
-interface LegacyCodexIntegrationJournal {
-  version: 2;
-  configPath: string;
-  catalogPath: string;
-  catalogSha256: string;
-  providerBlock: string;
-  installed: {
-    model_provider: string;
-    model_catalog_json: string;
-  };
-  previous: {
-    model_provider: PreviousAssignment;
-    model_catalog_json: PreviousAssignment;
-  };
-}
-
-type ManagedRouteJournal =
-  | CodexIntegrationJournal
-  | LegacyCodexIntegrationJournalV5
-  | LegacyCodexIntegrationJournalV4
-  | LegacyCodexIntegrationJournalV3;
-type AnyCodexIntegrationJournal = ManagedRouteJournal | LegacyCodexIntegrationJournal;
 
 interface FileSnapshot {
   path: string;
@@ -125,6 +54,8 @@ interface FileSnapshot {
 
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
+  /** Activate the reversible route in the same atomic install transaction. Defaults to true. */
+  activate?: boolean;
 }
 
 export interface UninstallCodexIntegrationResult {
@@ -160,10 +91,6 @@ export function getCodexJournalPath(): string {
 
 function routeUrl(config: AppConfig): string {
   return `http://${config.host}:${config.port}/v1`;
-}
-
-function sha256(value: string | Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function snapshotFile(path: string): FileSnapshot {
@@ -306,13 +233,6 @@ function assignments(lines: string[]): Record<ManagedAssignmentKey, PreviousAssi
   };
 }
 
-function textFormat(text: string): NonNullable<CodexIntegrationJournal["format"]> {
-  return {
-    lineEnding: text.includes("\r\n") ? "\r\n" : "\n",
-    trailingNewline: /\r?\n$/.test(text),
-  };
-}
-
 function splitLines(text: string): string[] {
   return text.length > 0 ? text.replace(/\r?\n$/, "").split(/\r?\n/) : [];
 }
@@ -382,8 +302,6 @@ function removeManagedComment(document: CodexConfigDocument): void {
   }
 }
 
-const LEGACY_LCA_CODEX_COMMENT = "# Managed by LCA Codex Electron; restore with the dashboard.";
-
 interface TomlTableRange {
   headerIndex: number;
   endIndex: number;
@@ -405,32 +323,6 @@ function findTomlTable(lines: string[], tableName: string): TomlTableRange | und
     headerIndex,
     endIndex: relativeEnd < 0 ? lines.length : headerIndex + 1 + relativeEnd,
   };
-}
-
-function removeTomlTable(document: CodexConfigDocument, tableName: string): void {
-  const table = findTomlTable(document.lines, tableName);
-  if (!table) return;
-  for (let index = table.endIndex - 1; index >= table.headerIndex; index -= 1) {
-    removeDocumentLine(document, index);
-  }
-}
-
-function findLegacyLcaCodexRoute(document: CodexConfigDocument, previous: Record<ManagedAssignmentKey, PreviousAssignment>): boolean {
-  return document.lines.includes(LEGACY_LCA_CODEX_COMMENT)
-    || previous.model_provider.value === "lca_codex_proxy"
-    || previous.model_catalog_json.value?.includes(".lca-codex/") === true
-    || previous.model_catalog_json.value?.includes(".lca-codex\\\\") === true;
-}
-
-function purgeLegacyLcaCodexRoute(document: CodexConfigDocument): void {
-  for (let index = document.lines.length - 1; index >= 0; index -= 1) {
-    if (document.lines[index] === LEGACY_LCA_CODEX_COMMENT) removeDocumentLine(document, index);
-  }
-  const model = findTopLevelAssignment(document.lines, "model");
-  if (model.index !== undefined && (model.value === "lca-codex" || model.value?.startsWith("lca-codex/") === true)) {
-    removeDocumentLine(document, model.index);
-  }
-  removeTomlTable(document, "model_providers.lca_codex_proxy");
 }
 
 function findBooleanAssignmentInTable(
@@ -656,7 +548,7 @@ function installManagedFeatures(text: string): {
 
 function verifyInstalledFeatures(
   text: string,
-  journal: CodexIntegrationJournal | LegacyCodexIntegrationJournalV5,
+  journal: CodexIntegrationJournal,
 ): void {
   verifyInstalledBooleanFeature(
     text,
@@ -665,18 +557,14 @@ function verifyInstalledFeatures(
     MANAGED_REMOTE_COMPACTION_LINE,
   );
   verifyInstalledBooleanFeature(text, "multi_agent", "true", MANAGED_MULTI_AGENT_LINE);
-  if (journal.version === 6) {
-    verifyInstalledMultiAgentV2Feature(text, journal.previousMultiAgentV2);
-  }
+  verifyInstalledMultiAgentV2Feature(text, journal.previousMultiAgentV2);
 }
 
 function restoreManagedFeatures(
   text: string,
-  journal: CodexIntegrationJournal | LegacyCodexIntegrationJournalV5,
+  journal: CodexIntegrationJournal,
 ): string {
-  const withoutMultiAgentV2 = journal.version === 6
-    ? restoreMultiAgentV2Feature(text, journal.previousMultiAgentV2)
-    : text;
+  const withoutMultiAgentV2 = restoreMultiAgentV2Feature(text, journal.previousMultiAgentV2);
   const withoutMultiAgent = restoreBooleanFeature(
     withoutMultiAgentV2,
     "multi_agent",
@@ -721,16 +609,7 @@ function installRoute(
   replaceExistingRoute: boolean,
 ): { text: string; previous: CodexIntegrationJournal["previous"] } {
   const document = parseDocument(text);
-  let previous = assignments(document.lines);
-  const legacyLcaCodexRoute = replaceExistingRoute && findLegacyLcaCodexRoute(document, previous);
-  if (legacyLcaCodexRoute) {
-    purgeLegacyLcaCodexRoute(document);
-    previous = {
-      openai_base_url: { present: false },
-      model_provider: { present: false },
-      model_catalog_json: { present: false },
-    };
-  }
+  const previous = assignments(document.lines);
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([key, assignment]) => assignment.present
       && !(key === "model_provider" && assignment.value === "openai"))
@@ -758,7 +637,7 @@ function installRoute(
   return { text: renderDocument(document), previous };
 }
 
-function verifyInstalledRoute(text: string, journal: ManagedRouteJournal): void {
+function verifyInstalledRoute(text: string, journal: CodexIntegrationJournal): void {
   const lines = splitLines(text);
   const current = assignments(lines);
   if (current.openai_base_url.value !== journal.installed.openai_base_url) {
@@ -770,7 +649,7 @@ function verifyInstalledRoute(text: string, journal: ManagedRouteJournal): void 
   if (!lines.includes(MANAGED_COMMENT)) {
     throw new Error("Managed Codex route marker changed after setup; refusing to overwrite it");
   }
-  if (journal.version === 5 || journal.version === 6) verifyInstalledFeatures(text, journal);
+  verifyInstalledFeatures(text, journal);
 }
 
 function previousAssignmentMatches(current: PreviousAssignment, previous: PreviousAssignment): boolean {
@@ -780,7 +659,7 @@ function previousAssignmentMatches(current: PreviousAssignment, previous: Previo
 
 function verifyRestoredRoute(
   text: string,
-  journal: CodexIntegrationJournal | LegacyCodexIntegrationJournalV5 | LegacyCodexIntegrationJournalV4,
+  journal: CodexIntegrationJournal,
 ): void {
   const lines = splitLines(text);
   const current = assignments(lines);
@@ -792,26 +671,22 @@ function verifyRestoredRoute(
   if (lines.includes(MANAGED_COMMENT)) {
     throw new Error("Managed Codex route marker is present while the bridge is disconnected");
   }
-  if (journal.version === 5 || journal.version === 6) {
-    const previousFeatures: Array<readonly [string, PreviousFeatureAssignment]> = [
-      ["remote_compaction_v2", journal.previousRemoteCompactionV2],
-      ["multi_agent", journal.previousMultiAgent],
-    ];
-    if (journal.version === 6) {
-      previousFeatures.push(["multi_agent_v2", journal.previousMultiAgentV2]);
-    }
-    for (const [key, previous] of previousFeatures) {
-      const current = key === "multi_agent_v2"
-        ? findMultiAgentV2Assignment(lines)
-        : findFeatureAssignment(lines, key);
-      const matches = current.present === previous.present
-        && (current.tableName ?? "features") === (previous.tableName ?? "features")
-        && (!current.present || current.rawLine === previous.rawLine);
-      if (!matches) {
-        throw new Error(
-          `Codex [features].${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`,
-        );
-      }
+  const previousFeatures: Array<readonly [string, PreviousFeatureAssignment]> = [
+    ["remote_compaction_v2", journal.previousRemoteCompactionV2],
+    ["multi_agent", journal.previousMultiAgent],
+    ["multi_agent_v2", journal.previousMultiAgentV2],
+  ];
+  for (const [key, previous] of previousFeatures) {
+    const current = key === "multi_agent_v2"
+      ? findMultiAgentV2Assignment(lines)
+      : findFeatureAssignment(lines, key);
+    const matches = current.present === previous.present
+      && (current.tableName ?? "features") === (previous.tableName ?? "features")
+      && (!current.present || current.rawLine === previous.rawLine);
+    if (!matches) {
+      throw new Error(
+        `Codex [features].${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`,
+      );
     }
   }
 }
@@ -842,7 +717,7 @@ function assertPreservedPreviousFeature(
   }
 }
 
-function updateManagedRouteUrl(text: string, journal: ManagedRouteJournal, installedUrl: string): string {
+function updateManagedRouteUrl(text: string, journal: CodexIntegrationJournal, installedUrl: string): string {
   verifyInstalledRoute(text, journal);
   const document = parseDocument(text);
   const current = findTopLevelAssignment(document.lines, "openai_base_url");
@@ -851,7 +726,7 @@ function updateManagedRouteUrl(text: string, journal: ManagedRouteJournal, insta
   return renderDocument(document);
 }
 
-function restoreManagedRoute(text: string, journal: ManagedRouteJournal): string {
+function restoreManagedRoute(text: string, journal: CodexIntegrationJournal): string {
   verifyInstalledRoute(text, journal);
   const document = parseDocument(text);
   removeManagedComment(document);
@@ -873,40 +748,10 @@ function restoreManagedRoute(text: string, journal: ManagedRouteJournal): string
     const index = Math.min(item.previous.index ?? firstTableIndex(document.lines), firstTableIndex(document.lines));
     insertDocumentLine(document, index, item.previous.rawLine);
   }
-  const restoredRoute = renderDocument(document);
-  return journal.version === 5 || journal.version === 6
-    ? restoreManagedFeatures(restoredRoute, journal)
-    : restoredRoute;
+  return restoreManagedFeatures(renderDocument(document), journal);
 }
 
-function restoreLegacyV2(text: string, journal: LegacyCodexIntegrationJournal): string {
-  if (!text.includes(journal.providerBlock)) {
-    throw new Error("Managed legacy Codex provider block changed after setup; refusing migration");
-  }
-  const withoutProvider = text.replace(journal.providerBlock, "").replace(/\n{3,}/g, "\n\n");
-  const document = parseDocument(withoutProvider);
-  for (const key of ["model_provider", "model_catalog_json"] as const) {
-    const current = findTopLevelAssignment(document.lines, key);
-    if (current.value !== journal.installed[key] || current.index === undefined) {
-      throw new Error(`Managed legacy Codex ${key} changed after setup; refusing migration`);
-    }
-    const previous = journal.previous[key];
-    if (previous.present) {
-      if (!previous.rawLine) throw new Error(`Legacy Codex integration journal is missing the prior ${key} line`);
-      document.lines[current.index] = previous.rawLine;
-    } else {
-      removeDocumentLine(document, current.index);
-    }
-  }
-  removeManagedComment(document);
-  const restoredCatalog = findTopLevelAssignment(document.lines, "model_catalog_json");
-  if (restoredCatalog.index !== undefined && restoredCatalog.value && !existsSync(resolve(restoredCatalog.value))) {
-    removeDocumentLine(document, restoredCatalog.index);
-  }
-  return renderDocument(document);
-}
-
-function readJournalFile(path: string): AnyCodexIntegrationJournal | undefined {
+function readJournalFile(path: string): CodexIntegrationJournal | undefined {
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   if (value.version === 6
@@ -917,95 +762,36 @@ function readJournalFile(path: string): AnyCodexIntegrationJournal | undefined {
     && value.previousMultiAgent
     && value.previousMultiAgentV2
     && typeof value.configPath === "string") {
-    return value as unknown as CodexIntegrationJournal;
-  }
-  if (value.version === 5
-    && typeof value.active === "boolean"
-    && value.installed
-    && value.previous
-    && value.previousRemoteCompactionV2
-    && value.previousMultiAgent
-    && typeof value.configPath === "string") {
-    return value as unknown as LegacyCodexIntegrationJournalV5;
-  }
-  if (value.version === 4
-    && typeof value.active === "boolean"
-    && value.installed
-    && value.previous
-    && typeof value.configPath === "string") {
-    return value as unknown as LegacyCodexIntegrationJournalV4;
-  }
-  if (value.version === 3 && value.installed && value.previous && typeof value.configPath === "string") {
-    return value as unknown as LegacyCodexIntegrationJournalV3;
-  }
-  if (value.version === 2 && value.installed && value.previous && typeof value.providerBlock === "string") {
-    return value as unknown as LegacyCodexIntegrationJournal;
+    const journal = value as unknown as CodexIntegrationJournal;
+    return {
+      version: 6,
+      active: journal.active,
+      configPath: journal.configPath,
+      installed: {
+        openai_base_url: journal.installed.openai_base_url,
+        remote_compaction_v2: journal.installed.remote_compaction_v2,
+        multi_agent: journal.installed.multi_agent,
+        multi_agent_v2: journal.installed.multi_agent_v2,
+      },
+      previous: {
+        openai_base_url: { ...journal.previous.openai_base_url },
+        model_provider: { ...journal.previous.model_provider },
+        model_catalog_json: { ...journal.previous.model_catalog_json },
+      },
+      previousRemoteCompactionV2: { ...journal.previousRemoteCompactionV2 },
+      previousMultiAgent: { ...journal.previousMultiAgent },
+      previousMultiAgentV2: { ...journal.previousMultiAgentV2 },
+    };
   }
   throw new Error(`Invalid Codex integration journal: ${path}`);
 }
 
-function legacyLcaTokenJournalPath(): string | undefined {
-  const currentHome = getConfigDir();
-  if (dirname(currentHome) === currentHome || currentHome.split(/[\\/]/).at(-1) !== ".lca-codex") return undefined;
-  return join(dirname(currentHome), ".lca-token", "codex", "integration-journal.json");
-}
-
-function observedManagedState(
-  text: string,
-  journal: AnyCodexIntegrationJournal,
-): "active" | "inactive" | undefined {
-  if (journal.version === 2) return undefined;
-  try {
-    verifyInstalledRoute(text, journal);
-    return "active";
-  } catch {
-    // A renamed install may already have restored the user's prior Codex config while the old
-    // journal still says active. Only accept that predecessor when the restored state matches too.
-  }
-  if (journal.version === 4 || journal.version === 5 || journal.version === 6) {
-    try {
-      verifyRestoredRoute(text, journal);
-      return "inactive";
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function withObservedActiveState(
-  journal: AnyCodexIntegrationJournal,
-  state: "active" | "inactive",
-): AnyCodexIntegrationJournal {
-  if (journal.version === 4 || journal.version === 5 || journal.version === 6) {
-    return { ...journal, active: state === "active" };
-  }
-  return journal;
-}
-
-function readJournal(): AnyCodexIntegrationJournal | undefined {
-  const currentPath = getCodexJournalPath();
-  const current = readJournalFile(currentPath);
-  const legacyPath = legacyLcaTokenJournalPath();
-  if (!legacyPath || !existsSync(legacyPath)) return current;
-
-  const configPath = getCodexConfigPath();
-  const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
-  if (current && observedManagedState(currentText, current)) return current;
-
-  const legacy = readJournalFile(legacyPath);
-  if (!legacy) return current;
-  try {
-    assertJournalTargetsConfig(legacy, configPath);
-  } catch {
-    return current;
-  }
-  const legacyState = observedManagedState(currentText, legacy);
-  return legacyState ? withObservedActiveState(legacy, legacyState) : current;
+function readJournal(): CodexIntegrationJournal | undefined {
+  return readJournalFile(getCodexJournalPath());
 }
 
 function assertJournalTargetsConfig(
-  journal: AnyCodexIntegrationJournal,
+  journal: CodexIntegrationJournal,
   configPath: string,
 ): void {
   const pathIdentity = (value: string): string => {
@@ -1027,22 +813,28 @@ export function preflightCodexIntegration(
   const currentText = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
   const existing = readJournal();
   const installedUrl = routeUrl(config);
-  if (existing) assertJournalTargetsConfig(existing, configPath);
-  if (existing?.version === 3 || existing?.version === 4 || existing?.version === 5 || existing?.version === 6) {
-    if ((existing.version === 4 || existing.version === 5 || existing.version === 6) && !existing.active) {
-      verifyRestoredRoute(currentText, existing);
-    }
-    else verifyInstalledRoute(currentText, existing);
+  if (existing) {
+    assertJournalTargetsConfig(existing, configPath);
+    if (existing.active) verifyInstalledRoute(currentText, existing);
+    else verifyRestoredRoute(currentText, existing);
     return;
   }
-  let baseline = currentText;
-  if (existing?.version === 2) {
-    if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
-      throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
-    }
-    baseline = restoreLegacyV2(currentText, existing);
-  }
-  installIntegrationConfig(baseline, installedUrl, options.replaceExistingRoute === true);
+  installIntegrationConfig(currentText, installedUrl, options.replaceExistingRoute === true);
+}
+
+function persistInstalledIntegration(
+  configPath: string,
+  installedText: string,
+  journal: CodexIntegrationJournal,
+  activate: boolean,
+): CodexIntegrationJournal {
+  const persistedJournal = activate ? journal : { ...journal, active: false };
+  const persistedText = activate ? installedText : restoreManagedRoute(installedText, journal);
+  writeFilesWithCompensation([
+    { path: configPath, data: persistedText },
+    { path: getCodexJournalPath(), data: `${JSON.stringify(persistedJournal, null, 2)}\n` },
+  ], [getCodexModelsCachePath()]);
+  return persistedJournal;
 }
 
 export function installCodexIntegration(
@@ -1056,7 +848,7 @@ export function installCodexIntegration(
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
 
-  if (existing?.version === 6) {
+  if (existing) {
     let installedText: string;
     let previousRemoteCompactionV2 = existing.previousRemoteCompactionV2;
     let previousMultiAgent = existing.previousMultiAgent;
@@ -1102,107 +894,10 @@ export function installCodexIntegration(
       previousMultiAgent,
       previousMultiAgentV2,
     };
-    writeFilesWithCompensation([
-      { path: configPath, data: installedText },
-      { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
-    ], [getCodexModelsCachePath()]);
-    return updated;
+    return persistInstalledIntegration(configPath, installedText, updated, options.activate !== false);
   }
 
-  if (existing?.version === 5) {
-    let installedText: string;
-    let previousRemoteCompactionV2 = existing.previousRemoteCompactionV2;
-    let previousMultiAgent = existing.previousMultiAgent;
-    let previousMultiAgentV2: PreviousFeatureAssignment;
-    if (!existing.active) {
-      verifyRestoredRoute(currentText, existing);
-      const patched = installIntegrationConfig(currentText, installedUrl, true);
-      assertPreservedPreviousAssignments(patched.previous, existing.previous);
-      assertPreservedPreviousFeature(
-        patched.previousRemoteCompactionV2,
-        existing.previousRemoteCompactionV2,
-        "remote_compaction_v2",
-      );
-      assertPreservedPreviousFeature(
-        patched.previousMultiAgent,
-        existing.previousMultiAgent,
-        "multi_agent",
-      );
-      installedText = patched.text;
-      previousRemoteCompactionV2 = patched.previousRemoteCompactionV2;
-      previousMultiAgent = patched.previousMultiAgent;
-      previousMultiAgentV2 = patched.previousMultiAgentV2;
-    } else {
-      const routedText = updateManagedRouteUrl(currentText, existing, installedUrl);
-      const multiAgentV2 = installMultiAgentV2Feature(routedText);
-      installedText = multiAgentV2.text;
-      previousMultiAgentV2 = multiAgentV2.previous;
-    }
-    const updated: CodexIntegrationJournal = {
-      version: 6,
-      active: true,
-      configPath: existing.configPath,
-      installed: {
-        openai_base_url: installedUrl,
-        remote_compaction_v2: false,
-        multi_agent: true,
-        multi_agent_v2: false,
-      },
-      previous: existing.previous,
-      previousRemoteCompactionV2,
-      previousMultiAgent,
-      previousMultiAgentV2,
-      ...(existing.format ? { format: existing.format } : {}),
-    };
-    writeFilesWithCompensation([
-      { path: configPath, data: installedText },
-      { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
-    ], [getCodexModelsCachePath()]);
-    return updated;
-  }
-
-  if (existing?.version === 3 || existing?.version === 4) {
-    let routedText: string;
-    if (existing.version === 4 && !existing.active) {
-      verifyRestoredRoute(currentText, existing);
-      const patched = installRoute(currentText, installedUrl, true);
-      assertPreservedPreviousAssignments(patched.previous, existing.previous);
-      routedText = patched.text;
-    } else {
-      routedText = updateManagedRouteUrl(currentText, existing, installedUrl);
-    }
-    const features = installManagedFeatures(routedText);
-    const updated: CodexIntegrationJournal = {
-      version: 6,
-      active: true,
-      configPath: existing.configPath,
-      installed: {
-        openai_base_url: installedUrl,
-        remote_compaction_v2: false,
-        multi_agent: true,
-        multi_agent_v2: false,
-      },
-      previous: existing.previous,
-      previousRemoteCompactionV2: features.previousRemoteCompactionV2,
-      previousMultiAgent: features.previousMultiAgent,
-      previousMultiAgentV2: features.previousMultiAgentV2,
-      ...(existing.format ? { format: existing.format } : {}),
-    };
-    writeFilesWithCompensation([
-      { path: configPath, data: features.text },
-      { path: getCodexJournalPath(), data: `${JSON.stringify(updated, null, 2)}\n` },
-    ], [getCodexModelsCachePath()]);
-    return updated;
-  }
-
-  let baseline = currentText;
-  if (existing?.version === 2) {
-    if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
-      throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
-    }
-    baseline = restoreLegacyV2(currentText, existing);
-  }
-  const patched = installIntegrationConfig(baseline, installedUrl, options.replaceExistingRoute === true);
+  const patched = installIntegrationConfig(currentText, installedUrl, options.replaceExistingRoute === true);
   const journal: CodexIntegrationJournal = {
     version: 6,
     active: true,
@@ -1217,36 +912,27 @@ export function installCodexIntegration(
     previousRemoteCompactionV2: patched.previousRemoteCompactionV2,
     previousMultiAgent: patched.previousMultiAgent,
     previousMultiAgentV2: patched.previousMultiAgentV2,
-    format: textFormat(baseline),
   };
-  writeFilesWithCompensation([
-    { path: configPath, data: patched.text },
-    { path: getCodexJournalPath(), data: `${JSON.stringify(journal, null, 2)}\n` },
-  ], [getCodexModelsCachePath()]);
-  if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
-  return journal;
+  return persistInstalledIntegration(
+    configPath,
+    patched.text,
+    journal,
+    options.activate !== false,
+  );
 }
 
 export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
   const existing = readJournal();
   if (!existing) return { changed: false, active: false };
-  if (existing.version === 2) {
-    throw new Error("Legacy Codex integration must be upgraded by Setup before the bridge can be disconnected");
-  }
   assertJournalTargetsConfig(existing, getCodexConfigPath());
   if (!existsSync(existing.configPath)) throw new Error(`Codex config is missing: ${existing.configPath}`);
   const current = readFileSync(existing.configPath, "utf8");
-  if ((existing.version === 4 || existing.version === 5 || existing.version === 6) && !existing.active) {
+  if (!existing.active) {
     verifyRestoredRoute(current, existing);
     return { changed: false, active: false };
   }
   const restored = restoreManagedRoute(current, existing);
-  const disconnected:
-    | CodexIntegrationJournal
-    | LegacyCodexIntegrationJournalV5
-    | LegacyCodexIntegrationJournalV4 = existing.version === 6 || existing.version === 5
-      ? { ...existing, active: false }
-      : { ...existing, version: 4, active: false };
+  const disconnected: CodexIntegrationJournal = { ...existing, active: false };
   writeFilesWithCompensation([
     { path: existing.configPath, data: restored },
     { path: getCodexJournalPath(), data: `${JSON.stringify(disconnected, null, 2)}\n` },
@@ -1257,89 +943,40 @@ export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
 export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const existing = readJournal();
   if (!existing) throw new Error("Codex integration is not installed");
-  if (existing.version === 2) {
-    throw new Error("Legacy Codex integration must be upgraded by Setup before the bridge can be reconnected");
-  }
   assertJournalTargetsConfig(existing, getCodexConfigPath());
   if (!existsSync(existing.configPath)) throw new Error(`Codex config is missing: ${existing.configPath}`);
   const current = readFileSync(existing.configPath, "utf8");
-  if (existing.version === 6 && existing.active) {
+  if (existing.active) {
     verifyInstalledRoute(current, existing);
     return { changed: false, active: true };
   }
-  if (existing.version === 5 && existing.active) {
-    verifyInstalledRoute(current, existing);
-    const multiAgentV2 = installMultiAgentV2Feature(current);
-    const connected: CodexIntegrationJournal = {
-      version: 6,
-      active: true,
-      configPath: existing.configPath,
-      installed: {
-        openai_base_url: existing.installed.openai_base_url,
-        remote_compaction_v2: false,
-        multi_agent: true,
-        multi_agent_v2: false,
-      },
-      previous: existing.previous,
-      previousRemoteCompactionV2: existing.previousRemoteCompactionV2,
-      previousMultiAgent: existing.previousMultiAgent,
-      previousMultiAgentV2: multiAgentV2.previous,
-      ...(existing.format ? { format: existing.format } : {}),
-    };
-    writeFilesWithCompensation([
-      { path: existing.configPath, data: multiAgentV2.text },
-      { path: getCodexJournalPath(), data: `${JSON.stringify(connected, null, 2)}\n` },
-    ], [getCodexModelsCachePath()]);
-    return { changed: true, active: true };
-  }
-  let routedText: string;
-  if ((existing.version === 4 || existing.version === 5 || existing.version === 6) && !existing.active) {
-    verifyRestoredRoute(current, existing);
-    const patched = installRoute(current, existing.installed.openai_base_url, true);
-    assertPreservedPreviousAssignments(patched.previous, existing.previous);
-    routedText = patched.text;
-  } else {
-    verifyInstalledRoute(current, existing);
-    routedText = current;
-  }
-  const features = installManagedFeatures(routedText);
-  if (existing.version === 5 || existing.version === 6) {
-    assertPreservedPreviousFeature(
-      features.previousRemoteCompactionV2,
-      existing.previousRemoteCompactionV2,
-      "remote_compaction_v2",
-    );
-    assertPreservedPreviousFeature(
-      features.previousMultiAgent,
-      existing.previousMultiAgent,
-      "multi_agent",
-    );
-    if (existing.version === 6) {
-      assertPreservedPreviousFeature(
-        features.previousMultiAgentV2,
-        existing.previousMultiAgentV2,
-        "multi_agent_v2",
-      );
-    }
-  }
+  verifyRestoredRoute(current, existing);
+  const patched = installIntegrationConfig(current, existing.installed.openai_base_url, true);
+  assertPreservedPreviousAssignments(patched.previous, existing.previous);
+  assertPreservedPreviousFeature(
+    patched.previousRemoteCompactionV2,
+    existing.previousRemoteCompactionV2,
+    "remote_compaction_v2",
+  );
+  assertPreservedPreviousFeature(
+    patched.previousMultiAgent,
+    existing.previousMultiAgent,
+    "multi_agent",
+  );
+  assertPreservedPreviousFeature(
+    patched.previousMultiAgentV2,
+    existing.previousMultiAgentV2,
+    "multi_agent_v2",
+  );
   const connected: CodexIntegrationJournal = {
-    version: 6,
+    ...existing,
     active: true,
-    configPath: existing.configPath,
-    installed: {
-      openai_base_url: existing.installed.openai_base_url,
-      remote_compaction_v2: false,
-      multi_agent: true,
-      multi_agent_v2: false,
-    },
-    previous: existing.previous,
-    previousRemoteCompactionV2: features.previousRemoteCompactionV2,
-    previousMultiAgent: features.previousMultiAgent,
-    previousMultiAgentV2: features.previousMultiAgentV2,
-    ...(existing.format ? { format: existing.format } : {}),
+    previousRemoteCompactionV2: patched.previousRemoteCompactionV2,
+    previousMultiAgent: patched.previousMultiAgent,
+    previousMultiAgentV2: patched.previousMultiAgentV2,
   };
   writeFilesWithCompensation([
-    { path: existing.configPath, data: features.text },
+    { path: existing.configPath, data: patched.text },
     { path: getCodexJournalPath(), data: `${JSON.stringify(connected, null, 2)}\n` },
   ], [getCodexModelsCachePath()]);
   return { changed: true, active: true };
@@ -1351,29 +988,21 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   if (!existsSync(journal.configPath)) throw new Error(`Codex config is missing: ${journal.configPath}`);
   const current = readFileSync(journal.configPath, "utf8");
   let restored: string;
-  if (journal.version === 2) {
-    if (existsSync(journal.catalogPath) && sha256(readFileSync(journal.catalogPath)) !== journal.catalogSha256) {
-      throw new Error(`Managed legacy catalog changed after setup: ${journal.catalogPath}`);
-    }
-    restored = restoreLegacyV2(current, journal);
-  } else if ((journal.version === 4 || journal.version === 5 || journal.version === 6) && !journal.active) {
+  if (!journal.active) {
     verifyRestoredRoute(current, journal);
     restored = current;
   } else {
     restored = restoreManagedRoute(current, journal);
   }
   const configSnapshot = snapshotFile(journal.configPath);
-  const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
   const modelsCacheSnapshot = snapshotFile(getCodexModelsCachePath());
   try {
     atomicWriteFile(journal.configPath, restored);
-    if (catalogSnapshot?.exists) rmSync(catalogSnapshot.path);
     rmSync(modelsCacheSnapshot.path, { force: true });
     rmSync(getCodexJournalPath(), { force: true });
   } catch (error) {
     const rollbackFailures: string[] = [];
-    for (const snapshot of [modelsCacheSnapshot, catalogSnapshot, configSnapshot]) {
-      if (!snapshot) continue;
+    for (const snapshot of [modelsCacheSnapshot, configSnapshot]) {
       try {
         restoreFileSnapshot(snapshot);
       } catch (caught) {
@@ -1393,7 +1022,7 @@ export function inspectCodexIntegration(): {
   active: boolean;
   configPath: string;
   routeUrl?: string;
-  journal?: AnyCodexIntegrationJournal;
+  journal?: CodexIntegrationJournal;
   errors: string[];
 } {
   const journal = readJournal();
@@ -1402,34 +1031,17 @@ export function inspectCodexIntegration(): {
     try {
       assertJournalTargetsConfig(journal, getCodexConfigPath());
       const text = readFileSync(journal.configPath, "utf8");
-      if ((journal.version === 4 || journal.version === 5 || journal.version === 6) && !journal.active) {
-        verifyRestoredRoute(text, journal);
-      }
-      else if (journal.version === 3 || journal.version === 4 || journal.version === 5 || journal.version === 6) {
-        verifyInstalledRoute(text, journal);
-      }
-      else {
-        const lines = splitLines(text);
-        for (const key of ["model_provider", "model_catalog_json"] as const) {
-          if (findTopLevelAssignment(lines, key).value !== journal.installed[key]) {
-            errors.push(`Codex ${key} no longer matches this installation`);
-          }
-        }
-        if (!text.includes(journal.providerBlock)) errors.push("Managed legacy Codex provider block no longer matches this installation");
-      }
+      if (journal.active) verifyInstalledRoute(text, journal);
+      else verifyRestoredRoute(text, journal);
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
   return {
     installed: Boolean(journal),
-    active: journal?.version === 4 || journal?.version === 5 || journal?.version === 6
-      ? journal.active
-      : Boolean(journal),
+    active: journal?.active ?? false,
     configPath: getCodexConfigPath(),
-    ...(journal?.version === 3 || journal?.version === 4 || journal?.version === 5 || journal?.version === 6
-      ? { routeUrl: journal.installed.openai_base_url }
-      : {}),
+    ...(journal ? { routeUrl: journal.installed.openai_base_url } : {}),
     ...(journal ? { journal } : {}),
     errors,
   };

@@ -41,16 +41,6 @@ export function chatGptHtmlToMarkdown(html: string): string {
   return html.trim() ? turndown.turndown(html).trim() : "";
 }
 
-export interface ChatGptMarkdownSegment {
-  key: string;
-  html: string;
-  text: string;
-  group?: string;
-  streamable: boolean;
-  /** Plain prose-like blocks may stream a guarded stable prefix before the next DOM block exists. */
-  incremental?: boolean;
-}
-
 export interface ChatGptMarkdownRoot {
   key: string;
   html: string;
@@ -65,14 +55,6 @@ function commonPrefixLength(left: string, right: string): number {
   let index = 0;
   while (index < limit && left[index] === right[index]) index += 1;
   return index;
-}
-
-function replayLikeRewritePrefixLength(emitted: string, latest: string): number {
-  if (latest.length < emitted.length || emitted.length < 64) return 0;
-  const prefix = commonPrefixLength(emitted, latest);
-  const changedTail = emitted.length - prefix;
-  const toleratedTail = Math.min(256, Math.ceil(emitted.length * 0.2));
-  return prefix >= 64 && changedTail <= toleratedTail ? prefix : 0;
 }
 
 function suffixPrefixOverlapLength(left: string, right: string, minimum = 32, maximum = 8_192): number {
@@ -107,21 +89,6 @@ function hasMovableTrailingMarkdownClosure(markdown: string): boolean {
   return /(?:\*{1,3}|_{1,3}|~{2}|`{1,3}|\]\([^\n)]*\))$/.test(markdown);
 }
 
-function segmentsToMarkdown(segments: ChatGptMarkdownSegment[]): string {
-  let markdown = "";
-  let lastGroup: string | undefined;
-  for (const segment of segments) {
-    const block = chatGptHtmlToMarkdown(segment.html);
-    if (!block) continue;
-    const separator = markdown
-      ? segment.group !== undefined && segment.group === lastGroup ? "\n" : "\n\n"
-      : "";
-    markdown += `${separator}${block}`;
-    lastGroup = segment.group;
-  }
-  return markdown;
-}
-
 /**
  * Mirrors the Markdown currently visible in ChatGPT into an append-only Codex stream.
  *
@@ -140,21 +107,8 @@ export class ChatGptMarkdownBuffer {
   private rootCache = new Map<string, CachedChatGptMarkdownRoot>();
 
   constructor(
-    private readonly transform: (markdown: string) => string = markdown => markdown,
-    _legacyStabilityMs = 0,
-    _legacyOptions: Record<string, number> = {},
     private readonly serializeHtml: (html: string) => string = chatGptHtmlToMarkdown,
   ) {}
-
-  /** Legacy segment entry point retained for focused tests and callers outside the browser worker. */
-  observe(segments: ChatGptMarkdownSegment[]): string {
-    return this.observeMarkdown(this.transform(segmentsToMarkdown(segments)));
-  }
-
-  /** Legacy single-root entry point. Production uses observeRoots so unchanged roots stay cached. */
-  observeHtml(html: string): string {
-    return this.observeRoots([{ key: "root", html }]);
-  }
 
   /**
    * Serialize only final-answer roots whose HTML changed since the previous poll. The cache contains
@@ -170,7 +124,7 @@ export class ChatGptMarkdownBuffer {
       if (markdown) markdownRoots.push(markdown);
     }
     this.rootCache = nextCache;
-    return this.observeMarkdown(this.transform(markdownRoots.join("\n\n")));
+    return this.observeMarkdown(markdownRoots.join("\n\n"));
   }
 
   /** Flush everything currently visible without declaring the browser turn final. */
@@ -188,18 +142,10 @@ export class ChatGptMarkdownBuffer {
     if (this.latestSnapshot.startsWith(this.emitted)) {
       delta = this.latestSnapshot.slice(this.emitted.length);
     } else if (this.latestSnapshot !== this.emitted) {
-      const replayPrefix = replayLikeRewritePrefixLength(this.emitted, this.latestSnapshot);
-      if (replayPrefix > 0) {
-        // A browser retry/render replay can replace an almost-identical answer after most of its
-        // prefix was already streamed. Responses deltas cannot retract, so appending the complete
-        // replacement would duplicate the whole answer. Preserve the emitted prefix and resume at
-        // the same raw offset; any incompatible rewrite is intentionally confined to the small tail.
-        delta = this.latestSnapshot.slice(this.emitted.length);
-      } else {
-        // A genuinely different late rewrite cannot replace already-emitted Responses deltas.
-        // Surface it once as a correction instead of silently returning stale visible content.
-        delta = this.emitted ? `\n\n${this.latestSnapshot}` : this.latestSnapshot;
-      }
+      // Responses deltas cannot retract an already-emitted prefix. Any incompatible rewrite must
+      // therefore be surfaced intact as a correction. Slicing at the old raw offset can splice two
+      // different answers together and silently produce content that never existed in the browser.
+      delta = this.emitted ? `\n\n${this.latestSnapshot}` : this.latestSnapshot;
     }
     this.emitted += delta;
     this.finished = true;

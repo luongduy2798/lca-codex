@@ -7,9 +7,7 @@ const EXTENSION_PREFIX = "openai.chatgpt-";
 const TARGET_FUNCTION = "function fjt(e){";
 const TARGET_PROOF = "codex.upsellBanner.general.title";
 const PATCH_MARKER = "/* lca-codex-hide-codex-usage-upsell */";
-const LEGACY_PATCH_MARKER = "/* lca-hide-rate-limit-upsell */";
 const BACKUP_SUFFIX = ".lca-codex-usage-upsell.bak";
-const LEGACY_BACKUP_SUFFIXES = [".lca-codex-rate-limit-bak", ".lca-rate-limit.bak"];
 const PATCH_BODY = `${PATCH_MARKER}if((e?.rateLimitStatus?.rate_limit?.limit_reached===!0||e?.rateLimitStatus?.rate_limit?.allowed===!1)&&e?.rateLimitWarningThreshold==null)return null;`;
 
 function versionParts(version) {
@@ -93,7 +91,7 @@ function bundleCandidates(extensionPath) {
 }
 
 function hasPatchMarker(content) {
-  return content.includes(PATCH_MARKER) || content.includes(LEGACY_PATCH_MARKER);
+  return content.includes(PATCH_MARKER);
 }
 
 function replaceFileAtomicPreservingMode(filePath, content) {
@@ -108,20 +106,12 @@ function replaceFileAtomicPreservingMode(filePath, content) {
   }
 }
 
-function backupCandidates(bundlePath) {
-  return [
-    `${bundlePath}${BACKUP_SUFFIX}`,
-    ...LEGACY_BACKUP_SUFFIXES.map((suffix) => `${bundlePath}${suffix}`),
-  ];
-}
-
 function safeBackupFor(bundlePath) {
-  for (const candidate of backupCandidates(bundlePath)) {
-    if (!fs.existsSync(candidate)) continue;
-    const content = fs.readFileSync(candidate, "utf8");
-    if (!hasPatchMarker(content) && content.includes(TARGET_FUNCTION) && content.includes(TARGET_PROOF)) {
-      return candidate;
-    }
+  const candidate = `${bundlePath}${BACKUP_SUFFIX}`;
+  if (!fs.existsSync(candidate)) return null;
+  const content = fs.readFileSync(candidate, "utf8");
+  if (!hasPatchMarker(content) && content.includes(TARGET_FUNCTION) && content.includes(TARGET_PROOF)) {
+    return candidate;
   }
   return null;
 }
@@ -219,7 +209,6 @@ class CodexUsageUpsellPatcher {
 module.exports = {
   BACKUP_SUFFIX,
   CodexUsageUpsellPatcher,
-  LEGACY_PATCH_MARKER,
   PATCH_MARKER,
   TARGET_FUNCTION,
   TARGET_PROOF,

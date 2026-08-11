@@ -38,7 +38,7 @@ function serviceTarget(): string {
 }
 
 function settings(config: AppConfig) {
-  if (!config.tunnel) throw new Error("The full harness requires tunnel configuration");
+  if (!config.tunnel) throw new Error("The ChatGPT Web bridge requires tunnel configuration");
   return config.tunnel;
 }
 

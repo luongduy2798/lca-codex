@@ -235,16 +235,6 @@ export async function restartService(config: AppConfig): Promise<ServiceStatus> 
   return getServiceStatus();
 }
 
-export function removeLegacyRuntimeArtifacts(config: AppConfig): void {
-  const legacyWrapper = join(getConfigDir(), "bin", "serve-with-playwright.sh");
-  const legacyVendor = join(getConfigDir(), "vendor");
-  if (config.runtimeCommand.some(part => part === legacyWrapper || part.startsWith(`${legacyVendor}/`))) {
-    throw new Error("Refusing to remove legacy runtime artifacts while the active service still references them");
-  }
-  rmSync(legacyWrapper, { force: true });
-  rmSync(legacyVendor, { recursive: true, force: true });
-}
-
 export async function stopService(config: AppConfig): Promise<ServiceStatus> {
   assertMacOs();
   if (getServiceStatus().loaded) {

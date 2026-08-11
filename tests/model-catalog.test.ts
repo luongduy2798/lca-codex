@@ -44,7 +44,7 @@ describe("native /models augmentation", () => {
   test("preserves every native model in order and appends one LCA Codex model with reasoning choices", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
-    const config = defaultConfig("full");
+    const config = defaultConfig();
     config.proAvailable = true;
     const result = augmentNativeModelCatalog(native, config);
     const models = result.models as Array<Record<string, unknown>>;
@@ -80,7 +80,7 @@ describe("native /models augmentation", () => {
   });
 
   test("keeps the shared LCA Codex model in Codex's V1 spawn-agent model registry", () => {
-    const config = defaultConfig("full");
+    const config = defaultConfig();
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const spawnOverrides = models
@@ -92,14 +92,14 @@ describe("native /models augmentation", () => {
     expect(spawnOverrides).toEqual(["lca-codex", "gpt-5.6-sol"]);
   });
 
-  test("is idempotent, removes stale routed slugs, and hides Pro-only reasoning when unavailable", () => {
+  test("is idempotent, reserves the routed namespace, and hides Pro-only reasoning when unavailable", () => {
     const config = defaultConfig();
     config.proAvailable = false;
     const polluted = source();
     (polluted.models as unknown[]).push(
       { slug: "foreign/gpt-5.6-sol", display_name: "foreign generic route" },
-      { slug: "lca-codex/pro", display_name: "stale Pro route" },
-      { slug: "lca-codex", display_name: "stale shared route" },
+      { slug: "lca-codex/pro", display_name: "unsupported namespaced route" },
+      { slug: "lca-codex", display_name: "existing shared route" },
     );
     const first = augmentNativeModelCatalog(polluted, config);
     const second = augmentNativeModelCatalog(first, config);
@@ -123,7 +123,7 @@ describe("native /models augmentation", () => {
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
-    const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
+    const result = augmentNativeModelCatalog(native, defaultConfig(), {
       model: "lca-codex",
       contextWindow: 371_851,
     });
@@ -149,7 +149,7 @@ describe("native /models augmentation", () => {
     const native = source();
     const models = native.models as Array<Record<string, unknown>>;
     models[0]!.max_context_window = 1_000_000;
-    const result = augmentNativeModelCatalog(native, defaultConfig("full"), {
+    const result = augmentNativeModelCatalog(native, defaultConfig(), {
       model: "gpt-5.6-sol",
       contextWindow: 371_851,
     });
@@ -169,7 +169,7 @@ describe("native /models augmentation", () => {
       shell_type: "shell_command",
     });
 
-    const result = augmentNativeModelCatalog(native, defaultConfig("full"));
+    const result = augmentNativeModelCatalog(native, defaultConfig());
     const routed = (result.models as Array<Record<string, unknown>>)
       .find(model => model.slug === "lca-codex");
     expect(routed?.shell_type).toBe("shell_command");
@@ -188,7 +188,7 @@ describe("native /models augmentation", () => {
     };
     native.models = [sourceModels[0], terra, sol];
 
-    const result = augmentNativeModelCatalog(native, defaultConfig("full"));
+    const result = augmentNativeModelCatalog(native, defaultConfig());
     const routed = (result.models as Array<Record<string, unknown>>)
       .find(model => model.slug === "lca-codex");
     expect(routed?.shell_type).toBe("terra-shell");
@@ -203,6 +203,6 @@ describe("native /models augmentation", () => {
         supported_reasoning_levels: [],
         tool_mode: null,
       }],
-    }, defaultConfig("full"))).toThrow("no list-visible, API-supported, tool-capable model");
+    }, defaultConfig())).toThrow("no list-visible, API-supported, tool-capable model");
   });
 });

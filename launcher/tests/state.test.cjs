@@ -74,9 +74,7 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
   try {
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
-      language: "zh-CN",
-      onboardingComplete: "yes",
-      githubOpened: true,
+      unknownPreference: true,
       autoStart: "yes",
       runtimeAutoStart: "yes",
       keepRunningOnClose: "yes",
@@ -91,34 +89,6 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
       coreSetupComplete: "yes",
     }));
     assert.deepEqual(createStateStore(file).read(), DEFAULT_EXPECTED);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("legacy lifecycle migration keeps an explicit background-window preference", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-legacy-lifecycle-state-"));
-  const file = path.join(root, "state.json");
-  try {
-    fs.writeFileSync(file, JSON.stringify({
-      version: 1,
-      language: "en",
-      onboardingComplete: true,
-      githubOpened: true,
-      autoStart: true,
-      keepRunningOnClose: true,
-      showBrowserDuringTurns: false,
-      connectorName: "  My Connector  ",
-    }));
-    const state = createStateStore(file).read();
-    assert.equal("language" in state, false);
-    assert.equal("onboardingComplete" in state, false);
-    assert.equal("githubOpened" in state, false);
-    assert.equal(state.autoStart, true);
-    assert.equal(state.runtimeAutoStart, false);
-    assert.equal(state.keepRunningOnClose, true);
-    assert.equal(state.showBrowserDuringTurns, false);
-    assert.equal(state.connectorName, "My Connector");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

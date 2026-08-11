@@ -275,7 +275,7 @@ function setupBridge({ coreHome, proxySourcePath, electronExecutable = process.e
       if (!(candidate.path in previousValues)) {
         const previous = readCliSetting(content);
         previousValues[candidate.path] = previous === paths.proxyExecutable
-          ? { present: false, value: null, migratedLegacyProxy: true }
+          ? { present: false, value: null }
           : { present: previous !== undefined, value: previous ?? null };
       }
       const next = setCliSetting(content, paths.proxyExecutable);
@@ -340,7 +340,7 @@ function suspendBridge({ coreHome, proxySourcePath, homeDir = os.homedir(), plat
       stateChanged = true;
     }
     if (!Object.prototype.hasOwnProperty.call(previousValues, candidate.path)) {
-      previousValues[candidate.path] = { present: false, value: null, migratedLegacyProxy: true };
+      previousValues[candidate.path] = { present: false, value: null };
       stateChanged = true;
     }
     const previous = normalizePreviousValue(previousValues[candidate.path]);

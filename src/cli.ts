@@ -5,7 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
+import { defaultConfig, getConfigDir, getConfigPath, loadConfig } from "./config";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import {
   activateCodexIntegration,
@@ -20,7 +20,7 @@ import { runChatGptMcpMain } from "./adapters/lca-codex/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
-import { existingFullSetupCredentials, setup, type SetupOptions } from "./setup";
+import { existingBridgeSetupCredentials, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
@@ -33,7 +33,7 @@ Usage:
   lca-codex setup --tunnel-id ID --runtime-key-file PATH [options]
   lca-codex login
   lca-codex doctor [--json]
-  lca-codex route <status|install|connect|disconnect>
+  lca-codex route <status|install|connect|disconnect|reset> [options]
   lca-codex browser check
   lca-codex serve
   lca-codex mcp [--broker-socket PATH]
@@ -48,13 +48,16 @@ Setup options:
   --browser-host-descriptor PATH
                                Use the embedded launcher browser described by this owner-only file
   --app-name NAME              ChatGPT connector name (default: lca-codex)
-  --tunnel-id ID               Existing OpenAI tunnel id (full mode)
+  --tunnel-id ID               Existing OpenAI tunnel id (ChatGPT Web bridge)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
-  --replace-codex-route        Reversibly replace an existing openai_base_url
+  --replace-codex-route        Reversibly replace existing Codex model routing
   --restart-service            Explicitly restart this project's daemon after an update
   --login                      Refresh the stored ChatGPT login even if one exists
   --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
+Route install options:
+  --replace-codex-route        Reversibly replace an existing Codex route
+  --connect                    Activate the installed route immediately
 
 Global:
   --home PATH                  Override ~/.lca-codex
@@ -145,15 +148,15 @@ async function setupCommand(args: string[]): Promise<void> {
   if (!acknowledged) throw new Error("Setup cancelled: acknowledgement was not provided");
   options.acknowledgedUnofficial = true;
 
-  const existing = existsSync(getConfigPath()) ? loadConfigForSetup() : undefined;
-  const reusableCredentials = existingFullSetupCredentials(existing);
+  const existing = existsSync(getConfigPath()) ? loadConfig() : undefined;
+  const reusableCredentials = existingBridgeSetupCredentials(existing);
   const needsTunnelId = !options.tunnelId && !reusableCredentials.tunnelId;
   const needsRuntimeKey = !options.runtimeKeyFile
     && !reusableCredentials.runtimeKey
     && !existsSync(managedRuntimeKeyPath());
 
   if ((needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
-    stdout.write("The full harness needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
+    stdout.write("The ChatGPT Web bridge needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
     stdout.write("Tunnels: https://platform.openai.com/settings/organization/tunnels\n");
     stdout.write("Runtime keys: https://platform.openai.com/settings/organization/api-keys\n");
     if (needsTunnelId) options.tunnelId = await prompt("Tunnel id: ");
@@ -182,6 +185,8 @@ async function doctorCommand(args: string[]): Promise<void> {
 
 async function routeCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
+  const replaceExistingRoute = action === "install" && takeFlag(args, "--replace-codex-route");
+  const connect = action === "install" && takeFlag(args, "--connect");
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {
@@ -195,9 +200,9 @@ async function routeCommand(args: string[]): Promise<void> {
       })()
     : action === "install"
       ? (() => {
-          const config = existsSync(getConfigPath()) ? loadConfigForSetup() : defaultConfig();
-          preflightCodexIntegration(config, { replaceExistingRoute: true });
-          installCodexIntegration(config, { replaceExistingRoute: true });
+          const config = existsSync(getConfigPath()) ? loadConfig() : defaultConfig();
+          preflightCodexIntegration(config, { replaceExistingRoute });
+          installCodexIntegration(config, { replaceExistingRoute, activate: connect });
           const status = inspectCodexIntegration();
           return {
             installed: status.installed,

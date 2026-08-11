@@ -8,7 +8,7 @@ import {
   defaultBrokerEndpoint,
   defaultConfig,
   getConfigPath,
-  loadConfigForSetup,
+  loadConfig,
   saveConfig,
 } from "./config";
 import {
@@ -23,7 +23,6 @@ import {
   assertServiceIdle,
   getServiceStatus,
   installService,
-  removeLegacyRuntimeArtifacts,
   restartService,
   uninstallService,
 } from "./service";
@@ -56,7 +55,7 @@ export interface SetupResult {
   connectorSetupRequired: boolean;
 }
 
-export interface ExistingFullSetupCredentials {
+export interface ExistingBridgeSetupCredentials {
   tunnelId: boolean;
   runtimeKey: boolean;
 }
@@ -65,7 +64,7 @@ export function launcherCapabilityProbeRequired(existing: AppConfig | undefined)
   return !(existing?.browserHost === "launcher" && typeof existing.proAvailable === "boolean");
 }
 
-export function existingFullSetupCredentials(existing: AppConfig | undefined): ExistingFullSetupCredentials {
+export function existingBridgeSetupCredentials(existing: AppConfig | undefined): ExistingBridgeSetupCredentials {
   const tunnel = existing?.tunnel;
   return {
     tunnelId: Boolean(tunnel?.tunnelId),
@@ -75,7 +74,7 @@ export function existingFullSetupCredentials(existing: AppConfig | undefined): E
 
 function loadExistingConfig(): AppConfig | undefined {
   if (!existsSync(getConfigPath())) return undefined;
-  return loadConfigForSetup();
+  return loadConfig();
 }
 
 function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
@@ -203,14 +202,14 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
   const existingTunnel = existing?.tunnel;
   const tunnelId = options.tunnelId ?? existingTunnel?.tunnelId;
   if (!tunnelId) {
-    throw new Error("Full harness requires --tunnel-id. Create it at https://platform.openai.com/settings/organization/tunnels");
+    throw new Error("The ChatGPT Web bridge requires --tunnel-id. Create it at https://platform.openai.com/settings/organization/tunnels");
   }
   let runtimeKeyFile = existingTunnel?.runtimeKeyFile;
   if (!runtimeKeyFile && existsSync(managedRuntimeKeyPath())) runtimeKeyFile = managedRuntimeKeyPath();
   if (options.runtimeKeyFile) runtimeKeyFile = installRuntimeKey(options.runtimeKeyFile);
   if (options.runtimeKeyValue) runtimeKeyFile = installRuntimeKeyBytes(options.runtimeKeyValue);
   if (!runtimeKeyFile || !existsSync(runtimeKeyFile)) {
-    throw new Error("Full harness requires a runtime key. Import it interactively or pass --runtime-key-file; create it at https://platform.openai.com/settings/organization/api-keys");
+    throw new Error("The ChatGPT Web bridge requires a runtime key. Import it interactively or pass --runtime-key-file; create it at https://platform.openai.com/settings/organization/api-keys");
   }
   const installedBinary = await installTunnelClient();
   config.tunnel = createTunnelConfig({
@@ -263,11 +262,11 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   const beforeService = getServiceStatus();
   if (launcherOwned && (beforeService.installed || beforeService.loaded)) {
     if (!existing) {
-      throw new Error("A legacy background service exists without a verifiable configuration; refusing automatic migration");
+      throw new Error("A terminal-owned background service exists without a verifiable configuration; refusing automatic ownership transfer");
     }
     if (!options.restartService) {
       throw new Error(
-        "Launcher ownership migration must stop the legacy background service. "
+        "Launcher ownership transfer must stop the terminal-owned background service. "
         + "Retry from the launcher after the active Codex task finishes.",
       );
     }
@@ -363,14 +362,11 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     await uninstallService(existing!);
   }
   if (launcherOwned) saveConfig(config);
-  // Keep the previous terminal runtime intact through the ownership handoff. A later launcher
-  // setup removes it once the launcher-owned configuration is already the established baseline.
-  const migratingTerminalRuntime = Boolean(
-    launcherOwned && existing && existing.browserHost !== "launcher",
-  );
-  if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
+    // The launcher starts and verifies its supervised runtime after this setup transaction. Keep
+    // Codex on its previous route until that readiness gate has passed.
+    activate: !launcherOwned,
   });
 
   return {

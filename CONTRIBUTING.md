@@ -6,7 +6,7 @@ OpenCodex product surfaces are out of scope.
 Core invariants:
 
 - Model selection is explicit; never silently fall back to another model or reasoning level.
-- The full Codex harness is the only supported runtime; its OpenAI tunnel and ChatGPT MCP connector
+- The ChatGPT Web bridge is the only supported runtime; its OpenAI tunnel and ChatGPT MCP connector
   are required core setup.
 - Local tools are exposed only through the active outer Codex registry and official MCP tunnel;
   Pro remains intentionally read-only for local workspace tools.

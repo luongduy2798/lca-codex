@@ -18,7 +18,9 @@ launcher-owned lca-codex daemon
 
 ## Runtime contract
 
-LCA Codex has one supported runtime shape: the full Codex harness.
+LCA Codex has one supported runtime shape: the ChatGPT Web bridge. Codex remains the only agent
+harness; LCA transports a selected turn to ChatGPT Web and connects that response back to the
+current Codex task.
 
 - Exposes one `lca-codex` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
   matching ChatGPT browser reasoning mode; Extra High and Pro are advertised only when the
@@ -30,6 +32,12 @@ LCA Codex has one supported runtime shape: the full Codex harness.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
 - Runtime readiness is conjunctive: both the tunnel and the Responses daemon must be healthy. The
   launcher starts the tunnel first and never reports the runtime Ready when tunnel readiness is lost.
+
+The reversible Codex integration deliberately installs a Web-compatibility profile:
+`multi_agent = true` preserves routed subagent turns, `multi_agent_v2 = false` keeps their payloads
+readable by the current Web projection, and `remote_compaction_v2 = false` bounds retained Web image
+history. These settings adapt the outer Codex harness to ChatGPT Web constraints; they do not move
+planning, tool ownership, sandboxing, or approvals into LCA Codex.
 
 ## Browser lifecycle
 
@@ -132,12 +140,12 @@ harmless exec/stdin smoke semantics live in the dedicated Codex tool-health modu
 
 Native login items or an owner-local XDG autostart file launch the app hidden after sign-in. A marker
 containing only launcher-owned PIDs lets doctor distinguish the launcher runtime from a stale or
-external process. Legacy macOS launchd services are drained and removed during an explicit launcher
-migration; launchd remains only for the advanced terminal-only mode.
+external process. Terminal-managed macOS launchd services are drained and removed during an
+explicit launcher ownership transfer; launchd remains only for the advanced terminal-only mode.
 
 Setup keeps Codex's built-in `openai` provider and switches only `openai_base_url`. The daemon
 forwards the authenticated official model catalog and appends only the single routed `lca-codex`
-model; stale `lca-codex/*` routes are removed locally and no static catalog is installed.
+model; unsupported `lca-codex/*` routes are removed locally and no static catalog is installed.
 
 The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
 HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky

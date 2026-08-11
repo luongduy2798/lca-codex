@@ -294,6 +294,46 @@ test("launcher activity links task traces to the latest local Codex chat title",
   }
 });
 
+test("launcher activity incrementally refreshes appended Codex chat titles", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-thread-title-append-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const threadIndexPath = path.join(root, "session_index.jsonl");
+  const published = [];
+  const originalNow = Date.now;
+  let now = originalNow();
+  try {
+    Date.now = () => now;
+    fs.writeFileSync(threadIndexPath, `${JSON.stringify({
+      id: "thread_append_123",
+      thread_name: "Initial title",
+    })}\n`);
+    const logger = createLogger({ filePath, threadIndexPath, publish: record => published.push(record) });
+    logger.info("lca_codex.turn_started", {
+      traceId: "trace_append_123",
+      threadId: "thread_append_123",
+    });
+
+    fs.appendFileSync(threadIndexPath, `${JSON.stringify({
+      id: "thread_append_123",
+      thread_name: "Updated title",
+    })}\n`);
+    now += 1_001;
+    logger.info("browser.turn_started", { traceId: "trace_append_123" });
+
+    assert.deepEqual(published.map(record => record.detail.chatTitle), [
+      "Initial title",
+      "Updated title",
+    ]);
+    assert.equal(
+      logger.activityChatsPage({ limit: 20 }).chats[0].title,
+      "Updated title",
+    );
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a closed Windows diagnostic pipe is recorded without becoming an uncaught process error", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-process-pipe-"));
   const filePath = path.join(root, "process-stream-errors.log");

@@ -44,6 +44,44 @@ test("setup validates the port before performing runtime work", async () => {
   }
 });
 
+test("route install preserves an existing Codex route unless replacement is explicit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-route-"));
+  const codexHome = join(root, "codex");
+  const configPath = join(codexHome, "config.toml");
+  const original = 'model = "gpt-5.6-sol"\nopenai_base_url = "https://native.example/v1"\n';
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(configPath, original);
+  try {
+    const result = await runCli(["route", "install"], {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      LCA_CODEX_HOME: join(root, "app"),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--replace-codex-route");
+    expect(await Bun.file(configPath).text()).toBe(original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("route install remains disconnected unless activation is explicit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-route-disconnected-"));
+  const codexHome = join(root, "codex");
+  mkdirSync(codexHome, { recursive: true });
+  try {
+    const result = await runCli(["route", "install"], {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      LCA_CODEX_HOME: join(root, "app"),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ installed: true, active: false });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("terminal uninstall refuses to race a launcher-owned runtime", async () => {
   const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-uninstall-"));
   const appHome = join(root, "app");
@@ -93,7 +131,7 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
   }
 });
 
-test("authorized launcher uninstall does not re-probe an already stopped full runtime", async () => {
+test("authorized launcher uninstall does not re-probe an already stopped bridge runtime", async () => {
   const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-launcher-uninstall-"));
   const appHome = join(root, "app");
   const codexHome = join(root, "codex");

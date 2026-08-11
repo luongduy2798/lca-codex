@@ -25,10 +25,14 @@ function registeredToolBlock(name: string): string {
   return mcpServer.slice(start, next < 0 ? mcpServer.length : next);
 }
 
-test("architecture keeps Codex as the sole harness and execution authority", () => {
+test("architecture defines LCA as a bridge and Codex as the sole harness and execution authority", () => {
+  expect(architecture).toContain("Codex remains the only agent\nharness");
   expect(architecture).toContain("`lca-codex` never\ndiscovers AGENTS.md or chooses a skill itself");
   expect(architecture).toContain("preserving Codex\nsandbox, approvals, sessions, and tool lifecycle as the execution authority");
   expect(architecture).toContain("Tool calls and results remain in the same ChatGPT response while Codex executes them locally.");
+  expect(architecture).toContain("`multi_agent = true` preserves routed subagent turns");
+  expect(architecture).toContain("`multi_agent_v2 = false` keeps their payloads");
+  expect(architecture).toContain("`remote_compaction_v2 = false` bounds retained Web image");
 });
 
 test("LCA Codex adapter does not independently discover AGENTS or skill files", () => {

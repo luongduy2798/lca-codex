@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { defaultConfig } from "../src/config";
 import { TUNNEL_READY_TIMEOUT_MS, createTunnelConfig, mcpCommand } from "../src/tunnel";
 import { tunnelServiceDefinition } from "../src/tunnel-service";
-import { existingFullSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
+import { existingBridgeSetupCredentials, tunnelWorkerRuntimeChanged } from "../src/setup";
 
 const roots: string[] = [];
 
@@ -61,7 +61,7 @@ describe("tunnel launchd ownership", () => {
     mkdirSync(join(root, "secrets"), { recursive: true });
     writeFileSync(binary, "binary");
     writeFileSync(key, "secret");
-    const config = defaultConfig("full");
+    const config = defaultConfig();
     config.tunnel = createTunnelConfig({
       binaryPath: binary,
       runtimeKeyFile: key,
@@ -97,24 +97,24 @@ describe("tunnel launchd ownership", () => {
     expect(tunnelWorkerRuntimeChanged(before, after)).toBe(false);
   });
 
-  test("reuses complete full-mode tunnel credentials during setup updates", () => {
+  test("reuses complete bridge tunnel credentials during setup updates", () => {
     const root = join(tmpdir(), `lca-codex-existing-tunnel-${process.pid}-${Date.now()}`);
     roots.push(root);
     process.env.LCA_CODEX_HOME = root;
     const key = join(root, "secrets", "runtime.key");
     mkdirSync(join(root, "secrets"), { recursive: true });
     writeFileSync(key, "secret");
-    const config = defaultConfig("full");
+    const config = defaultConfig();
     config.tunnel = createTunnelConfig({
       binaryPath: process.execPath,
       runtimeKeyFile: key,
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
     });
 
-    expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: true });
+    expect(existingBridgeSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: true });
     rmSync(key);
-    expect(existingFullSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: false });
-    expect(existingFullSetupCredentials(defaultConfig())).toEqual({ tunnelId: false, runtimeKey: false });
+    expect(existingBridgeSetupCredentials(config)).toEqual({ tunnelId: true, runtimeKey: false });
+    expect(existingBridgeSetupCredentials(defaultConfig())).toEqual({ tunnelId: false, runtimeKey: false });
   });
 
   test("passes the Windows MCP runtime directly to tunnel-client without cmd.exe", () => {

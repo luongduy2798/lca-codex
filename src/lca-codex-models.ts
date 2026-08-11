@@ -2,7 +2,7 @@ export const LCA_CODEX_MODEL_SLUG = "lca-codex";
 export const LCA_CODEX_MODEL_PREFIX = `${LCA_CODEX_MODEL_SLUG}/`;
 export const LCA_CODEX_MODEL_DISPLAY_NAME = "LCA Codex";
 export const LCA_CODEX_MODEL_DESCRIPTION = "LCA Codex through the native Codex harness.";
-export const LCA_CODEX_BACKEND_MODEL = "gpt-5.6-sol";
+export const LCA_CODEX_BASE_MODEL = "gpt-5.6-sol";
 
 export type LcaCodexCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type LcaCodexAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -83,7 +83,7 @@ export const LCA_CODEX_MODEL: LcaCodexModelDescriptor = {
   description: LCA_CODEX_MODEL_DESCRIPTION,
 };
 
-/** Treat stale lca-codex/* slugs as owned so they fail locally instead of leaking upstream. */
+/** Reserve the lca-codex namespace so unsupported routed slugs cannot leak upstream. */
 export function isLcaCodexModelSlug(modelId: string): boolean {
   return modelId === LCA_CODEX_MODEL_SLUG || modelId.startsWith(LCA_CODEX_MODEL_PREFIX);
 }

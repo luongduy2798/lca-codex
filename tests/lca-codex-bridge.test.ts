@@ -25,7 +25,11 @@ import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compac
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
-const tempRoot = join(tmpdir(), `lca-codex-harness-${process.pid}-${Date.now()}`);
+function observeHtml(buffer: ChatGptMarkdownBuffer, html: string): string {
+  return buffer.observeRoots([{ key: "root", html }]);
+}
+
+const tempRoot = join(tmpdir(), `lca-codex-bridge-${process.pid}-${Date.now()}`);
 mkdirSync(tempRoot, { recursive: true });
 afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
 
@@ -134,7 +138,7 @@ function toolResult(value: Record<string, unknown>): BrokerToolResult {
   };
 }
 
-describe("ChatGPT outer-native harness v3", () => {
+describe("LCA Codex ChatGPT Web bridge v3", () => {
   test("rejects an opaque MultiAgent V2 child payload before starting the browser", async () => {
     const request = parseRequest({
       model: "lca-codex",
@@ -1068,14 +1072,14 @@ describe("ChatGPT outer-native harness v3", () => {
     const secondStable = secondMarkdown.slice(0, prefixLength(secondMarkdown, thirdMarkdown));
 
     const buffer = new ChatGptMarkdownBuffer();
-    expect(buffer.observeHtml(firstHtml)).toBe("");
-    expect(buffer.observeHtml(secondHtml)).toBe(firstStable);
+    expect(observeHtml(buffer, firstHtml)).toBe("");
+    expect(observeHtml(buffer, secondHtml)).toBe(firstStable);
     expect(firstStable).toContain("## Plan");
     expect(firstStable).toContain("**Runtime**");
     expect(firstStable).toContain("- alpha\n- beta");
     expect(firstStable).toContain("`run()`");
     expect(firstStable).toContain("const x = 1;");
-    expect(buffer.observeHtml(thirdHtml)).toBe(secondStable.slice(firstStable.length));
+    expect(observeHtml(buffer, thirdHtml)).toBe(secondStable.slice(firstStable.length));
     const final = buffer.finish();
     expect(final.markdown).toBe(thirdMarkdown);
     expect(`${firstStable}${secondStable.slice(firstStable.length)}${final.delta}`).toBe(thirdMarkdown);
@@ -1083,7 +1087,7 @@ describe("ChatGPT outer-native harness v3", () => {
 
   test("unchanged Markdown roots reuse cached serialization and only changed roots rerun Turndown", () => {
     let serializations = 0;
-    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0, {}, html => {
+    const buffer = new ChatGptMarkdownBuffer(html => {
       serializations += 1;
       return chatGptHtmlToMarkdown(html);
     });
@@ -1106,7 +1110,7 @@ describe("ChatGPT outer-native harness v3", () => {
 
   test("large answers keep Markdown serialization proportional to changed roots", () => {
     let serializations = 0;
-    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0, {}, html => {
+    const buffer = new ChatGptMarkdownBuffer(html => {
       serializations += 1;
       return chatGptHtmlToMarkdown(html);
     });
@@ -1129,10 +1133,10 @@ describe("ChatGPT outer-native harness v3", () => {
     const head = "Head section remains cached before virtualization. ";
     const overlap = "Shared overlap that is comfortably longer than thirty two characters. ";
     const buffer = new ChatGptMarkdownBuffer();
-    expect(buffer.observeHtml(`<p>${head}${overlap}</p>`)).toBe("");
-    expect(buffer.observeHtml(`<p>${head}${overlap}Tail one.</p>`)).toBe(`${head}${overlap}`.trimEnd());
-    expect(buffer.observeHtml(`<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail one.");
-    expect(buffer.observeHtml(`<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail two.");
+    expect(observeHtml(buffer, `<p>${head}${overlap}</p>`)).toBe("");
+    expect(observeHtml(buffer, `<p>${head}${overlap}Tail one.</p>`)).toBe(`${head}${overlap}`.trimEnd());
+    expect(observeHtml(buffer, `<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail one.");
+    expect(observeHtml(buffer, `<p>${overlap}Tail one. Tail two.</p>`)).toBe(" Tail two.");
     expect(buffer.finish()).toEqual({
       markdown: `${head}${overlap}Tail one. Tail two.`,
       delta: "",
@@ -1143,19 +1147,19 @@ describe("ChatGPT outer-native harness v3", () => {
     const firstHtml = "<div><div><h3>Feature plan</h3><p>First section</p></div></div>";
     const secondHtml = "<div><div><h3>Feature plan</h3><p>First section grows while visible</p></div></div>";
     const buffer = new ChatGptMarkdownBuffer();
-    expect(buffer.observeHtml(firstHtml)).toBe("");
-    const delta = buffer.observeHtml(secondHtml);
+    expect(observeHtml(buffer, firstHtml)).toBe("");
+    const delta = observeHtml(buffer, secondHtml);
     expect(delta).toContain("### Feature plan");
     expect(delta).toContain("First section");
   });
 
   test("temporary visible rewrites pause append-only mirroring and resume when the emitted prefix returns", () => {
     const buffer = new ChatGptMarkdownBuffer();
-    expect(buffer.observeHtml("<p>Alpha beta</p>")).toBe("");
-    expect(buffer.observeHtml("<p>Alpha beta gamma</p>")).toBe("Alpha beta");
-    expect(buffer.observeHtml("<p>Alpha zeta gamma</p>")).toBe("");
-    expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe("");
-    expect(buffer.observeHtml("<p>Alpha beta gamma delta</p>")).toBe(" gamma delta");
+    expect(observeHtml(buffer, "<p>Alpha beta</p>")).toBe("");
+    expect(observeHtml(buffer, "<p>Alpha beta gamma</p>")).toBe("Alpha beta");
+    expect(observeHtml(buffer, "<p>Alpha zeta gamma</p>")).toBe("");
+    expect(observeHtml(buffer, "<p>Alpha beta gamma delta</p>")).toBe("");
+    expect(observeHtml(buffer, "<p>Alpha beta gamma delta</p>")).toBe(" gamma delta");
     expect(buffer.finish()).toEqual({ markdown: "Alpha beta gamma delta", delta: "" });
   });
 
@@ -1164,9 +1168,9 @@ describe("ChatGPT outer-native harness v3", () => {
     const stalled = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ t</strong></p>";
     const completed = "<p>Đã tiếp và fix đúng lỗi đó: <strong>Check tools giờ không còn phụ thuộc vào việc đang có Codex task chạy</strong>.</p>";
 
-    expect(buffer.observeHtml(stalled)).toBe("");
-    expect(buffer.observeHtml(stalled)).toBe("");
-    expect(buffer.observeHtml(completed)).toBe("Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ t");
+    expect(observeHtml(buffer, stalled)).toBe("");
+    expect(observeHtml(buffer, stalled)).toBe("");
+    expect(observeHtml(buffer, completed)).toBe("Đã tiếp và fix đúng lỗi đó: **Check tools giờ không còn phụ t");
 
     const final = buffer.finish();
     expect(final).toEqual({
@@ -1176,29 +1180,29 @@ describe("ChatGPT outer-native harness v3", () => {
     expect(final.markdown.indexOf("Đã tiếp và fix đúng lỗi đó", 1)).toBe(-1);
   });
 
-  test("a near-tail browser replay resumes without appending the answer from the beginning", () => {
+  test("a near-tail browser replay is surfaced intact as an explicit correction", () => {
     const stablePrefix = "Stable answer prefix that has already streamed to Codex. ".repeat(4);
     const first = `${stablePrefix}request-receivX`;
     const growing = `${first} old tail`;
     const replayed = `${stablePrefix}request-received new tail and completed answer`;
-    const buffer = new ChatGptMarkdownBuffer(markdown => markdown);
+    const buffer = new ChatGptMarkdownBuffer();
 
-    expect(buffer.observeHtml(`<p>${first}</p>`)).toBe("");
-    expect(buffer.observeHtml(`<p>${growing}</p>`)).toBe(first);
-    expect(buffer.observeHtml(`<p>${replayed}</p>`)).toBe("");
+    expect(observeHtml(buffer, `<p>${first}</p>`)).toBe("");
+    expect(observeHtml(buffer, `<p>${growing}</p>`)).toBe(first);
+    expect(observeHtml(buffer, `<p>${replayed}</p>`)).toBe("");
     const final = buffer.finish();
 
-    expect(final.markdown.startsWith(first)).toBe(true);
-    expect(final.markdown.indexOf(stablePrefix, stablePrefix.length)).toBe(-1);
-    expect(final.delta).not.toContain(stablePrefix);
-    expect(final.markdown.endsWith("completed answer")).toBe(true);
+    expect(final).toEqual({
+      delta: `\n\n${replayed}`,
+      markdown: `${first}\n\n${replayed}`,
+    });
   });
 
   test("a permanent late rewrite is appended as a final correction instead of crashing the turn", () => {
     const buffer = new ChatGptMarkdownBuffer();
-    expect(buffer.observeHtml("<p>Original answer</p>")).toBe("");
-    expect(buffer.observeHtml("<p>Original answer grows</p>")).toBe("Original answer");
-    expect(buffer.observeHtml("<p>Rewritten final answer</p>")).toBe("");
+    expect(observeHtml(buffer, "<p>Original answer</p>")).toBe("");
+    expect(observeHtml(buffer, "<p>Original answer grows</p>")).toBe("Original answer");
+    expect(observeHtml(buffer, "<p>Rewritten final answer</p>")).toBe("");
     expect(buffer.finish()).toEqual({
       delta: "\n\nRewritten final answer",
       markdown: "Original answer\n\nRewritten final answer",
@@ -1759,7 +1763,7 @@ describe("ChatGPT outer-native harness v3", () => {
       cwd: process.cwd(),
       stderr: "pipe",
     });
-    const client = new Client({ name: "lca-codex-harness-test", version: "1.0.0" });
+    const client = new Client({ name: "lca-codex-bridge-test", version: "1.0.0" });
     const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
 
     try {
@@ -1779,6 +1783,7 @@ describe("ChatGPT outer-native harness v3", () => {
       const bound = await call("codex_bind_turn", { turn_token: token });
       const bindingId = (bound.structuredContent as { binding_id?: string } | undefined)?.binding_id;
       expect(bindingId).toStartWith("binding_");
+      expect((bound.structuredContent as { bridge_protocol_version: number }).bridge_protocol_version).toBe(3);
       expect((bound.structuredContent as { execution: string }).execution).toBe("outer_codex_native");
       expect((bound.structuredContent as { outer_tool_gateway: string }).outer_tool_gateway).toBe("exec");
       expect((bound.structuredContent as { command_tool: string }).command_tool).toBe("exec_command");
@@ -1841,7 +1846,7 @@ describe("ChatGPT outer-native harness v3", () => {
       cwd: process.cwd(),
       stderr: "pipe",
     });
-    const client = new Client({ name: "lca-codex-harness-test", version: "1.0.0" });
+    const client = new Client({ name: "lca-codex-bridge-test", version: "1.0.0" });
     const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
 
     try {

@@ -6,7 +6,7 @@ The user trusts the local Codex app, this loopback daemon, the launcher's privat
 profile, the selected ChatGPT workspace, OpenAI's tunnel service, and the exact MCP connector they
 created. Repository contents, tool output, websites, and prompt text are untrusted data.
 
-## Full-mode capability flow
+## Tool-bridge capability flow
 
 1. The daemon accepts a Codex Responses turn on `127.0.0.1`.
 2. It extracts `cwd`, workspace roots, sandbox policy, and the tool registry only from the native
@@ -25,10 +25,10 @@ model. Unsupported model/effort/tool combinations fail explicitly.
 
 ### Prompt injection and destructive tool use
 
-ChatGPT sees repository content and tool results that may contain hostile instructions. Full mode
-can invoke write and command tools. Use a trusted workspace, keep Codex sandbox/approval settings
-appropriate, and grant only intended connector actions. Automatic per-call approval is off by
-default.
+ChatGPT sees repository content and tool results that may contain hostile instructions. Tool-capable
+bridge turns can invoke write and command tools. Use a trusted workspace, keep Codex sandbox/approval
+settings appropriate, and grant only intended connector actions. Automatic per-call approval is off
+by default.
 
 ### Browser session theft
 
@@ -77,8 +77,8 @@ response; the bridge does not fabricate or install a Codex history checkpoint.
 ## Network exposure
 
 - Responses and health listeners bind to `127.0.0.1` only.
-- Full mode uses OpenAI's outbound HTTPS Secure MCP Tunnel; it opens no public listener or inbound
-  firewall rule.
+- The tool bridge uses OpenAI's outbound HTTPS Secure MCP Tunnel; it opens no public listener or
+  inbound firewall rule.
 - The embedded browser connects to ChatGPT and user-authorized attachment URLs through normal
   browser networking.
 

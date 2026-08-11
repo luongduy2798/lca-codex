@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { readCodexModelContextOverride, type CodexModelContextOverride } from "./codex-integration";
 import {
-  LCA_CODEX_BACKEND_MODEL,
+  LCA_CODEX_BASE_MODEL,
   isLcaCodexModelSlug,
   requireLcaCodexModel,
   resolveLcaCodexReasoningMode,
@@ -149,7 +149,7 @@ type LcaCodexAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter
 export function routeLcaCodexRequest(parsed: CodexParsedRequest, config: AppConfig): LcaCodexModelDescriptor {
   const model = requireLcaCodexModel(parsed.modelId);
   const mode = resolveLcaCodexReasoningMode(parsed.options.reasoning, config.proAvailable);
-  parsed.modelId = LCA_CODEX_BACKEND_MODEL;
+  parsed.modelId = LCA_CODEX_BASE_MODEL;
   parsed.options.reasoning = mode.adapterEffort;
   return model;
 }

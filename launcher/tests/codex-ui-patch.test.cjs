@@ -6,7 +6,6 @@ const path = require("node:path");
 const {
   BACKUP_SUFFIX,
   CodexUsageUpsellPatcher,
-  LEGACY_PATCH_MARKER,
   PATCH_MARKER,
 } = require("../electron/codex-ui-patch.cjs");
 
@@ -77,22 +76,5 @@ test("Codex usage-limit patch targets the newest installed official extension", 
   } finally {
     fs.rmSync(older.root, { recursive: true, force: true });
     fs.rmSync(newer.root, { recursive: true, force: true });
-  }
-});
-
-test("existing legacy LCA Codex patch and backup are recognized and can be restored", () => {
-  const original = "prefix;function fjt(e){let n=e.rateLimitStatus;const x='codex.upsellBanner.general.title';return n};suffix";
-  const fx = fixture("26.5803.41515", original.replace("function fjt(e){", `function fjt(e){${LEGACY_PATCH_MARKER}if(e?.rateLimitStatus?.rate_limit?.limit_reached===!0)return null;`));
-  try {
-    fs.writeFileSync(`${fx.bundle}.lca-codex-rate-limit-bak`, original);
-    const patcher = patcherFor(fx.extensions);
-    const status = patcher.inspect();
-    assert.equal(status.state, "applied");
-    assert.equal(status.backupAvailable, true);
-    const restored = patcher.restore();
-    assert.equal(restored.state, "available");
-    assert.equal(fs.readFileSync(fx.bundle, "utf8"), original);
-  } finally {
-    fs.rmSync(fx.root, { recursive: true, force: true });
   }
 });

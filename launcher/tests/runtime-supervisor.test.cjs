@@ -142,7 +142,7 @@ test("launcher runtime ownership rejects a different browser descriptor", () => 
   );
 });
 
-test("launcher runtime validation rejects a relative full-mode executable before spawn", () => {
+test("launcher runtime validation rejects a relative bridge executable before spawn", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   assert.throws(() => validateConfig(launcherConfig(descriptorPath, {
     mode: "full",
@@ -869,6 +869,73 @@ test("stopping a tunnel monitor invalidates results from its previous generation
   }
 });
 
+test("tunnel monitor drains new turns after sustained loss and resumes after recovery", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-tunnel-monitor-quarantine-"));
+  const controls = [];
+  const states = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const observations = [
+    { statusKnown: true, ready: false, detail: "offline" },
+    { statusKnown: true, ready: false, detail: "offline" },
+    { statusKnown: true, ready: false, detail: "offline" },
+    { statusKnown: true, ready: true, pid: 123_456_780, detail: "ready" },
+  ];
+  supervisor.tunnel = { pid: 123_456_780, exitCode: null, signalCode: null, managed: true };
+  supervisor.observeTunnelForMonitor = async () => observations.shift();
+  supervisor.control = async (_config, action) => {
+    controls.push(action);
+    return action === "drain"
+      ? { status: "ok", accepting_turns: false, active_http_turns: 1, active_browser_turns: 1 }
+      : { status: "ok", accepting_turns: true, active_http_turns: 0, active_browser_turns: 0 };
+  };
+  supervisor.tryWriteState = status => { states.push(status); };
+  supervisor.publishRuntime = () => {};
+
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  let poll;
+  global.setInterval = (callback) => {
+    poll = callback;
+    return { unref() {} };
+  };
+  global.clearInterval = () => {};
+  try {
+    supervisor.startTunnelMonitor({});
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+
+  const runPoll = async () => {
+    poll();
+    while (supervisor.tunnelMonitorInFlight) await new Promise(resolve => setImmediate(resolve));
+  };
+  try {
+    await runPoll();
+    await runPoll();
+    await runPoll();
+    assert.deepEqual(controls, ["drain"]);
+    assert.equal(supervisor.tunnelQuarantined, true);
+    assert.equal(supervisor.tunnel.pid, 123_456_780);
+
+    await runPoll();
+    assert.deepEqual(controls, ["drain", "resume"]);
+    assert.equal(supervisor.tunnelQuarantined, false);
+    assert.equal(supervisor.tunnel.pid, 123_456_780);
+    assert.deepEqual(states, ["degraded", "ready"]);
+  } finally {
+    supervisor.tunnelMonitorTimer = null;
+    supervisor.stopTunnelMonitor();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher shutdown reacquires a managed tunnel that was between monitor and recovery states", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-tunnel-stop-reconcile-"));
   const supervisor = new RuntimeSupervisor({
@@ -881,7 +948,7 @@ test("launcher shutdown reacquires a managed tunnel that was between monitor and
   const config = { mode: "full", tunnel: { alias: "lca-codex" } };
   let stops = 0;
   let confirmations = 0;
-  supervisor.readConfig = () => config;
+  supervisor.readSetupConfig = () => config;
   supervisor.readTunnelHealth = async () => ({
     ready: true,
     pid: 123_456_779,
@@ -975,33 +1042,100 @@ test("manual restart is a full stop followed by a fresh start", async () => {
   assert.deepEqual(calls, ["stop", "start"]);
 });
 
-test("manual stop never kills an unverified stale PID", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-unverified-stop-"));
+test("manual stop recovers a detached stale runtime before adopting its tunnel", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-detached-stop-"));
   const descriptorPath = path.join(root, "launcher.json");
-  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
-  const warnings = [];
-  let forced = 0;
-  let cleared = 0;
+  const config = launcherConfig(descriptorPath);
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
-    logger: { info() {}, warn(event, detail) { warnings.push([event, detail]); }, error() {} },
+    logger: { info() {}, warn() {}, error() {} },
     sourceRoot: root,
     coreHome: root,
     browserDescriptorPath: descriptorPath,
   });
-  supervisor.readConfig = () => config;
+  const calls = [];
+  supervisor.readSetupConfig = () => config;
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: 123_456_780,
+    tunnelPid: 123_456_781,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealth = async () => true;
+  supervisor.stopStaleOwnedRuntime = async () => {
+    calls.push("recover");
+    return true;
+  };
+  supervisor.adoptConfiguredTunnelForStop = async () => {
+    calls.push("adopt");
+  };
+  try {
+    assert.deepEqual(await supervisor.performStopForSetup(), { status: "stopped" });
+    assert.deepEqual(calls, ["recover"]);
+    assert.equal(supervisor.stopping, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual stop does not alter a healthy runtime without launcher ownership evidence", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-unowned-stop-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  const calls = [];
+  supervisor.readSetupConfig = () => launcherConfig(descriptorPath);
+  supervisor.readState = () => null;
+  supervisor.proxyHealth = async () => true;
+  supervisor.adoptConfiguredTunnelForStop = async () => {
+    calls.push("adopt");
+  };
+  try {
+    await assert.rejects(
+      supervisor.performStopForSetup(),
+      /healthy runtime is missing launcher ownership evidence/,
+    );
+    assert.deepEqual(calls, []);
+    assert.equal(supervisor.stopping, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual stop fails closed for an unverified stale PID", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-unverified-stop-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  let forced = 0;
+  let cleared = 0;
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.readSetupConfig = () => config;
   supervisor.readState = () => ({ daemonPid: process.pid, tunnelPid: null });
   supervisor.proxyHealthPayload = async () => null;
-  supervisor.daemonPidMatchesRuntimeCommand = () => false;
+  supervisor.proxyHealth = async () => false;
+  supervisor.adoptConfiguredTunnelForStop = async () => {};
   supervisor.forceStopVerifiedPid = async () => { forced += 1; };
   supervisor.clearState = () => { cleared += 1; };
-  supervisor.observeRuntime = async () => ({ configured: true, lifecycle: "stopped", owner: "none" });
   try {
-    const status = await supervisor.performUserStop();
-    assert.equal(status.lifecycle, "stopped");
+    await assert.rejects(
+      supervisor.performUserStop(),
+      /still alive but did not provide matching health evidence/,
+    );
     assert.equal(forced, 0);
-    assert.equal(cleared, 1);
-    assert.equal(warnings.some(([event]) => event === "runtime.stale_daemon_marker_discarded"), true);
+    assert.equal(cleared, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1354,7 +1488,7 @@ test("launcher clears an empty stale ownership marker when Windows reuses its PI
   }
 });
 
-test("a failed full-runtime marker with no child evidence cannot block removal on a stalled tunnel probe", async () => {
+test("a failed bridge-runtime marker with no child evidence cannot block removal on a stalled tunnel probe", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-dead-runtime-removal-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
   const configPath = path.join(root, "config.json");
@@ -1500,6 +1634,18 @@ process.once("SIGTERM", () => server.close(() => process.exit(0)));
       cwd: root,
     }),
   });
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    state: "stopped",
+    processRunning: false,
+    absent: true,
+  });
+  supervisor.startTunnel = async () => {
+    supervisor.tunnel = { pid: null, exitCode: null, signalCode: null, managed: true };
+  };
+  supervisor.tunnelHealth = async () => true;
+  supervisor.stopTunnelGracefully = async () => {
+    supervisor.tunnel = null;
+  };
 
   try {
     const started = await supervisor.startIfConfigured();
@@ -1588,6 +1734,18 @@ server.listen(config.port, config.host);
       cwd: root,
     }),
   });
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    state: "stopped",
+    processRunning: false,
+    absent: true,
+  });
+  supervisor.startTunnel = async () => {
+    supervisor.tunnel = { pid: null, exitCode: null, signalCode: null, managed: true };
+  };
+  supervisor.tunnelHealth = async () => true;
+  supervisor.stopTunnelGracefully = async () => {
+    supervisor.tunnel = null;
+  };
 
   try {
     const deadline = Date.now() + 5_000;

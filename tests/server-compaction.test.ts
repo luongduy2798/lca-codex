@@ -35,7 +35,7 @@ function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
 
 test("compacts LCA Codex v1 through a dedicated read-only browser summarization turn", async () => {
   const providers: CodexProviderConfig[] = [];
-  const config = defaultConfig("full");
+  const config = defaultConfig();
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -77,7 +77,7 @@ test("preserves canonical Codex turn metadata from the compact endpoint header",
         internal_chat_message_metadata_passthrough: { turn_id: turnMetadata.turn_id },
       }],
     }),
-  }), defaultConfig("full"), () => ({
+  }), defaultConfig(), () => ({
     name: "metadata-check",
     async runTurn(parsed, _incoming, emit) {
       expect(extractChatGptTurnIdentity(parsed)).toMatchObject({
@@ -109,7 +109,7 @@ test("compaction identity accepts a historical source message from the pre-compa
         internal_chat_message_metadata_passthrough: { turn_id: "turn_before_compaction" },
       }],
     }),
-  }), defaultConfig("full"), () => ({
+  }), defaultConfig(), () => ({
     name: "compaction-identity-check",
     async runTurn(parsed, _incoming, emit) {
       expect(() => chatGptTurnExecutionKey(parsed)).not.toThrow();
@@ -124,7 +124,7 @@ test("compaction identity accepts a historical source message from the pre-compa
 
 test("returns exactly one native compaction item for a LCA Codex v2 request", async () => {
   const providers: CodexProviderConfig[] = [];
-  const config = defaultConfig("full");
+  const config = defaultConfig();
   const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -156,7 +156,7 @@ test("streams one compaction item without leaking the summary as a normal assist
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model, stream: true, input: [{ type: "compaction_trigger" }] }),
-  }), defaultConfig("full"), compactionAdapterFactory());
+  }), defaultConfig(), compactionAdapterFactory());
 
   expect(response.status).toBe(200);
   const sse = await response.text();

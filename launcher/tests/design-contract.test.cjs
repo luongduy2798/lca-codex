@@ -8,6 +8,7 @@ const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "ut
 const styles = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const runtimeLifecycleSource = fs.readFileSync(path.join(launcherRoot, "electron", "runtime-lifecycle.cjs"), "utf8");
+const setupSource = fs.readFileSync(path.join(launcherRoot, "..", "src", "setup.ts"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
 const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
@@ -158,7 +159,8 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(appSource, /runtimeModeLabel|snapshot\.runtime\.mode|sidebar-runtime-mode-line/);
   assert.match(appSource, /sidebar-runtime-overview[\s\S]*?<RuntimeActionButtons compact copy=\{copy\} runtime=\{snapshot\.runtime\} setError=\{setError\} \/>/);
   assert.doesNotMatch(appSource, /className="sidebar-runtime-mode"[\s\S]*?navigateSurface\("mcp"\)/);
-  assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*17px/s);
+  assert.match(styles, /\.sidebar-runtime-lifecycle\s*\{[^}]*font-size:\s*15px/s);
+  assert.doesNotMatch(styles, /sidebar-runtime-mode-line|sidebar-runtime-card\.is-codex/);
   assert.match(styles, /\.sidebar-runtime-card\.is-ready\s*\{[^}]*border-color:/s);
   assert.match(styles, /\.sidebar-runtime-card\.is-error,[\s\S]*?background:\s*linear-gradient/s);
   assert.match(styles, /\.sidebar-brand-row \.sidebar-brand-identity > \.brand-mark\s*\{[^}]*width:\s*30px[^}]*height:\s*30px/s);
@@ -229,8 +231,9 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   const configActionsStart = codexConfigSource.indexOf('className="inline-actions config-actions"');
   const configActionsEnd = codexConfigSource.indexOf("</div>", configActionsStart);
   assert.doesNotMatch(codexConfigSource.slice(configActionsStart, configActionsEnd), /copy\.refresh/);
-  assert.match(electronMain, /launcher:setup-core[\s\S]*?runtimeHost\.setupCore\(\)/);
+  assert.match(electronMain, /launcher:setup-core[\s\S]*?runtimeHost\.setupCore\(\{ connect \}\)/);
   assert.match(electronMain, /launcher:setup-mcp[\s\S]*?runtimeHost\.setupMcp\(/);
+  assert.match(setupSource, /installCodexIntegration\(config,[\s\S]*?activate:\s*!launcherOwned/);
   assert.match(preloadSource, /setupCore: \(\) => ipcRenderer\.invoke\("launcher:setup-core"\)/);
   assert.match(preloadSource, /setupMcp: \(input\) => ipcRenderer\.invoke\("launcher:setup-mcp", input\)/);
   assert.match(preloadSource, /restoreNativeCodex: \(\) => ipcRenderer\.invoke\("launcher:restore-native-codex"\)/);
@@ -239,7 +242,7 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   const nativeRestoreSource = electronMain.slice(nativeRestoreStart, fullUninstallStart);
   assert.match(nativeRestoreSource, /stopManagedRuntime\(\{ restoreCodex: false \}\)[\s\S]*?runtimeHost\.restoreNativeCodex\(\)/);
   assert.doesNotMatch(nativeRestoreSource, /mcpSetupComplete|mcpRuntimeInstalled|mcpGuideStep/);
-  assert.doesNotMatch(electronMain, /Replace existing route|--replace-codex-route/);
+  assert.match(electronMain, /Replace existing route[\s\S]*?replaceExistingRoute: true/);
   assert.match(preloadSource, /saveCodexConfig:[\s\S]*?launcher:codex-config-save/);
   assert.doesNotMatch(preloadSource, /codex-config-reset|resetCodexConfig/);
   assert.match(electronMain, /launcher:codex-config-save[\s\S]*?runtimeHost\.saveCodexConfig\(content\)/);
@@ -257,10 +260,11 @@ test("Codex config keeps install and restore actions independent from MCP and ma
   assert.match(styles, /\.codex-next-step\.is-pending\s*\{[^}]*opacity:/s);
   assert.match(electronMain, /function codexRestartPending[\s\S]*?codexCatalogVerified:\s*false[\s\S]*?codexRestartRequestedAt:/);
   assert.match(electronMain, /lastRequestAt >= restartRequestedAt/);
-  assert.match(electronMain, /launcher:setup-core[\s\S]*?codexRestartPending\([\s\S]*?coreSetupComplete:\s*true[\s\S]*?publishRuntimeStatus\(\)/);
-  assert.match(appSource, /const codexRouteActive = snapshot\.state\.coreSetupComplete === true[\s\S]*?snapshot\.state\.bridgeEnabled === true/);
-  assert.match(appSource, /action=\{codexRouteActive[\s\S]*?complete=\{codexRouteActive\}[\s\S]*?index=\{3\}/);
-  assert.match(appSource, /disabled=\{busy \|\| !codexRouteActive\}[\s\S]*?index=\{4\}/);
+  assert.match(electronMain, /launcher:setup-core[\s\S]*?coreSetupComplete:\s*true[\s\S]*?publishRuntimeStatus\(\)/);
+  assert.match(electronMain, /launcher:setup-mcp[\s\S]*?codexRestartPending\([\s\S]*?bridgeEnabled:\s*true/);
+  assert.match(appSource, /const codexIntegrationInstalled = snapshot\.state\.coreSetupComplete === true/);
+  assert.match(appSource, /action=\{codexIntegrationInstalled[\s\S]*?complete=\{codexIntegrationInstalled\}[\s\S]*?index=\{3\}/);
+  assert.match(appSource, /disabled=\{busy \|\| !codexIntegrationInstalled\}[\s\S]*?index=\{4\}/);
   assert.match(appSource, /index=\{3\}[\s\S]*?title=\{copy\.stepInstall\}[\s\S]*?index=\{4\}[\s\S]*?title=\{copy\.stepMcp\}/);
   assert.match(electronMain, /codexCatalogVerified:\s*true,[\s\S]*?codexRestartRequired:\s*false,[\s\S]*?codexRestartRequestedAt:\s*null/);
 });
@@ -323,7 +327,6 @@ test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
   assert.match(preloadSource, /setCodexUsageUpsellHidden:[\s\S]*?launcher:codex-usage-upsell-hidden/);
   assert.match(preloadSource, /onCodexUsageUpsellState:[\s\S]*?launcher:codex-usage-upsell-state/);
   assert.match(electronMain, /new CodexUsageUpsellPatcher\(\{ logger \}\)/);
-  assert.match(electronMain, /migrateExisting:\s*true/);
   assert.match(electronMain, /hideCodexUsageUpsell === true[\s\S]*?syncCodexUsageUpsellPatch/);
   assert.match(i18nSource, /hideCodexUsageUpsell: "Hide Codex usage-limit upsell"/);
   assert.match(i18nSource, /Usage limits, credits and API behavior are unchanged/);
@@ -337,10 +340,17 @@ test("runtime lifecycle owns the Codex bridge without exposing a separate switch
   assert.match(electronMain, /createRuntimeLifecycleCoordinator\(/);
   assert.match(runtimeLifecycleSource, /const start = async \(\) => \{[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
   assert.match(runtimeLifecycleSource, /const stop = async \(\{ restoreCodex = true \} = \{\}\) => \{[\s\S]*?runtimeHost\.deactivateRuntimeBridge\(\)/);
+  assert.doesNotMatch(runtimeLifecycleSource, /abortAllTurns/);
   assert.match(runtimeLifecycleSource, /const restart = async \(\) => \{[\s\S]*?stop\(\{ restoreCodex: false \}\)/);
   assert.match(runtimeLifecycleSource, /const quit = async \(\{ commit \} = \{\}\) => \{[\s\S]*?stop\(\{ restoreCodex: true \}\)[\s\S]*?await commit\(\)/);
   assert.doesNotMatch(runtimeLifecycleSource, /await runtimeHost\.checkCodexTools\(\)/);
   assert.match(electronMain, /requestQuit[\s\S]*?runtimeLifecycle\.quit\(\{ commit \}\)/);
+  const requestQuitStart = electronMain.indexOf("async function requestQuit");
+  const requestQuitEnd = electronMain.indexOf("function loggerForQuit", requestQuitStart);
+  const requestQuitSource = electronMain.slice(requestQuitStart, requestQuitEnd);
+  const quitCommitStart = requestQuitSource.indexOf("const commit = async () =>");
+  assert.equal(requestQuitSource.slice(0, quitCommitStart).includes("stopRuntimeStatusMonitor()"), false);
+  assert.match(requestQuitSource.slice(quitCommitStart), /stopRuntimeStatusMonitor\(\)[\s\S]*?app\.quit\(\)/);
   const stopLifecycle = electronMain.slice(
     electronMain.indexOf("async function stopManagedRuntime"),
     electronMain.indexOf("async function restartManagedRuntime"),

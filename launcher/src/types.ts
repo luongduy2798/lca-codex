@@ -117,7 +117,7 @@ export interface OperationState {
 export interface RuntimeStatus {
   configured: boolean;
   lifecycle: "stopped" | "starting" | "ready" | "stopping" | "degraded" | "error" | "stale" | "foreign";
-  owner: "current-launcher" | "stale-launcher" | "compatible-runtime" | "foreign" | "none";
+  owner: "current-launcher" | "stale-launcher" | "external-runtime" | "foreign" | "none";
   mode: "full" | null;
   detail: string | null;
   daemon: {

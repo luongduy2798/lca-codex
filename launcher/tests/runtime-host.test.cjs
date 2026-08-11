@@ -20,7 +20,7 @@ test("Codex tool health probe passes approval policy before the exec subcommand"
   ]);
 });
 
-test("Codex tool health stays nonfatal when the runtime is unavailable or the full harness is incomplete", async () => {
+test("Codex tool health stays nonfatal when the bridge runtime is unavailable or incomplete", async () => {
   const unavailable = hostFor(null).host;
   const before = unavailable.codexToolHealthSnapshot();
   assert.equal(before.checkedAt, null);
@@ -39,10 +39,10 @@ test("Codex tool health stays nonfatal when the runtime is unavailable or the fu
   incomplete.runtimeConfigSnapshot = () => ({
     config: { mode: "full", brokerSocketPath: "/tmp/lca-codex-unused-health.sock" },
   });
-  const incompleteHarness = await incomplete.checkCodexTools();
-  assert.equal(incompleteHarness.live, false);
-  assert.equal(incompleteHarness.tools.every(tool => (
-    tool.status === "unknown" && tool.detail === "The full Codex harness is not configured"
+  const incompleteBridge = await incomplete.checkCodexTools();
+  assert.equal(incompleteBridge.live, false);
+  assert.equal(incompleteBridge.tools.every(tool => (
+    tool.status === "unknown" && tool.detail === "The ChatGPT Web bridge is not configured"
   )), true);
 });
 
@@ -95,15 +95,17 @@ function hostFor(existingConfig) {
     },
   });
   let invocation;
+  let setupOptions;
   host.run = async (name, args) => {
     invocation = { name, args };
     return { code: 0, stdout: "", stderr: "" };
   };
-  host.runSetup = async (name, args) => {
+  host.runSetup = async (name, args, options) => {
     invocation = { name, args };
+    setupOptions = options;
     return { code: 0, stdout: "", stderr: "" };
   };
-  return { host, invocation: () => invocation };
+  return { host, invocation: () => invocation, setupOptions: () => setupOptions };
 }
 
 test("manual Codex config save stays editable when route status is invalid", async () => {
@@ -140,14 +142,21 @@ test("core setup installs only the Codex route", async () => {
   assert.deepEqual(fixture.invocation(), { name: "core-setup", args: ["route", "install"] });
 });
 
-test("launcher update transaction upgrades its owned full runtime with saved configuration", async () => {
+test("core setup forwards explicit route replacement and activation", async () => {
+  const fixture = hostFor(null);
+  await fixture.host.setupCore({ replaceExistingRoute: true, connect: true });
+  assert.deepEqual(fixture.invocation(), {
+    name: "core-setup",
+    args: ["route", "install", "--replace-codex-route", "--connect"],
+  });
+});
+
+test("launcher update stages its owned bridge route until lifecycle start", async () => {
   const fixture = hostFor({
     mode: "full",
     browserHost: "launcher",
     releaseVersion: "1.1.1",
   });
-  fixture.host.bridgeStatus = async () => ({ installed: true, active: true, errors: [] });
-
   const result = await fixture.host.upgradeManagedRuntime();
 
   assert.deepEqual(fixture.invocation().args, [
@@ -157,10 +166,11 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     "--acknowledge-unofficial",
     "--restart-service",
   ]);
+  assert.equal(fixture.setupOptions().disconnectRouteForSetup, true);
   assert.deepEqual(result, {
     updated: true,
     mode: "full",
-    bridgeEnabled: true,
+    bridgeEnabled: false,
     fromVersion: "1.1.1",
     toVersion: "1.1.3",
     stdout: "",
@@ -173,17 +183,9 @@ test("launcher update transaction preserves a deliberately disconnected Codex ro
     browserHost: "launcher",
     releaseVersion: "1.1.1",
   });
-  let disabled = 0;
-  fixture.host.bridgeStatus = async () => ({ installed: true, active: false, errors: [] });
-  fixture.host.setBridgeEnabled = async (enabled) => {
-    assert.equal(enabled, false);
-    disabled += 1;
-  };
-
   const result = await fixture.host.upgradeManagedRuntime();
 
   assert.equal(result.bridgeEnabled, false);
-  assert.equal(disabled, 1);
 });
 
 test("launcher update transaction leaves current and externally owned runtimes unchanged", async () => {
@@ -218,6 +220,66 @@ test("MCP setup reuses valid private tunnel credentials without exposing or rewr
       "Duy Local Codex",
       "--acknowledge-unofficial",
       "--restart-service",
+    ]);
+    assert.equal(fixture.setupOptions().startAfterSetup, true);
+    assert.equal(fixture.setupOptions().connectAfterSetup, true);
+    assert.equal(fixture.setupOptions().disconnectRouteForSetup, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher setup connects the Codex route only after the new runtime is ready", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-setup-route-order-"));
+  const coreHome = path.join(root, "core");
+  const configPath = path.join(coreHome, "config.json");
+  const config = { mode: "full", browserHost: "launcher", releaseVersion: "1.1.3" };
+  fs.mkdirSync(coreHome, { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+  const calls = [];
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "1.1.3" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    codexHome: path.join(root, "codex"),
+    supervisor: {
+      coreHome,
+      configPath,
+      readConfig: () => config,
+      readSetupConfig: () => config,
+      observeRuntime: async () => ({ lifecycle: "stopped", owner: "none" }),
+      stopForSetup: async () => { calls.push("runtime:stop"); },
+      startIfConfigured: async () => {
+        calls.push("runtime:start");
+        return { status: "ready" };
+      },
+    },
+  });
+  host.run = async (_name, args) => {
+    const action = args.join(" ");
+    calls.push(action);
+    if (action === "route status") {
+      return { code: 0, stdout: JSON.stringify({ installed: true, active: false, errors: [] }), stderr: "" };
+    }
+    if (action === "route connect") {
+      return { code: 0, stdout: JSON.stringify({ changed: true, active: true }), stderr: "" };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    await host.runSetup("mcp-setup", ["setup"], {
+      startAfterSetup: true,
+      connectAfterSetup: true,
+      disconnectRouteForSetup: true,
+    });
+    assert.deepEqual(calls, [
+      "route status",
+      "runtime:stop",
+      "setup",
+      "runtime:start",
+      "route status",
+      "route connect",
     ]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -515,7 +577,7 @@ test("failed runtime cleanup during removal still restores the previous Codex ro
   assert.deepEqual(calls, ["runtime:stop", "route status", "route disconnect"]);
 });
 
-test("connector verification uses the configured full-harness connector name", () => {
+test("connector verification uses the configured bridge connector name", () => {
   const full = hostFor({ mode: "full", appName: "My Codex Connector" });
   assert.equal(full.host.mcpConnectorName(), "My Codex Connector");
   const unavailable = hostFor(null);
@@ -647,7 +709,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
 });
 
 test("failed terminal migration verifies the unchanged previous runtime instead of claiming recovery", async () => {
-  const config = { mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
+  const config = { mode: "full", browserHost: "managed-chrome", releaseVersion: "0.1.16" };
   const calls = [];
   const coreHome = path.join(os.tmpdir(), "lca-codex-runtime-host-migration-failure-core");
   const host = new RuntimeHost({

@@ -315,6 +315,54 @@ test("turn broker health check exercises direct command and stdin tools without 
   }
 });
 
+test("turn broker health check never injects diagnostics into a normal user turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-health-isolation-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  const environment = {
+    cwd: root,
+    roots: [root],
+    writableRoots: [root],
+    sandboxPolicy: { type: "dangerFullAccess" as const },
+    tools: [
+      { name: "exec_command", description: "Run command", parameters: { type: "object" } },
+      { name: "write_stdin", description: "Write stdin", parameters: { type: "object" } },
+    ],
+  };
+  const userWaitAbort = new AbortController();
+  try {
+    const healthToken = await broker.register(environment, 10_000, "health-isolated");
+    const userToken = await broker.register(environment, 10_000, "user-active");
+    const healthBatch = broker.nextToolBatch(healthToken);
+    const userBatch = broker.nextToolBatch(userToken, userWaitAbort.signal);
+    const reportPromise = callTurnBroker<{ live: boolean; traceId: string }>(socketPath, {
+      method: "health_check",
+    });
+
+    const [execRequest] = await healthBatch;
+    expect(execRequest).toMatchObject({ wireName: "exec_command" });
+    broker.completeTool(healthToken, execRequest!.callId, {
+      content: [{ type: "text", text: JSON.stringify({ session_id: 31 }) }],
+      structuredContent: { session_id: 31 },
+    });
+
+    const [stdinRequest] = await broker.nextToolBatch(healthToken);
+    expect(stdinRequest).toMatchObject({ wireName: "write_stdin" });
+    broker.completeTool(healthToken, stdinRequest!.callId, {
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: { output: "ok" },
+    });
+
+    await expect(reportPromise).resolves.toMatchObject({ live: true, traceId: "health-isolated" });
+    userWaitAbort.abort();
+    await expect(userBatch).rejects.toThrow("tool wait aborted");
+  } finally {
+    userWaitAbort.abort();
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("turn broker health check discovers nested native routes through the exec gateway", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-health-gateway-"));
   const socketPath = defaultBrokerEndpoint(root);

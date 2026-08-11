@@ -11,7 +11,7 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
     headers: { authorization: "Bearer codex-oauth-token", "if-none-match": "native-etag" },
   });
   let upstream: Request | undefined;
-  const config = defaultConfig("full");
+  const config = defaultConfig();
   config.proAvailable = true;
   const response = await modelsRequest(request, config, async input => {
     upstream = input;

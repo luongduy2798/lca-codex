@@ -1,11 +1,11 @@
 import {
-  LCA_CODEX_BACKEND_MODEL,
+  LCA_CODEX_BASE_MODEL,
   resolveLcaCodexReasoningMode,
   type LcaCodexAdapterEffort,
   type LcaCodexReasoningMode,
 } from "../../lca-codex-models";
 
-export const LCA_CODEX_MODEL_ID = LCA_CODEX_BACKEND_MODEL;
+export const LCA_CODEX_MODEL_ID = LCA_CODEX_BASE_MODEL;
 
 export interface LcaCodexCapabilities {
   localToolsEnabled: boolean;
