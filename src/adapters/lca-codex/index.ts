@@ -46,6 +46,16 @@ export function isLcaCodexToolHealthProbe(parsed: CodexParsedRequest): boolean {
     && messageText(latestUser.content).trim() === LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT;
 }
 
+function logTurnActivity(
+  parsed: CodexParsedRequest,
+  event: string,
+  detail: Parameters<typeof logLcaCodexActivity>[1],
+  level?: Parameters<typeof logLcaCodexActivity>[2],
+): void {
+  if (isLcaCodexToolHealthProbe(parsed)) return;
+  logLcaCodexActivity(event, detail, level);
+}
+
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.lcaCodex?.brokerSocketPath?.trim();
   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
@@ -219,7 +229,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     const startedAt = Date.now();
     const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const taskTitle = activityTaskTitle(parsed);
-    logLcaCodexActivity("lca_codex.turn_started", {
+    logTurnActivity(parsed, "lca_codex.turn_started", {
       traceId,
       ...(threadId ? { threadId } : {}),
       ...(taskTitle ? { taskTitle } : {}),
@@ -548,7 +558,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
           // Reconnects must replay an active/successful browser turn, but retryable terminal
           // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
           // made every native retry replay the same cached error for the registry's full TTL.
-          logLcaCodexActivity("lca_codex.turn_retry_scheduled", {
+          logTurnActivity(parsed, "lca_codex.turn_retry_scheduled", {
             traceId,
             attempt: session.runtime.attempt ?? 1,
             nextAttempt,
@@ -560,7 +570,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         } else {
           session.cancel();
           if (retryPolicy.providerRetryable && adapterError) {
-            logLcaCodexActivity("lca_codex.turn_retry_stopped", {
+            logTurnActivity(parsed, "lca_codex.turn_retry_stopped", {
               traceId,
               attempt: session.runtime.attempt ?? 1,
               durationMs: activityDuration(session.runtime.startedAt ?? Date.now()),

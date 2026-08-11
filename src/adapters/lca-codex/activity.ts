@@ -4,6 +4,10 @@ export type LcaCodexActivityLevel = "info" | "warning" | "error";
 
 export type LcaCodexActivityDetail = Record<string, string | number | boolean | null | undefined>;
 
+function isHealthProbeActivity(detail: LcaCodexActivityDetail): boolean {
+  return typeof detail.traceId === "string" && detail.traceId.startsWith("health-");
+}
+
 /**
  * Emit a bounded, payload-minimized activity record. The launcher recognizes this prefix and stores
  * the JSON as a first-class Activity entry; other hosts still receive a readable diagnostic line.
@@ -14,6 +18,7 @@ export function logLcaCodexActivity(
   detail: LcaCodexActivityDetail,
   level: LcaCodexActivityLevel = "info",
 ): void {
+  if (isHealthProbeActivity(detail)) return;
   try {
     const line = `${LCA_CODEX_ACTIVITY_PREFIX}${JSON.stringify({ event, level, detail })}`;
     if (level === "error") console.error(line);
