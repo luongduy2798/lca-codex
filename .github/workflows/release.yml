@@ -72,9 +72,6 @@ jobs:
       - name: Add licenses and installers
         run: |
           cp LICENSE release-assets/LICENSE
-          cp LICENSES/NOTICE.md release-assets/NOTICE.md
-          cp LICENSES/OpenCodex-MIT.txt release-assets/OpenCodex-MIT.txt
-          cp LICENSES/Bun-1.3.14.md release-assets/Bun-1.3.14.md
           cp dist/THIRD_PARTY_NOTICES.txt release-assets/THIRD_PARTY_NOTICES.txt
           cp scripts/install-launcher.sh release-assets/install-launcher.sh
           cp scripts/install-launcher.ps1 release-assets/install-launcher.ps1

@@ -20,10 +20,6 @@ latest user request, and current-turn images. Older history/images stay in the i
 snapshot and are retrieved through the `lca-codex` connector only when needed. Visible reasoning,
 native Codex tool activity, and Markdown stream back into the same Codex task.
 
-<p align="center">
-  <img src="assets/demo.gif" alt="LCA Codex running inside the native Codex harness" width="960">
-</p>
-
 ```text
 Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──▶ ChatGPT
      ▲                                │                                      │
@@ -155,8 +151,7 @@ route is restored.
   published SHA-256 manifest before installation.
 
 Read the complete [architecture](docs/architecture.md) and
-[security model](docs/security-model.md) before enabling the tool bridge. Report vulnerabilities
-through [SECURITY.md](SECURITY.md).
+[security model](docs/security-model.md) before enabling the tool bridge.
 
 ## Development
 
@@ -168,7 +163,6 @@ bun run app:package
 
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
-- [Contributing](CONTRIBUTING.md)
 
 ## Disclaimer
 

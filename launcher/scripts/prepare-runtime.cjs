@@ -29,4 +29,3 @@ const notices = spawnSync(bun, [
 if (notices.error) throw notices.error;
 if (notices.status !== 0) process.exit(notices.status ?? 1);
 fs.copyFileSync(path.join(repositoryRoot, "LICENSE"), path.join(output, "LICENSE"));
-fs.cpSync(path.join(repositoryRoot, "LICENSES"), path.join(output, "LICENSES"), { recursive: true });

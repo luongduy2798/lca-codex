@@ -15,9 +15,6 @@ const argumentsList = process.argv.slice(2);
 const includeLauncher = argumentsList.includes("--include-launcher");
 const destinationArgument = argumentsList.find(argument => argument !== "--include-launcher");
 const visited = new Map<string, { directory: string; manifest: PackageJson }>();
-const bundledLicenseOverrides = new Map([
-  ["tiktoken@1.0.22", join(root, "LICENSES", "tiktoken-MIT.txt")],
-]);
 
 function packageDirectory(name: string, from: string): string | undefined {
   let cursor = from;
@@ -64,31 +61,19 @@ const sections = [...visited.values()]
   .map(({ directory, manifest }) => {
     const files = licenseFiles(directory);
     const identity = `${manifest.name}@${manifest.version}`;
-    const override = bundledLicenseOverrides.get(identity);
-    if (files.length === 0 && !override) throw new Error(`No license/notice file found for ${identity}`);
-    if (override && !existsSync(override)) throw new Error(`Bundled license override is missing for ${identity}`);
+    if (files.length === 0) throw new Error(`No license/notice file found for ${identity}`);
     const license = typeof manifest.license === "string" ? manifest.license : manifest.license?.type ?? "unknown";
     return [
       "=".repeat(80),
       `${identity} (${license})`,
-      ...(override
-        ? ["-".repeat(80), `bundled license: ${override.slice(root.length + 1)}`, "-".repeat(80), readFileSync(override, "utf8").trim()]
-        : files.flatMap(file => ["-".repeat(80), file, "-".repeat(80), readFileSync(join(directory, file), "utf8").trim()])),
+      ...files.flatMap(file => ["-".repeat(80), file, "-".repeat(80), readFileSync(join(directory, file), "utf8").trim()]),
     ].join("\n");
   });
 
-const bunLicense = readFileSync(join(root, "LICENSES", "Bun-1.3.14.md"), "utf8").trim();
 const output = [
   "lca-codex third-party notices",
   "",
   "This file covers runtime JavaScript packages bundled into the standalone executable.",
-  "The executable also embeds Bun 1.3.14; Bun's licensing and relinking notice follows first.",
-  "Project/OpenCodex notices are distributed separately in LICENSES/NOTICE.md and OpenCodex-MIT.txt.",
-  "",
-  "=".repeat(80),
-  "Bun 1.3.14 runtime",
-  "=".repeat(80),
-  bunLicense,
   "",
   ...sections,
   "",
