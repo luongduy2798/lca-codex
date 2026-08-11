@@ -21,6 +21,18 @@ created. Repository contents, tool output, websites, and prompt text are untrust
 The bridge transports decisions; it does not add a second planner, semantic router, or fallback
 model. Unsupported model/effort/tool combinations fail explicitly.
 
+For tool-capable turns, the browser prompt names the configured ChatGPT connector dynamically and
+instructs the model to treat that connector as an exclusive routing constraint. Similar connector
+names are not aliases, and a failure, timeout, transport error, missing tool, or unavailable action
+does not authorize fallback to another connector. Switching connectors requires explicit user
+authorization.
+
+This prompt contract reduces model-side routing ambiguity but is not a cross-connector security
+boundary. The local broker can enforce only calls that reach this connector. A call that the ChatGPT
+host routes directly to some other connector never enters this broker, so absolute cross-connector
+enforcement must live in the host/tool-registry layer by exposing or authorizing only the connector
+selected for the turn.
+
 ## Principal risks
 
 ### Prompt injection and destructive tool use

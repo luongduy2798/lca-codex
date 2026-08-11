@@ -81,7 +81,7 @@ writeFileSync(join(appHome, "config.json"), `${JSON.stringify(config, null, 2)}\
 writeFileSync(config.storageStatePath, "{}\n", { mode: 0o600 });
 
 const env = { ...process.env, LCA_CODEX_HOME: appHome, CODEX_HOME: codexHome };
-const child = Bun.spawn([...runtimeCommand, "serve"], { env, stdout: "pipe", stderr: "pipe" });
+const child = Bun.spawn([...runtimeCommand, "serve"], { env, stdout: "pipe", stderr: "inherit" });
 let stoppedGracefully = false;
 try {
   const deadline = Date.now() + 10_000;

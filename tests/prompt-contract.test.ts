@@ -86,6 +86,26 @@ test("tool-capable prompts expose active and recent context immediately while ke
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
+test("tool-capable prompts make the configured connector an exclusive routing constraint", () => {
+  const connectorName = "Macmini Lca Codex";
+  const compiled = compileLcaCodexPrompt(
+    request("high"),
+    { localToolsEnabled: true, proAvailable: true },
+    `turn_${"c".repeat(32)}`,
+    undefined,
+    connectorName,
+  );
+
+  expect(compiled.text).toContain(`The connector selected for this turn is "${connectorName}"`);
+  expect(compiled.text).toContain(`Use only "${connectorName}" for connector-dependent operations`);
+  expect(compiled.text).toContain("Do not call another connector, app, MCP provider, host, local bridge, or similarly named tool provider");
+  expect(compiled.text).toContain("Connector names are opaque routing identifiers");
+  expect(compiled.text).toContain("Do not infer aliases, equivalence, fallback relationships, or shared ownership from similar names");
+  expect(compiled.text).toContain(`from "${connectorName}" does not authorize fallback to another connector`);
+  expect(compiled.text).toContain("Report the blocker instead of switching providers");
+  expect(compiled.text).toContain("Switching connectors requires explicit user authorization");
+});
+
 test("fresh Temporary Chats inline the previous user and assistant exchange for ambiguous follow-ups", () => {
   for (const followUp of ["cần gì ảnh", "làm tiếp đi", "undo cái vừa sửa", "phương án 2 thì sao"]) {
     const parsed = request("high");

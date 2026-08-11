@@ -1,14 +1,29 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const scratch = mkdtempSync(join(tmpdir(), "lca-codex-verify-"));
 const runtimeBundle = join(scratch, "runtime");
+const verificationHome = join(scratch, "home");
+const verificationLcaHome = join(scratch, "lca");
+const verificationCodexHome = join(scratch, "codex");
+mkdirSync(verificationHome, { recursive: true });
+mkdirSync(verificationLcaHome, { recursive: true });
+mkdirSync(verificationCodexHome, { recursive: true });
 
-async function run(args: string[]): Promise<void> {
+const verificationEnv = {
+  ...process.env,
+  HOME: verificationHome,
+  USERPROFILE: verificationHome,
+  LCA_CODEX_HOME: verificationLcaHome,
+  CODEX_HOME: verificationCodexHome,
+};
+
+async function run(args: string[], isolateRuntimeState = false): Promise<void> {
   const child = Bun.spawn([process.execPath, ...args], {
     cwd: root,
+    env: isolateRuntimeState ? verificationEnv : process.env,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -21,9 +36,9 @@ try {
   await run(["run", "check-version"]);
   await run(["run", "audit"]);
   await run(["run", "typecheck"]);
-  await run(["run", "test"]);
+  await run(["run", "test"], true);
   await run(["run", "launcher:typecheck"]);
-  await run(["run", "launcher:test"]);
+  await run(["run", "launcher:test"], true);
   await run(["run", "launcher:build"]);
   await run(["run", "scripts/build-runtime-bundle.ts", runtimeBundle]);
   await run([

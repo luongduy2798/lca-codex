@@ -1,6 +1,6 @@
 {
   "name": "lca-codex",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "private": true,
   "author": "thayduytrutri",
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT session.",
