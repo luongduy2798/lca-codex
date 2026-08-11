@@ -526,12 +526,20 @@ function summarizeActivityTask(task, now = Date.now()) {
   const last = task.records.at(-1);
   const startedAt = activityRecordTimestamp(first);
   const lastAt = activityRecordTimestamp(last);
-  const stalled = status === undefined
+  const quiet = status === undefined
     && sawStart
     && !pendingSources.includes("codex")
     && now - lastAt >= ACTIVITY_STALL_MS;
+  // ChatGPT Web can legitimately remain quiet while it is still reasoning. Treat that as
+  // waiting; reserve the stalled state for the local bridge layer.
+  const stalled = quiet && source !== "chatgpt";
+  const waitingForChatGpt = quiet && source === "chatgpt";
   const taskStatus = status
-    ?? (stalled ? "stalled" : pendingTools.size > 0 || phase === "waiting" ? "waiting" : "running");
+    ?? (stalled
+      ? "stalled"
+      : waitingForChatGpt || pendingTools.size > 0 || phase === "waiting"
+        ? "waiting"
+        : "running");
 
   return {
     traceId: task.traceId,

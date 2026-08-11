@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, CHATGPT_TEXT_DELTA_COALESCE_MS, CHATGPT_TEXT_DELTA_MIN_CHARS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTextDeltaCoalescer, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-codex/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-codex/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -857,7 +857,7 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
     "send-accepted",
     "tool-confirmation-visible",
     "response-visible",
-    "response-stalled-30s",
+    "completion-pending-30s",
     "turn-completed",
     "turn-failed",
   ]) {
@@ -868,7 +868,7 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain("atomicWriteFile(join(this.directory, `${stem}.png`), screenshot)");
   expect(workerSource).toContain("CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10");
   expect(workerSource).toContain('process.env.LCA_CODEX_BROWSER_DIAGNOSTICS !== "1"');
-  expect(workerSource).toContain('checkpoint !== "response-stalled-30s"');
+  expect(workerSource).toContain('checkpoint !== "completion-pending-30s"');
 });
 
 test("response polling balances visible latency with weak-machine efficiency", () => {
@@ -883,7 +883,7 @@ test("response polling balances visible latency with weak-machine efficiency", (
   ]);
 });
 
-test("short completed answers flush to Codex before the full turn completion settle window", () => {
+test("structured Markdown completes after a short settle with a conservative raw-DOM fallback", () => {
   const completedState = {
     responsePresent: true,
     running: false,
@@ -891,20 +891,30 @@ test("short completed answers flush to Codex before the full turn completion set
     currentHtml: "<p>Mình đang dùng GPT-5.6 Sol.</p>",
     completionActionVisible: true,
   };
-  const displayTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS);
-  const finalTracker = new ChatGptCompletionTracker();
-  expect(displayTracker.update(completedState, 1_000)).toBeFalse();
-  expect(finalTracker.update(completedState, 1_000)).toBeFalse();
-  expect(displayTracker.update(completedState, 1_250)).toBeTrue();
-  expect(finalTracker.update(completedState, 1_250)).toBeFalse();
-  expect(finalTracker.update(completedState, 3_000)).toBeTrue();
+  const structuredTracker = new ChatGptCompletionTracker();
+  const rawDomTracker = new ChatGptCompletionTracker(2_000);
+  expect(structuredTracker.update(completedState, 1_000)).toBeFalse();
+  expect(structuredTracker.update(completedState, 1_499)).toBeFalse();
+  expect(structuredTracker.update(completedState, 1_500)).toBeTrue();
+  expect(rawDomTracker.update(completedState, 1_000)).toBeFalse();
+  expect(rawDomTracker.update(completedState, 2_999)).toBeFalse();
+  expect(rawDomTracker.update(completedState, 3_000)).toBeTrue();
 
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain("const displayCompletionTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS)");
-  expect(workerSource).toContain("&& displayCompletionTracker.update(completionState)");
-  expect(workerSource).toContain("const visibleFinal = markdownBuffer.flush()");
-  expect(workerSource).toContain("emitCoalescedText(visibleFinal.delta, observedAt, true)");
-  expect(workerSource).toContain("if (completionTracker.update(completionState))");
+  const structuredEvidence = workerSource.indexOf("const hasStructuredMarkdown = snapshot.markdownRoots.length > 0");
+  const completion = workerSource.indexOf("const completionReady = completionTracker.update(", structuredEvidence);
+  const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", completion);
+  const finalEmission = workerSource.indexOf("turn.onTextDelta(final.delta)", finalSnapshot);
+  expect(structuredEvidence).toBeGreaterThan(-1);
+  expect(completion).toBeGreaterThan(structuredEvidence);
+  expect(finalSnapshot).toBeGreaterThan(completion);
+  expect(finalEmission).toBeGreaterThan(finalSnapshot);
+  expect(workerSource).toContain("CHATGPT_COMPLETION_SETTLE_MS = 500");
+  expect(workerSource).toContain("CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS = 2_000");
+  expect(workerSource).toContain("const unstructuredCompletionTracker = new ChatGptCompletionTracker(");
+  expect(workerSource).not.toContain("displayCompletionTracker");
+  expect(workerSource).not.toContain("markdownBuffer.flush()");
+  expect(workerSource).toContain("ChatGptMarkdownBuffer.stableBlocks(");
 });
 
 test("adaptive polling backs off only after repeated unchanged snapshots", () => {
@@ -914,18 +924,6 @@ test("adaptive polling backs off only after repeated unchanged snapshots", () =>
   expect(scheduler.nextDelay(false)).toBe(500);
   expect(scheduler.nextDelay(false)).toBe(500);
   expect(scheduler.nextDelay(true)).toBe(250);
-});
-
-test("tiny final-answer deltas coalesce into one bounded pending suffix", () => {
-  expect(CHATGPT_TEXT_DELTA_MIN_CHARS).toBe(32);
-  expect(CHATGPT_TEXT_DELTA_COALESCE_MS).toBe(250);
-  const coalescer = new ChatGptTextDeltaCoalescer(32, 250);
-  expect(coalescer.push("tiny", 1_000)).toBe("");
-  expect(coalescer.push(" update", 1_100)).toBe("");
-  expect(coalescer.push("", 1_249)).toBe("");
-  expect(coalescer.push("", 1_250)).toBe("tiny update");
-  expect(coalescer.push("x".repeat(32), 2_000)).toBe("x".repeat(32));
-  expect(coalescer.flush()).toBe("");
 });
 
 test("visible trace rewrites start a fresh block instead of crashing the turn", () => {
@@ -1064,11 +1062,14 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
-  expect(workerSource).toContain("const markdownRoots = renderedRoots.map");
+  expect(workerSource).toContain("const collectMarkdownBlocks = (candidate: HTMLElement, key: string): void =>");
+  expect(workerSource).toContain("markdownRoots.push({ key, html: candidate.outerHTML, streamable: true })");
+  expect(workerSource).toContain("streamable: false");
   expect(workerSource).toContain("renderSignature: markdownRoots.map(candidate => fingerprint(candidate.html)).join(\"|\")");
-  expect(workerSource).toContain("markdownBuffer.observeRoots(snapshot.markdownRoots)");
+  expect(workerSource).toContain("markdownBuffer.observeRoots(snapshot.markdownRoots, observedAt)");
+  expect(workerSource).toContain("const final = markdownBuffer.finish()");
   expect(workerSource).toContain("const pollScheduler = new ChatGptAdaptivePollScheduler()");
-  expect(workerSource).toContain("const textCoalescer = new ChatGptTextDeltaCoalescer()");
+  expect(workerSource).not.toContain("ChatGptTextDeltaCoalescer");
   expect(workerSource).toContain("setTimeout(resolveSleep, nextPollMs)");
   expect(workerSource).not.toContain("markdownSegments");
   expect(workerSource).not.toContain("streamable: childIsComplete");
@@ -1164,9 +1165,9 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
 });
 
-test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
+test("pending-completion diagnostics record DOM metrics without response or overlay content", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const start = workerSource.indexOf("private async stalledTurnDiagnostic");
+  const start = workerSource.indexOf("private async pendingCompletionDiagnostic");
   const end = workerSource.indexOf("private async runExclusive", start);
   const diagnosticSource = workerSource.slice(start, end);
   expect(diagnosticSource).toContain("textChars:");

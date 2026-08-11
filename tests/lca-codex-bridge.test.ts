@@ -1048,6 +1048,103 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(chatGptHtmlToMarkdown(html)).toBe("## Format Probe\n\n**bold**\n\n- alpha\n- beta");
   });
 
+  test("completion snapshot replaces speculative flat DOM without duplicating an open code fence", () => {
+    const firstHtml = "<p>Plan</p><pre><code>lib/\n├── main.dart</code></pre>";
+    const growingHtml = "<p>Plan</p><pre><code>lib/\n├── main.dart\n└── core/</code></pre>";
+    const completedHtml = [
+      "<p>Plan</p>",
+      "<h3>1. Protocol</h3>",
+      "<p>Details</p>",
+      "<pre><code>lib/\n├── main.dart\n└── core/</code></pre>",
+    ].join("");
+    const buffer = ChatGptMarkdownBuffer.completionOnly();
+
+    expect(observeHtml(buffer, firstHtml)).toBe("");
+    const speculativeDelta = observeHtml(buffer, growingHtml);
+    expect(speculativeDelta).toBe("");
+    expect(observeHtml(buffer, completedHtml)).toBe("");
+
+    const completedMarkdown = chatGptHtmlToMarkdown(completedHtml);
+    const final = buffer.finish();
+    expect(final).toEqual({ markdown: completedMarkdown, delta: completedMarkdown });
+    expect(final.markdown.match(/```/g)).toHaveLength(2);
+    expect(final.markdown.match(/Plan/g)).toHaveLength(1);
+  });
+
+  test("stable block streaming rejects flat DOM and progressively emits hydrated Markdown", () => {
+    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
+    const flatRoot = (html: string) => [{
+      key: "root:0",
+      html,
+      streamable: false,
+    }];
+    const completedRoots = [
+      { key: "root:0:0", html: "<p>Plan</p>", streamable: true },
+      { key: "root:0:1", html: "<h3>1. Protocol</h3>", streamable: true },
+      { key: "root:0:2", html: "<p>Details</p>", streamable: true },
+      {
+        key: "root:0:3",
+        html: "<pre><code>lib/\n├── main.dart\n└── core/</code></pre>",
+        streamable: true,
+      },
+    ];
+
+    expect(buffer.observeRoots(flatRoot("<p>Plan</p><pre><code>lib/\n├── main.dart</code></pre>"), 1_000)).toBe("");
+    expect(buffer.observeRoots(flatRoot("<p>Plan</p><pre><code>lib/\n├── main.dart\n└── core/</code></pre>"), 1_500)).toBe("");
+    expect(buffer.observeRoots(completedRoots, 2_000)).toBe("");
+    expect(buffer.observeRoots(completedRoots, 2_500)).toBe(
+      completedRoots.slice(0, 2).map(root => chatGptHtmlToMarkdown(root.html)).join("\n\n"),
+    );
+
+    const final = buffer.finish();
+    const completedMarkdown = completedRoots
+      .map(root => chatGptHtmlToMarkdown(root.html))
+      .join("\n\n");
+    expect(final.markdown).toBe(completedMarkdown);
+    expect(final.markdown.match(/```/g)).toHaveLength(2);
+    expect(final.markdown.match(/Plan/g)).toHaveLength(1);
+  });
+
+  test("stable block streaming keeps two active tail blocks while releasing earlier paragraphs", () => {
+    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
+    const roots = ["One", "Two", "Three"].map((text, index) => ({
+      key: `root:0:${index}`,
+      html: `<p>${text}</p>`,
+      streamable: true,
+    }));
+
+    expect(buffer.observeRoots(roots, 1_000)).toBe("");
+    expect(buffer.observeRoots(roots, 1_500)).toBe("One");
+    const expanded = [
+      ...roots,
+      { key: "root:0:3", html: "<p>Four is still active</p>", streamable: true },
+    ];
+    expect(buffer.observeRoots(expanded, 1_750)).toBe("\n\nTwo");
+    expect(buffer.flush()).toEqual({
+      markdown: "One\n\nTwo\n\nThree\n\nFour is still active",
+      delta: "\n\nThree\n\nFour is still active",
+    });
+  });
+
+  test("stable block streaming emits a fenced code block only as a complete block", () => {
+    const buffer = ChatGptMarkdownBuffer.stableBlocks(500, 2);
+    const roots = [
+      { key: "root:0:0", html: "<h2>Example</h2>", streamable: true },
+      { key: "root:0:1", html: "<p>Use this tree:</p>", streamable: true },
+      { key: "root:0:2", html: "<pre><code>lib/\n└── main.dart</code></pre>", streamable: true },
+      { key: "root:0:3", html: "<p>Explanation</p>", streamable: true },
+      { key: "root:0:4", html: "<p>Growing tail</p>", streamable: true },
+    ];
+
+    expect(buffer.observeRoots(roots, 1_000)).toBe("");
+    const delta = buffer.observeRoots(roots, 1_500);
+    expect(delta).toContain("## Example");
+    expect(delta).toContain("Use this tree:");
+    expect(delta).toContain("lib/\n└── main.dart");
+    expect(delta.match(/```/g)).toHaveLength(2);
+    expect(delta).not.toContain("Explanation");
+  });
+
   test("mirrors structured Markdown after one poll without waiting for blocks to complete", () => {
     const prefixLength = (left: string, right: string) => {
       let index = 0;

@@ -153,6 +153,39 @@ test("launcher activity paginates by chat, then lazily loads task summaries and 
   }
 });
 
+test("quiet ChatGPT reasoning remains waiting while a quiet local bridge task is stalled", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-activity-status-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const record = (at, event, detail) => JSON.stringify({ at, level: "info", event, detail });
+  try {
+    fs.writeFileSync(filePath, [
+      record("2026-01-01T00:00:00.000Z", "lca_codex.turn_started", {
+        traceId: "trace_chatgpt_waiting",
+        threadId: "thread_activity_status",
+      }),
+      record("2026-01-01T00:00:01.000Z", "lca_codex.turn_first_text", {
+        traceId: "trace_chatgpt_waiting",
+      }),
+      record("2026-01-01T00:00:02.000Z", "lca_codex.turn_started", {
+        traceId: "trace_lca_stalled",
+        threadId: "thread_activity_status",
+      }),
+      "",
+    ].join("\n"));
+
+    const logger = createLogger({ filePath });
+    const tasks = new Map(logger.activityChatTasks({ chatId: "chat:thread_activity_status" })
+      .map(task => [task.traceId, task]));
+
+    assert.equal(tasks.get("trace_chatgpt_waiting").source, "chatgpt");
+    assert.equal(tasks.get("trace_chatgpt_waiting").status, "waiting");
+    assert.equal(tasks.get("trace_lca_stalled").source, "lca");
+    assert.equal(tasks.get("trace_lca_stalled").status, "stalled");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher Activity deletes one task, one chat, or all retained logs from disk and memory", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-activity-delete-"));
   const filePath = path.join(root, "launcher.jsonl");

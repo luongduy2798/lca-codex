@@ -2869,13 +2869,20 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
   const last = records.at(-1)!;
   const startedAt = activityTimestamp(first);
   const lastAt = activityTimestamp(last);
-  // Native Codex tools can legitimately run for longer than the quiet-task threshold.
-  const stalled = status === undefined
+  // Native Codex tools and ChatGPT Web reasoning can legitimately run longer than the
+  // quiet-task threshold. Keep quiet ChatGPT turns waiting instead of calling them stalled.
+  const quiet = status === undefined
     && sawStart
     && !pendingSources.includes("codex")
     && now - lastAt >= ACTIVITY_STALLED_MS;
+  const stalled = quiet && source !== "chatgpt";
+  const waitingForChatGpt = quiet && source === "chatgpt";
   const taskStatus: ActivityTaskStatus = status
-    ?? (stalled ? "stalled" : pendingTools.size > 0 || phase === "waiting" ? "waiting" : "running");
+    ?? (stalled
+      ? "stalled"
+      : waitingForChatGpt || pendingTools.size > 0 || phase === "waiting"
+        ? "waiting"
+        : "running");
   const endedAt = terminalAt ?? now;
 
   return {

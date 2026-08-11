@@ -50,12 +50,13 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
 export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
-export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
+export const CHATGPT_COMPLETION_SETTLE_MS = 500;
+export const CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS = 2_000;
+export const CHATGPT_MARKDOWN_BLOCK_STABILITY_MS = 750;
+export const CHATGPT_MARKDOWN_TAIL_GUARD_BLOCKS = 2;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const CHATGPT_RESPONSE_POLL_MS = 250;
 export const CHATGPT_RESPONSE_IDLE_POLL_MS = 500;
-export const CHATGPT_TEXT_DELTA_COALESCE_MS = 250;
-export const CHATGPT_TEXT_DELTA_MIN_CHARS = 32;
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -205,7 +206,7 @@ export interface BrowserTurn {
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
   onCommentary?: (text: string, continuation?: boolean) => void;
-  /** Append-only, structurally stable Markdown chunks. */
+  /** Append-only Markdown deltas emitted only at stable block boundaries. */
   onTextDelta: (delta: string) => void;
 }
 
@@ -287,35 +288,7 @@ export class ChatGptAdaptivePollScheduler {
   }
 }
 
-/** Keep at most one pending final-answer suffix so weak clients do not accumulate tiny SSE frames. */
-export class ChatGptTextDeltaCoalescer {
-  private pending = "";
-  private pendingSince?: number;
-
-  constructor(
-    private readonly minChars = CHATGPT_TEXT_DELTA_MIN_CHARS,
-    private readonly maxDelayMs = CHATGPT_TEXT_DELTA_COALESCE_MS,
-  ) {}
-
-  push(delta: string, now = Date.now()): string {
-    if (delta) {
-      if (!this.pending) this.pendingSince = now;
-      this.pending += delta;
-    }
-    if (!this.pending) return "";
-    if (this.pending.length >= this.minChars) return this.flush();
-    if (this.pendingSince !== undefined && now - this.pendingSince >= this.maxDelayMs) return this.flush();
-    return "";
-  }
-
-  flush(): string {
-    const delta = this.pending;
-    this.pending = "";
-    this.pendingSince = undefined;
-    return delta;
-  }
-}
-
+/** Detect a missing or empty ChatGPT response without relying on localized UI text. */
 export class ChatGptTurnDomHealthTracker {
   private sawResponse = false;
   private missingResponseSince?: number;
@@ -569,9 +542,9 @@ class ChatGptBrowserDiagnostics {
 
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
     // Full screenshots and DOM snapshots are expensive enough to be visible on the critical path.
-    // Keep them opt-in for normal turns, while still capturing failures and genuinely stalled turns.
+    // Keep them opt-in for normal turns, while still capturing failures and unusually long waits.
     if (error === undefined
-      && checkpoint !== "response-stalled-30s"
+      && checkpoint !== "completion-pending-30s"
       && process.env.LCA_CODEX_BROWSER_DIAGNOSTICS !== "1") return;
     try {
       if (!this.initialized) {
@@ -1413,8 +1386,6 @@ export class ChatGptBrowserWorker {
       const renderedRoots = allMarkdownRoots.filter(candidate => (
         candidate.closest("[data-streaming-response-status]") === null
       ));
-      // Mirror the whole visible final-answer DOM. The Markdown buffer compares consecutive full
-      // snapshots, so nested wrappers and structural Markdown never become one giant "last block".
       const rendered = renderedRoots.at(-1);
       const completionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
@@ -1503,10 +1474,58 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
-      const markdownRoots = renderedRoots.map((candidate, index) => ({
-        key: `root:${index}`,
-        html: candidate.innerHTML,
-      }));
+      const markdownRoots: ChatGptMarkdownRoot[] = [];
+      const markdownBlockTags = new Set([
+        "ADDRESS", "BLOCKQUOTE", "DL", "FIGURE", "H1", "H2", "H3", "H4", "H5", "H6",
+        "HR", "OL", "P", "PRE", "TABLE", "UL",
+      ]);
+      const ignoredMarkdownTags = new Set(["BUTTON", "IMG", "PICTURE", "SCRIPT", "SOURCE", "STYLE", "SVG"]);
+      const hasDirectText = (candidate: HTMLElement): boolean => [...candidate.childNodes].some(node => (
+        node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
+      ));
+      const collectMarkdownBlocks = (candidate: HTMLElement, key: string): void => {
+        if (ignoredMarkdownTags.has(candidate.tagName)) return;
+        if (markdownBlockTags.has(candidate.tagName)) {
+          markdownRoots.push({ key, html: candidate.outerHTML, streamable: true });
+          return;
+        }
+
+        // Code blocks include language/copy chrome in generic wrappers. Keep that wrapper atomic;
+        // splitting it can leak the language label or emit an unfinished fence separately.
+        const nestedPre = candidate.querySelector("pre");
+        const hasOtherSemanticContent = [...candidate.querySelectorAll<HTMLElement>(
+          "address, blockquote, dl, figure, h1, h2, h3, h4, h5, h6, hr, ol, p, table, ul",
+        )].some(block => !nestedPre?.contains(block));
+        if (nestedPre && !hasOtherSemanticContent) {
+          markdownRoots.push({ key, html: candidate.outerHTML, streamable: true });
+          return;
+        }
+
+        const children = [...candidate.children]
+          .filter((child): child is HTMLElement => child instanceof HTMLElement)
+          .filter(child => !ignoredMarkdownTags.has(child.tagName));
+        if (!hasDirectText(candidate) && children.length > 0) {
+          children.forEach((child, index) => collectMarkdownBlocks(child, `${key}:${index}`));
+          return;
+        }
+        // Raw streaming text is deliberately final-only: ChatGPT may hydrate it later into
+        // headings, lists and fenced code, which cannot replace an already-emitted Codex delta.
+        markdownRoots.push({ key, html: candidate.outerHTML, streamable: false });
+      };
+      renderedRoots.forEach((candidate, rootIndex) => {
+        const children = [...candidate.children]
+          .filter((child): child is HTMLElement => child instanceof HTMLElement)
+          .filter(child => !ignoredMarkdownTags.has(child.tagName));
+        if (!hasDirectText(candidate) && children.length > 0) {
+          children.forEach((child, index) => collectMarkdownBlocks(child, `root:${rootIndex}:${index}`));
+        } else if (candidate.innerHTML.trim()) {
+          markdownRoots.push({
+            key: `root:${rootIndex}`,
+            html: candidate.innerHTML,
+            streamable: false,
+          });
+        }
+      });
       const fingerprint = (value: string): string => {
         let hash = 2166136261;
         for (let index = 0; index < value.length; index += 1) {
@@ -1533,7 +1552,7 @@ export class ChatGptBrowserWorker {
     return snapshot;
   }
 
-  private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
+  private async pendingCompletionDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
     const responseState = await responseTurn.count()
       ? await responseTurn.evaluate(element => {
         const root = element as HTMLElement;
@@ -1757,29 +1776,17 @@ export class ChatGptBrowserWorker {
       let firstReasoningLogged = false;
       let firstTextLogged = false;
       const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
-      const textCoalescer = new ChatGptTextDeltaCoalescer();
+      const markdownBuffer = ChatGptMarkdownBuffer.stableBlocks(
+        CHATGPT_MARKDOWN_BLOCK_STABILITY_MS,
+        CHATGPT_MARKDOWN_TAIL_GUARD_BLOCKS,
+      );
       const pollScheduler = new ChatGptAdaptivePollScheduler();
-      const displayCompletionTracker = new ChatGptCompletionTracker(CHATGPT_RESPONSE_POLL_MS);
       const completionTracker = new ChatGptCompletionTracker();
+      const unstructuredCompletionTracker = new ChatGptCompletionTracker(
+        CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS,
+      );
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
-      let completionTailFlushed = false;
       let previousActivitySignature = "";
-      const emitCoalescedText = (delta: string, now: number, force = false) => {
-        let ready = textCoalescer.push(delta, now);
-        if (force) ready += textCoalescer.flush();
-        if (!ready) return;
-        if (!firstTextLogged) {
-          firstTextLogged = true;
-          logLcaCodexActivity("lca_codex.turn_first_text", {
-            traceId: turn.traceId,
-            attempt,
-            elapsedMs: activityDuration(startedAt),
-            sinceSendMs: activityDuration(sentAt),
-          });
-        }
-        turn.onTextDelta(ready);
-      };
       for (;;) {
         if (page.isClosed()) {
           throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
@@ -1837,7 +1844,20 @@ export class ChatGptBrowserWorker {
             });
             await diagnostics.capture(page, "response-visible");
           }
-          const textDelta = markdownBuffer.observeRoots(snapshot.markdownRoots);
+          // Emit only complete blocks that have stayed unchanged and are safely behind the active
+          // tail. Raw text, the two newest blocks and growing lists/code fences remain local until
+          // ChatGPT's renderer settles, preserving Codex's append-only Markdown contract.
+          const markdownDelta = markdownBuffer.observeRoots(snapshot.markdownRoots, observedAt);
+          if (markdownDelta) turn.onTextDelta(markdownDelta);
+          if (!firstTextLogged && snapshot.visibleText) {
+            firstTextLogged = true;
+            logLcaCodexActivity("lca_codex.turn_first_text", {
+              traceId: turn.traceId,
+              attempt,
+              elapsedMs: activityDuration(startedAt),
+              sinceSendMs: activityDuration(sentAt),
+            });
+          }
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible, observedAt)) {
             if (trace.kind === "commentary") {
               turn.onCommentary?.(trace.text, trace.continuation === true);
@@ -1854,7 +1874,6 @@ export class ChatGptBrowserWorker {
               turn.onReasoningSummary?.(trace.text, trace.continuation === true);
             }
           }
-          emitCoalescedText(textDelta, observedAt);
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -1869,14 +1888,19 @@ export class ChatGptBrowserWorker {
             currentHtml: snapshot.renderSignature,
             completionActionVisible: snapshot.completionActionVisible,
           };
-          if (!completionTailFlushed
-            && snapshot.visibleText !== "api_tool unavailable"
-            && displayCompletionTracker.update(completionState)) {
-            const visibleFinal = markdownBuffer.flush();
-            emitCoalescedText(visibleFinal.delta, observedAt, true);
-            completionTailFlushed = true;
-          }
-          if (completionTracker.update(completionState)) {
+          const hasStructuredMarkdown = snapshot.markdownRoots.length > 0
+            && snapshot.markdownRoots.every(root => root.streamable === true);
+          // A scoped completion action plus three unchanged structured-DOM observations is strong
+          // finality evidence. Keep the conservative window only while ChatGPT still exposes raw
+          // text that may hydrate into headings, lists or code after generation stops.
+          const completionReady = completionTracker.update({
+            ...completionState,
+            completionActionVisible: completionState.completionActionVisible && hasStructuredMarkdown,
+          }, observedAt) || unstructuredCompletionTracker.update({
+            ...completionState,
+            completionActionVisible: completionState.completionActionVisible && !hasStructuredMarkdown,
+          }, observedAt);
+          if (completionReady) {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
             }
@@ -1884,14 +1908,14 @@ export class ChatGptBrowserWorker {
             if (!final.markdown && snapshot.visibleText) {
               throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
             }
-            emitCoalescedText(final.delta, observedAt, true);
+            if (final.delta) turn.onTextDelta(final.delta);
             finalText = final.markdown;
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
-            await diagnostics.capture(page, "response-stalled-30s");
-            const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn).catch(error => JSON.stringify({
+            await diagnostics.capture(page, "completion-pending-30s");
+            const diagnostic = await this.pendingCompletionDiagnostic(page, responseTurn).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
             console.warn(

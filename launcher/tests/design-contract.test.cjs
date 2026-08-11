@@ -72,6 +72,8 @@ test("Activity groups task logs and labels the active execution layer", () => {
   assert.match(appSource, /ACTIVITY_STALLED_MS = 30_000/);
   assert.match(appSource, /"CHATGPT"[\s\S]*?"LCA CODEX"[\s\S]*?"CODEX NATIVE"[\s\S]*?"SYSTEM"/);
   assert.match(appSource, /WAITING FOR \$\{activitySourceLabel\(group\.source\)\}/);
+  assert.match(appSource, /const stalled = quiet && source !== "chatgpt"/);
+  assert.match(appSource, /const waitingForChatGpt = quiet && source === "chatgpt"/);
   assert.match(appSource, /className="activity-task-header"/);
   assert.match(appSource, /Chat ID: \$\{group\.threadId\}/);
   assert.match(appSource, /LCA CODEX:[\s\S]*?CODEX NATIVE:/);
