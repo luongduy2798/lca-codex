@@ -4,16 +4,21 @@ import { join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const adapterRoot = join(repoRoot, "src", "adapters", "lca-codex");
-const architecture = readFileSync(join(repoRoot, "docs", "architecture.md"), "utf8");
-const mcpServer = readFileSync(join(adapterRoot, "mcp-server.ts"), "utf8");
-const environment = readFileSync(join(adapterRoot, "environment.ts"), "utf8");
+
+function readSource(path: string): string {
+  return readFileSync(path, "utf8").replace(/\r\n?/g, "\n");
+}
+
+const architecture = readSource(join(repoRoot, "docs", "architecture.md"));
+const mcpServer = readSource(join(adapterRoot, "mcp-server.ts"));
+const environment = readSource(join(adapterRoot, "environment.ts"));
 
 function adapterSources(): Array<{ path: string; source: string }> {
   return readdirSync(adapterRoot, { withFileTypes: true })
     .filter(entry => entry.isFile() && entry.name.endsWith(".ts"))
     .map(entry => ({
       path: entry.name,
-      source: readFileSync(join(adapterRoot, entry.name), "utf8"),
+      source: readSource(join(adapterRoot, entry.name)),
     }));
 }
 
