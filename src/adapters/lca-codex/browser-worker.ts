@@ -1734,7 +1734,11 @@ export class ChatGptBrowserWorker {
       await diagnostics.capture(page, "file-attachment-complete");
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
       const initialResponseTurnCount = await responseTurns.count();
-      const responseTurn = responseTurns.nth(initialResponseTurnCount);
+      // ChatGPT can replace/reuse an assistant-turn scaffold while a response is rendering.
+      // A positional locator based on the pre-send count can therefore become permanently
+      // detached even though the current assistant response is still visible. Track the latest
+      // visible assistant turn so Playwright re-resolves the live DOM after React swaps.
+      const responseTurn = responseTurns.filter({ visible: true }).last();
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async (stageSignal) => {

@@ -1184,6 +1184,12 @@ test("browser completion requires ChatGPT's response-scoped copy action", () => 
   expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
 });
 
+test("browser response tracking follows the latest visible assistant turn across React DOM replacement", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("responseTurns.filter({ visible: true }).last()");
+  expect(workerSource).not.toContain("responseTurns.nth(initialResponseTurnCount)");
+});
+
 test("browser send accepts only conclusive ChatGPT submission evidence", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const idle = {
