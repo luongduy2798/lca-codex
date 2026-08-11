@@ -637,6 +637,11 @@ code {
   content: "";
 }
 
+.browser-tab.is-active {
+  background: var(--color-background-control-active);
+  color: var(--color-text-primary);
+}
+
 .browser-tab > .brand-mark {
   width: 15px;
   height: 15px;

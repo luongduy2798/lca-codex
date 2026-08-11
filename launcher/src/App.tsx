@@ -654,7 +654,7 @@ function BrowserSurface({
       <div className="browser-tab-strip" title={copy.browserTabLimit}>
         {(browser?.tabs ?? []).map((tab) => (
           <div
-            className={`browser-tab${tab.active ? " is-active" : ""}`}
+            className={`browser-tab no-drag${tab.active ? " is-active" : ""}`}
             key={tab.id}
             onClick={() => void selectTab(tab.id)}
             role="tab"
