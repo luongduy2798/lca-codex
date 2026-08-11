@@ -18,6 +18,8 @@ import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
 export const LCA_CODEX_TOOL_HEALTH_PROBE_PROMPT = "LCA_CODEX_NATIVE_TOOL_HEALTH_PROBE_V1";
 const MAX_ACTIVITY_TASK_TITLE_CHARS = 240;
+const CODEX_IDE_CONTEXT_PREFIX = "# Context from my IDE setup:";
+const CODEX_IDE_REQUEST_MARKER = /^## My request:\s*$/m;
 
 function messageText(content: string | CodexContentPart[]): string {
   return typeof content === "string"
@@ -25,9 +27,16 @@ function messageText(content: string | CodexContentPart[]): string {
     : content.filter(part => part.type === "text").map(part => part.text).join("\n");
 }
 
+function codexTaskText(content: string | CodexContentPart[]): string {
+  const text = messageText(content);
+  if (!text.trimStart().startsWith(CODEX_IDE_CONTEXT_PREFIX)) return text;
+  const marker = CODEX_IDE_REQUEST_MARKER.exec(text);
+  return marker ? text.slice(marker.index + marker[0].length) : text;
+}
+
 function activityTaskTitle(parsed: CodexParsedRequest): string | undefined {
   const latestUser = parsed.context.messages.findLast(message => message.role === "user");
-  const title = latestUser ? messageText(latestUser.content).replace(/\s+/g, " ").trim() : "";
+  const title = latestUser ? codexTaskText(latestUser.content).replace(/\s+/g, " ").trim() : "";
   return title ? title.slice(0, MAX_ACTIVITY_TASK_TITLE_CHARS) : undefined;
 }
 
