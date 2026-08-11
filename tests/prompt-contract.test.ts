@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "../src/adapters/lca-codex/prompt";
+import { estimateCompiledLcaCodexInputTokens } from "../src/adapters/lca-codex/usage";
 import { estimateTokens } from "../src/lib/token-estimate";
+import { resolveLcaCodexContextLimits } from "../src/lca-codex-models";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import { LCA_CODEX_MODEL_ID } from "../src/adapters/lca-codex/model";
 import type { CodexParsedRequest } from "../src/types";
@@ -375,6 +377,46 @@ test("compaction prompts are isolated summarization turns without local or nativ
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("web search, browsing, research");
   expect(compiled.text).not.toContain("missing local-computer bridge");
+});
+
+test("oversized Web compaction clips raw tool output so an old task can still recover", () => {
+  const compact = request("high");
+  const hugeToolOutput = `BEGIN-OLD-TOOL-OUTPUT\n${"0123456789abcdef".repeat(60_000)}\nEND-OLD-TOOL-OUTPUT`;
+  compact.context.messages = [
+    { role: "user", content: "Original task: inspect the repository and fix the failing bridge.", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_large", name: "exec_command", arguments: { cmd: "cat huge.log" } }],
+      timestamp: 2,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call_large",
+      toolName: "exec_command",
+      content: hugeToolOutput,
+      isError: false,
+      timestamp: 3,
+    },
+    { role: "user", content: "Keep the completed investigation and continue from the latest result.", timestamp: 4 },
+  ];
+  compact._compactionRequest = true;
+
+  const compiled = compileLcaCodexPrompt(
+    compact,
+    { localToolsEnabled: false, proAvailable: true },
+  );
+  const estimatedInput = estimateCompiledLcaCodexInputTokens(compiled, compact.modelId);
+  const { contextWindow } = resolveLcaCodexContextLimits("high");
+
+  expect(estimatedInput).toBeLessThan(contextWindow);
+  expect(compiled.text.length).toBeLessThan(hugeToolOutput.length / 4);
+  expect(compiled.text).toContain("BEGIN-OLD-TOOL-OUTPUT");
+  expect(compiled.text).toContain("END-OLD-TOOL-OUTPUT");
+  expect(compiled.text).toContain("truncated for compaction");
+  expect(compiled.text).toContain('\"tool_call_id\":\"call_large\"');
+  expect(compiled.text).toContain('\"tool_name\":\"exec_command\"');
+  expect(compiled.text).toContain("Original task: inspect the repository");
+  expect(compiled.text).toContain("continue from the latest result");
 });
 
 test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {

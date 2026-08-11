@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { estimateTokens } from "../../lib/token-estimate";
+import { resolveLcaCodexContextLimits, type LcaCodexAdapterEffort } from "../../lca-codex-models";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import { extractTrustedCodexProjectInstructions } from "./environment";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
@@ -50,7 +51,42 @@ export interface CompiledLcaCodexPrompt {
   contextInputTokens?: number;
 }
 
+interface CompactionContextProjection {
+  serialized: string;
+  images: LcaCodexPromptImage[];
+}
+
+interface CompactionProjectionCaps {
+  system: number;
+  developer: number;
+  user: number;
+  assistant: number;
+  toolResult: number;
+  toolArgument: number;
+}
+
 const RETIRED_TURN_HANDLE = /\b(turn|binding)_[A-Za-z0-9_-]{24,}/g;
+
+// Keep these in sync with usage.ts. Compaction needs to reserve the same invisible ChatGPT
+// platform/image budget before deciding how much old history is safe to place in the composer.
+const CHATGPT_COMPACTION_PLATFORM_RESERVE_TOKENS = 8_192;
+const CHATGPT_COMPACTION_IMAGE_RESERVE_TOKENS = 4_096;
+const CHATGPT_COMPACTION_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
+// The browser compactor still needs room to write a useful checkpoint. Targeting 78% of the hard
+// context cap leaves roughly 33k-41k tokens of output/headroom on the non-Pro modes.
+const CHATGPT_COMPACTION_INPUT_TARGET_FRACTION = 0.78;
+// The fixed transport contract is normally far smaller than this, but reserving 8k keeps changes
+// to that contract from silently pushing an old task back over the browser preflight limit.
+const CHATGPT_COMPACTION_TRANSPORT_RESERVE_TOKENS = 8_192;
+const CHATGPT_COMPACTION_MIN_CONTEXT_TOKENS = 4_096;
+
+const COMPACTION_PROJECTION_LEVELS: readonly CompactionProjectionCaps[] = [
+  { system: 24_000, developer: 24_000, user: 32_000, assistant: 24_000, toolResult: 8_000, toolArgument: 8_000 },
+  { system: 12_000, developer: 12_000, user: 16_000, assistant: 12_000, toolResult: 4_000, toolArgument: 4_000 },
+  { system: 6_000, developer: 6_000, user: 8_000, assistant: 8_000, toolResult: 2_000, toolArgument: 2_000 },
+  { system: 2_000, developer: 2_000, user: 4_000, assistant: 4_000, toolResult: 1_000, toolArgument: 1_000 },
+  { system: 512, developer: 512, user: 1_000, assistant: 1_000, toolResult: 256, toolArgument: 256 },
+] as const;
 
 /**
  * The accumulated Codex context replays earlier turns, including the broker handles those turns
@@ -301,6 +337,207 @@ function recentContextPreview(text: string, charBudget: number): string {
   const head = Math.ceil(usable * 0.65);
   const tail = Math.max(0, usable - head);
   return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+interface CompactionCharBudget {
+  remaining: number;
+}
+
+function compactionTextPreview(text: string, charBudget: number): string {
+  if (text.length <= charBudget) return text;
+  if (charBudget <= 48) return text.slice(0, Math.max(0, charBudget));
+  const marker = `\n...[truncated for compaction: ${Math.max(0, text.length - charBudget).toLocaleString("en-US")} chars omitted]...\n`;
+  const usable = Math.max(1, charBudget - marker.length);
+  const head = Math.ceil(usable * 0.7);
+  const tail = Math.max(0, usable - head);
+  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+function consumeCompactionText(text: string, budget: CompactionCharBudget): string {
+  if (budget.remaining <= 0) return "";
+  const projected = compactionTextPreview(text, budget.remaining);
+  budget.remaining = Math.max(0, budget.remaining - projected.length);
+  return projected;
+}
+
+function projectCompactionJsonValue(value: unknown, budget: CompactionCharBudget): unknown {
+  if (typeof value === "string") return consumeCompactionText(value, budget);
+  if (Array.isArray(value)) return value.map(child => projectCompactionJsonValue(child, budget));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+      key,
+      projectCompactionJsonValue(child, budget),
+    ]),
+  );
+}
+
+function projectCompactionInputContent(content: unknown, charCap: number): unknown {
+  const budget: CompactionCharBudget = { remaining: charCap };
+  if (typeof content === "string") return consumeCompactionText(content, budget);
+  if (!Array.isArray(content)) return projectCompactionJsonValue(content, budget);
+  return content.map(part => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) {
+      return projectCompactionJsonValue(part, budget);
+    }
+    const projected = { ...(part as Record<string, unknown>) };
+    if (projected.type === "image_attachment") return projected;
+    if (typeof projected.text === "string") projected.text = consumeCompactionText(projected.text, budget);
+    return projected;
+  });
+}
+
+function projectCompactionAssistantContent(
+  content: unknown,
+  textCharCap: number,
+  argumentCharCap: number,
+): unknown {
+  if (!Array.isArray(content)) return content;
+  const textBudget: CompactionCharBudget = { remaining: textCharCap };
+  return content.map(part => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) return part;
+    const projected = { ...(part as Record<string, unknown>) };
+    if ((projected.type === "text" || projected.type === "thinking_summary") && typeof projected.text === "string") {
+      projected.text = consumeCompactionText(projected.text, textBudget);
+    }
+    if (projected.type === "tool_call" && "arguments" in projected) {
+      projected.arguments = projectCompactionJsonValue(
+        projected.arguments,
+        { remaining: argumentCharCap },
+      );
+    }
+    return projected;
+  });
+}
+
+function projectCompactionEnvelope(
+  envelope: Record<string, unknown>,
+  caps: CompactionProjectionCaps,
+): Record<string, unknown> {
+  const systemBudget: CompactionCharBudget = { remaining: caps.system };
+  const system = Array.isArray(envelope.system)
+    ? envelope.system.map(item => typeof item === "string"
+      ? consumeCompactionText(item, systemBudget)
+      : projectCompactionJsonValue(item, systemBudget))
+    : envelope.system;
+  const messages = Array.isArray(envelope.messages)
+    ? envelope.messages.map(item => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+      const message = { ...(item as Record<string, unknown>) };
+      const role = String(message.role ?? "");
+      if (role === "assistant") {
+        message.content = projectCompactionAssistantContent(message.content, caps.assistant, caps.toolArgument);
+      } else {
+        const contentCap = role === "tool_result"
+          ? caps.toolResult
+          : role === "developer"
+            ? caps.developer
+            : caps.user;
+        message.content = projectCompactionInputContent(message.content, contentCap);
+      }
+      return message;
+    })
+    : envelope.messages;
+  return { ...envelope, system, messages };
+}
+
+function compactionImageReserveTokens(images: readonly LcaCodexPromptImage[]): number {
+  return images.reduce((total, image) => total + (image.detail === "original"
+    ? CHATGPT_COMPACTION_ORIGINAL_IMAGE_RESERVE_TOKENS
+    : CHATGPT_COMPACTION_IMAGE_RESERVE_TOKENS), 0);
+}
+
+function compactionContextTokenBudget(
+  effort: LcaCodexAdapterEffort,
+  images: readonly LcaCodexPromptImage[],
+): number {
+  const { contextWindow } = resolveLcaCodexContextLimits(effort);
+  const targetInputTokens = Math.floor(contextWindow * CHATGPT_COMPACTION_INPUT_TARGET_FRACTION);
+  return Math.max(
+    CHATGPT_COMPACTION_MIN_CONTEXT_TOKENS,
+    targetInputTokens
+      - CHATGPT_COMPACTION_PLATFORM_RESERVE_TOKENS
+      - CHATGPT_COMPACTION_TRANSPORT_RESERVE_TOKENS
+      - compactionImageReserveTokens(images),
+  );
+}
+
+function serializedCompactionEnvelope(
+  envelope: Record<string, unknown>,
+): string {
+  return withoutRetiredTurnHandles(JSON.stringify(envelope));
+}
+
+function compactionEnvelopeWithinBudget(
+  envelope: Record<string, unknown>,
+  modelId: string,
+  tokenBudget: number,
+): { serialized: string; fits: boolean } {
+  const serialized = serializedCompactionEnvelope(envelope);
+  return { serialized, fits: estimateTokens(serialized, modelId) <= tokenBudget };
+}
+
+function selectedCompactionFallbackEnvelope(
+  projected: Record<string, unknown>,
+  modelId: string,
+  tokenBudget: number,
+): string {
+  const messages = Array.isArray(projected.messages) ? projected.messages : [];
+  const firstUserIndex = messages.findIndex(item =>
+    Boolean(item && typeof item === "object" && !Array.isArray(item) && (item as { role?: unknown }).role === "user")
+  );
+  let tailCount = Math.min(messages.length, 64);
+  for (;;) {
+    const tailStart = Math.max(0, messages.length - tailCount);
+    const selected = messages.slice(tailStart);
+    if (firstUserIndex >= 0 && firstUserIndex < tailStart) selected.unshift(messages[firstUserIndex]);
+    const candidate = {
+      ...projected,
+      // The live Codex turn will resend its active system/developer contract after compaction. In
+      // this emergency fallback, task messages are more valuable than duplicating that scaffolding.
+      system: [],
+      compaction_projection: {
+        truncated: true,
+        omitted_messages: Math.max(0, messages.length - selected.length),
+        note: "Older oversized history was clipped so this checkpoint could fit the model context window.",
+      },
+      messages: selected,
+    };
+    const result = compactionEnvelopeWithinBudget(candidate, modelId, tokenBudget);
+    if (result.fits || tailCount <= 4) return result.serialized;
+    tailCount = Math.max(4, Math.floor(tailCount * 0.65));
+  }
+}
+
+/**
+ * Remote compaction is the recovery path for a task that is already close to (or beyond) Codex's
+ * effective context window. Replaying every raw tool result into the browser compactor defeats that
+ * recovery path: old shells/build logs can be hundreds of thousands of characters even though the
+ * conversational state itself is small. Preserve the full transcript whenever it fits; otherwise
+ * progressively clip verbose payloads, then fall back to the task origin plus the newest messages.
+ */
+function projectCompactionContext(
+  snapshot: ChatGptContextSnapshot,
+  modelId: string,
+  effort: LcaCodexAdapterEffort,
+): CompactionContextProjection {
+  const tokenBudget = compactionContextTokenBudget(effort, snapshot.images);
+  if (estimateTokens(snapshot.serialized, modelId) <= tokenBudget) {
+    return { serialized: snapshot.serialized, images: snapshot.images };
+  }
+
+  const parsed = JSON.parse(snapshot.serialized) as Record<string, unknown>;
+  let smallest: Record<string, unknown> | undefined;
+  for (const caps of COMPACTION_PROJECTION_LEVELS) {
+    const projected = projectCompactionEnvelope(parsed, caps);
+    smallest = projected;
+    const result = compactionEnvelopeWithinBudget(projected, modelId, tokenBudget);
+    if (result.fits) return { serialized: result.serialized, images: snapshot.images };
+  }
+
+  const serialized = selectedCompactionFallbackEnvelope(smallest ?? parsed, modelId, tokenBudget);
+  const usedImages = snapshot.images.filter(image => serialized.includes(JSON.stringify(image.ref)));
+  return { serialized, images: usedImages };
 }
 
 function projectedRecentContextEntry(
@@ -571,6 +808,9 @@ export function compileLcaCodexPrompt(
     throw new Error("A read-only LCA Codex effort must not receive a local-tool capability token");
   }
   const snapshot = suppliedSnapshot ?? compileChatGptContextSnapshot(parsed);
+  const compactionProjection = parsed._compactionRequest
+    ? projectCompactionContext(snapshot, parsed.modelId, mode.effort)
+    : undefined;
   const mcpLazy = mode.localTools && !parsed._compactionRequest;
   const normalizedMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
   const latestUserIndex = latestUserMessageIndex(normalizedMessages);
@@ -682,7 +922,7 @@ export function compileLcaCodexPrompt(
     ]
     : [
       "<codex_context_json>",
-      snapshot.serialized,
+      compactionProjection?.serialized ?? snapshot.serialized,
       "</codex_context_json>",
     ];
   const text = [
@@ -694,7 +934,7 @@ export function compileLcaCodexPrompt(
   ].join("\n");
   return {
     text,
-    images: mcpLazy ? activeImages : snapshot.images,
+    images: mcpLazy ? activeImages : compactionProjection?.images ?? snapshot.images,
     transport: mcpLazy ? "mcp-lazy" : "inline",
     ...(mcpLazy ? {
       contextSnapshotId: snapshot.id,
