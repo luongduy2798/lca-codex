@@ -114,8 +114,8 @@ describe("native /models augmentation", () => {
       { effort: "high", description: "High" },
     ]);
     expect(routed[0]).toMatchObject({
-      context_window: 150_000,
-      auto_compact_token_limit: 135_000,
+      context_window: 272_000,
+      auto_compact_token_limit: 244_800,
     });
     expect(models.some(model => model.slug === "lca-codex/pro")).toBe(false);
   });
@@ -139,9 +139,9 @@ describe("native /models augmentation", () => {
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[3]).toMatchObject({
       slug: "lca-codex",
-      context_window: 150_000,
-      max_context_window: 150_000,
-      auto_compact_token_limit: 135_000,
+      context_window: 272_000,
+      max_context_window: 272_000,
+      auto_compact_token_limit: 244_800,
     });
   });
 

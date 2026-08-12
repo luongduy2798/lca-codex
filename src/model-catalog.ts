@@ -65,9 +65,9 @@ export function buildLcaCodexModel(
     throw new Error("LCA Codex model template must be a native Codex model");
   }
   const reasoningModes = availableLcaCodexReasoningModes(config.proAvailable);
-  // Codex exposes context size per model, not per reasoning level. Use the smallest supported
-  // window in the catalog so Instant/Medium never overrun; the browser runtime still enforces the
-  // exact 150k/185k/256k/272k limit for the reasoning mode selected on each turn.
+  // Codex exposes context size per model, not per reasoning level. Browser reasoning effort no
+  // longer changes how much native Codex history exists: the outer task owns one 272k lifetime and
+  // compacts at 90%, while browser prompts stay independently bounded by lazy-context projection.
   const catalogLimits = resolveLcaCodexContextLimits("low");
   const model: JsonObject = {
     ...structuredClone(template),
@@ -79,8 +79,7 @@ export function buildLcaCodexModel(
     supported_in_api: true,
     priority: LCA_CODEX_MODEL_PRIORITY,
     multi_agent_version: "v1",
-    // Pro's lack of local computer tools is enforced by the adapter runtime after reasoning is
-    // resolved; the shared model must remain tool-capable so other reasoning levels keep Codex tools.
+    // All reasoning levels share the same connector/tool capability when it is enabled.
     tool_mode: template.tool_mode,
     upgrade: null,
     default_reasoning_level: "high",

@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 import { CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "../src/adapters/lca-codex/prompt";
-import { estimateCompiledLcaCodexInputTokens } from "../src/adapters/lca-codex/usage";
 import { estimateTokens } from "../src/lib/token-estimate";
-import { resolveLcaCodexContextLimits } from "../src/lca-codex-models";
 import { SUMMARY_PREFIX } from "../src/responses/compaction";
 import { LCA_CODEX_MODEL_ID } from "../src/adapters/lca-codex/model";
 import type { CodexParsedRequest } from "../src/types";
@@ -350,7 +348,7 @@ test("AGENTS-looking text from the human is never promoted to Codex project inst
 test("read-only prompts resume without exposing a bind capability", () => {
   const compiled = compileLcaCodexPrompt(
     request("max"),
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: false, proAvailable: true },
   );
 
   expect(compiled.text).toContain("The task context is complete. Execute the latest active user request now under the capability contract above.");
@@ -364,22 +362,28 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
-test("compaction prompts are isolated summarization turns without local or native tool instructions", () => {
+test("compaction prompts use the frozen snapshot through read-only lazy context", () => {
   const compact = request("high");
   compact._compactionRequest = true;
+  const token = "turn_12345678901234567890123456789012";
   const compiled = compileLcaCodexPrompt(
     compact,
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: true, proAvailable: true },
+    token,
   );
 
   expect(compiled.text).toContain("This is a Codex history-compaction checkpoint, not a normal task turn.");
-  expect(compiled.text).toContain("Produce the requested checkpoint summary now without calling tools.");
-  expect(compiled.text).not.toContain("codex_bind_turn");
+  expect(compiled.text).toContain(`codex_bind_turn with turn_token ${token}`);
+  expect(compiled.text).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
+  expect(compiled.text).toContain("Compact may discard wording but must preserve semantic task state");
+  expect(compiled.text).not.toContain("<codex_context_json>");
   expect(compiled.text).not.toContain("web search, browsing, research");
   expect(compiled.text).not.toContain("missing local-computer bridge");
+  expect(compiled.transport).toBe("mcp-lazy");
+  expect(compiled.contextSnapshotId).toBeDefined();
 });
 
-test("oversized Web compaction clips raw tool output so an old task can still recover", () => {
+test("oversized compaction keeps raw history in the frozen snapshot instead of the browser prompt", () => {
   const compact = request("high");
   const hugeToolOutput = `BEGIN-OLD-TOOL-OUTPUT\n${"0123456789abcdef".repeat(60_000)}\nEND-OLD-TOOL-OUTPUT`;
   compact.context.messages = [
@@ -400,23 +404,33 @@ test("oversized Web compaction clips raw tool output so an old task can still re
     { role: "user", content: "Keep the completed investigation and continue from the latest result.", timestamp: 4 },
   ];
   compact._compactionRequest = true;
+  const snapshot = compileChatGptContextSnapshot(compact);
 
   const compiled = compileLcaCodexPrompt(
     compact,
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+    snapshot,
   );
-  const estimatedInput = estimateCompiledLcaCodexInputTokens(compiled, compact.modelId);
-  const { contextWindow } = resolveLcaCodexContextLimits("high");
 
-  expect(estimatedInput).toBeLessThan(contextWindow);
   expect(compiled.text.length).toBeLessThan(hugeToolOutput.length / 4);
-  expect(compiled.text).toContain("BEGIN-OLD-TOOL-OUTPUT");
-  expect(compiled.text).toContain("END-OLD-TOOL-OUTPUT");
-  expect(compiled.text).toContain("truncated for compaction");
-  expect(compiled.text).toContain('\"tool_call_id\":\"call_large\"');
-  expect(compiled.text).toContain('\"tool_name\":\"exec_command\"');
-  expect(compiled.text).toContain("Original task: inspect the repository");
+  expect(compiled.text).toContain('"transport":"mcp-lazy"');
+  expect(compiled.text).toContain('"truncated":true');
+  expect(compiled.text).toContain('"history_ref":"history-2"');
   expect(compiled.text).toContain("continue from the latest result");
+  expect(snapshot.serialized).toContain("BEGIN-OLD-TOOL-OUTPUT");
+  expect(snapshot.serialized).toContain("END-OLD-TOOL-OUTPUT");
+  expect(snapshot.serialized).toContain('"tool_call_id":"call_large"');
+});
+
+test("compaction requires lazy context instead of falling back to an inline history blob", () => {
+  const compact = request("high");
+  compact._compactionRequest = true;
+
+  expect(() => compileLcaCodexPrompt(
+    compact,
+    { localToolsEnabled: false, proAvailable: true },
+  )).toThrow("compaction requires the lazy context connector");
 });
 
 test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {
@@ -436,7 +450,7 @@ test("assigns prior assistant output to the model and never attributes Codex con
   ];
   const compiled = compileLcaCodexPrompt(
     attributed,
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: false, proAvailable: true },
   );
   const encoded = compiled.text.match(/<codex_context_json>\n(.+)\n<\/codex_context_json>/s)?.[1];
   const envelope = JSON.parse(encoded!) as { messages: Array<Record<string, unknown>> };
@@ -491,7 +505,7 @@ test("a long task keeps the newest images and drops the overflow instead of fail
   expect(snapshot.serialized).toContain("step 13");
 });
 
-test("Web compaction attaches the newest ten images as files and never embeds their base64 in prompt text", () => {
+test("Web compaction attaches only the active image and leaves older images in lazy snapshot refs", () => {
   const imagePayloads = Array.from({ length: 13 }, (_unused, index) =>
     Buffer.from(`compaction-image-${index + 1}`).toString("base64"));
   const parsed: CodexParsedRequest = {
@@ -511,19 +525,22 @@ test("Web compaction attaches the newest ten images as files and never embeds th
     options: { reasoning: "high" },
     _compactionRequest: true,
   };
+  const snapshot = compileChatGptContextSnapshot(parsed);
 
   const compiled = compileLcaCodexPrompt(
     parsed,
-    { localToolsEnabled: false, proAvailable: true },
+    { localToolsEnabled: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+    snapshot,
   );
 
-  expect(compiled.images.map(image => image.imageUrl)).toEqual(
-    imagePayloads.slice(-10).map(payload => `data:image/png;base64,${payload}`),
-  );
+  expect(compiled.images.map(image => image.imageUrl)).toEqual([
+    `data:image/png;base64,${imagePayloads.at(-1)}`,
+  ]);
   expect(compiled.text).not.toContain("data:image");
   for (const payload of imagePayloads) expect(compiled.text).not.toContain(payload);
-  expect(compiled.text.match(/"type":"image_attachment"/g)).toHaveLength(10);
-  expect(compiled.text.match(/older image not attached/g)).toHaveLength(3);
+  expect(snapshot.attachments).toHaveLength(12);
+  expect(compiled.text).toContain('"attachments":12');
 });
 
 test("persisted one-pixel image sentinels are not attached to ChatGPT", () => {
@@ -601,7 +618,7 @@ test("the replayed context never carries a finished turn's broker handles", () =
 test("requires ChatGPT-native rich results to include a safe Markdown answer for Codex", () => {
   const compiled = compileLcaCodexPrompt(
     request("max"),
-    { localToolsEnabled: true, proAvailable: true },
+    { localToolsEnabled: false, proAvailable: true },
   );
 
   expect(compiled.text).toContain("Return required rich results as ordinary Markdown too");

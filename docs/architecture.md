@@ -25,8 +25,10 @@ current Codex task.
 - Exposes one `lca-codex` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
   matching ChatGPT browser reasoning mode; Extra High and Pro are advertised only when the
   authenticated account exposes Pro.
-- Instant through Extra High are tool-capable. Pro remains intentionally read-only for local
-  workspace tools after reasoning is resolved at runtime.
+- Instant, Medium, High, Extra High, and Pro are all tool-capable when the custom connector is
+  enabled. Reasoning effort selects the ChatGPT browser mode; it does not independently change
+  local-tool access. An explicitly connector-disabled runtime remains read-only regardless of
+  reasoning level.
 - ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
@@ -82,21 +84,26 @@ its outer Codex turn.
 
 Historical image bytes remain in the broker and are returned only when `codex_context` is called with
 `action=image` for an attachment reference discovered by a history result. They are no longer
-re-uploaded into every fresh Temporary Chat. Read-only routes that do not attach the connector — Pro
-and routed compaction — retain the complete inline JSON fallback.
+re-uploaded into every fresh Temporary Chat. Normal connector-backed turns and routed compaction use
+the same bounded/lazy context transport; there is no full-history JSON fallback for compaction.
 
-The appended model advertises the conservative Instant/Medium window because Codex catalog context
-size is model-wide rather than reasoning-specific. The runtime still enforces the exact per-mode
-150k/185k/256k/272k limits and a ten-percent auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image
-reserves. Lazy-context turns account for the active browser bootstrap immediately; historical content
-is no longer charged up front merely because it exists in the broker snapshot. The independent
-composer-size boundary therefore applies primarily to inline fallback routes.
+The appended model advertises one outer Codex lifetime for every reasoning level: 272k tokens, with
+native auto-compaction at 244.8k (90%). Browser reasoning effort changes reasoning only; there are no
+per-mode inline context limits. Independently, the ChatGPT Web side keeps
+the active bootstrap bounded to at most four recent exchanges within an 8k-token budget. Effective
+browser input accounting includes fixed platform costs plus a 20k-token safety reserve per attached
+image; 600k is the soft tuning watermark and 725k is the hard browser safety guard. Historical
+content that remains only in the broker snapshot is not charged up front.
 
-Routed compaction v1/v2 runs as a dedicated read-only browser summarization turn with no broker or
-local tools, then returns the native replacement-history shape expected by Codex. A prompt-level
-checkpoint marker is translated into a visible Codex trace item; tool-capable turns re-bind the
-same capability after that checkpoint. Visible ChatGPT status rows become reasoning summaries,
-while stable prose between rows becomes native Codex commentary.
+Routed compaction v1/v2 runs as a dedicated browser checkpoint turn over a frozen broker snapshot.
+It must bind the lazy context connector and may use only read-only `codex_context` retrieval
+(`recent`, `search`, `get`, bounded `full`, and `image`); native execution, mutations, tool-registry
+calls, and ChatGPT-native tools are prohibited during compaction. The resulting checkpoint may drop
+old wording but must preserve semantic task state and useful history/attachment references before
+returning the native replacement-history shape expected by Codex. A prompt-level checkpoint marker
+is translated into a visible Codex trace item; later tool-capable turns bind their own turn-scoped
+capability as needed. Visible ChatGPT status rows become reasoning summaries, while stable prose
+between rows becomes native Codex commentary.
 
 ## Retry policy
 

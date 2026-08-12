@@ -290,6 +290,12 @@ export class ChatGptTurnSession {
 }
 
 export class ChatGptTurnSessions {
+  async clearAndWait(): Promise<number> {
+    const executionKeys = [...this.entries.keys()];
+    await Promise.all(executionKeys.map(executionKey => this.retireAndWait(executionKey)));
+    return executionKeys.length;
+  }
+
   private readonly entries = new Map<string, ChatGptTurnSession>();
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly retryAttempts = new Map<string, { attempt: number; updatedAt: number }>();

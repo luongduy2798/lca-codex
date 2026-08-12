@@ -15,10 +15,12 @@
 
 Pick the single **LCA Codex** model in Codex's native model picker, then choose its reasoning level
 to select Instant, Medium, High, Extra High, or Pro behavior. Every turn still uses a fresh ChatGPT
-Temporary Chat. With the tool bridge active, the composer receives only active instructions, the
-latest user request, and current-turn images. Older history/images stay in the immutable broker
-snapshot and are retrieved through the `lca-codex` connector only when needed. Visible reasoning,
-native Codex tool activity, and Markdown stream back into the same Codex task.
+Temporary Chat. With the tool bridge active, the composer receives a bounded active bootstrap:
+active system/project instructions, the current checkpoint, up to four recent exchanges within an
+8k-token budget, the latest user request, and current-turn images. Deeper history and historical
+images stay in the immutable broker snapshot and are retrieved through the `lca-codex` connector
+only when needed. Visible reasoning, native Codex tool activity, and Markdown stream back into the
+same Codex task.
 
 ```text
 Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──▶ ChatGPT
@@ -41,15 +43,17 @@ back to the tools of that same Codex task.
   remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
   computer. Every browser turn starts in a fresh ChatGPT Temporary Chat. Tool-capable bridge
-  turns freeze that accumulated context into an immutable per-turn snapshot and pull it over MCP in
-  ordered chunks; browser chats are never reused as a second history authority.
-- **A ChatGPT Web bridge into the Codex harness.** Instant through Extra High can use the active
-  Codex task's filesystem, shell, images, approvals, and configured tools/apps through MCP. Calls
-  and real results stay inside the same browser response—nothing is simulated as text.
-- **Pro stays useful.** Pro is the one exception: ChatGPT's current Pro mode does not expose the
-  custom MCP connector this bridge needs. Its native capabilities, including web search and
-  research, remain available. Gather local workspace context with Instant through Extra High,
-  switch to Pro, and Pro receives the complete accumulated Codex task for deeper analysis.
+  turns freeze that accumulated context into an immutable per-turn snapshot and retrieve selected
+  older state over MCP on demand; browser chats are never reused as a second history authority.
+- **A ChatGPT Web bridge into the Codex harness.** Instant, Medium, High, Extra High, and Pro all use
+  the same active Codex task bridge when the custom MCP connector is enabled. Filesystem, shell,
+  images, approvals, and configured tools/apps stay owned by Codex; calls and real results remain
+  inside the same browser response—nothing is simulated as text.
+- **Bounded context at every reasoning level.** Browser reasoning effort no longer changes how much
+  Codex history is replayed inline. Each connector-backed turn gets a small active bootstrap (up to
+  four recent exchanges within an 8k-token budget) and can fetch older task state lazily through the
+  connector. If the connector is explicitly disabled, the selected reasoning mode runs read-only
+  instead.
 - **Fail-closed and manually tested.** Model selection, large context transport, images, streaming,
   visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
   macOS and Windows 11. UI drift and missing capabilities produce explicit errors rather than
@@ -92,23 +96,25 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 ## Runtime contract
 
 LCA Codex has one runtime shape: the **ChatGPT Web bridge**. The OpenAI tunnel and ChatGPT MCP
-connector are required before setup is complete. Instant through Extra High can use the active
-Codex tool registry; Pro remains intentionally read-only for local workspace tools.
+connector are required before setup is complete. Instant, Medium, High, Extra High, and Pro all use
+the same active Codex tool registry when the connector is enabled.
 
 Every picker entry has one fixed ChatGPT reasoning mode. Codex still displays its built-in Effort and
-Speed rows, but changing them cannot silently change the selected browser model. Pro receives the full
-context already collected by Codex, but ChatGPT Pro cannot initiate local MCP/tool calls.
+Speed rows, but changing them cannot silently change the selected browser model. Reasoning effort no
+longer changes how much conversation history is copied into the browser prompt: all tool-capable modes
+use the same bounded active bootstrap and retrieve older context lazily.
 
 ## Codex tool bridge
 
 The bridge connects ChatGPT back to the current Codex task through the official
 [OpenAI tunnel-client](https://github.com/openai/tunnel-client). Each fresh Temporary Chat receives
 only a projected active bootstrap: active system/custom developer overrides, the AGENTS/project
-instructions already resolved by Codex, the latest user request, and current-turn images. Standard
-Codex model/skill/permission/app/plugin instruction scaffolding stays in the immutable broker and is
-retrieved with `codex_context action=instructions` only when needed; older conversation history and
-images are lazy too. Binding is also on demand: a trivial request can answer without any connector
-round trip, while native file/command/MCP work
+instructions already resolved by Codex, the current checkpoint, up to four recent exchanges within
+an 8k-token budget, the latest user request, and current-turn images. Standard Codex
+model/skill/permission/app/plugin instruction scaffolding stays in the immutable broker and is
+retrieved with `codex_context action=instructions` only when needed; conversation history deeper
+than the bounded recent working set and historical images are lazy too. Binding is also on demand:
+a trivial request can answer without any connector round trip, while native file/command/MCP work
 still executes through the exact active Codex harness tool registry. The tunnel is outbound: it does
 not expose a public IP, open an inbound port, or require router forwarding.
 

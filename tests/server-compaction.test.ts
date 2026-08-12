@@ -33,7 +33,7 @@ function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
   };
 }
 
-test("compacts LCA Codex v1 through a dedicated read-only browser summarization turn", async () => {
+test("compacts LCA Codex v1 through a dedicated lazy-context browser checkpoint turn", async () => {
   const providers: CodexProviderConfig[] = [];
   const config = defaultConfig();
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {

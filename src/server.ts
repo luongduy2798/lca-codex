@@ -476,8 +476,9 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        const cancelled = chatGptTurnSessions.clear();
-        return Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() });
+        return chatGptTurnSessions.clearAndWait().then(cancelled => (
+          Response.json({ status: "ok", cancelled_browser_turns: cancelled, ...activity() })
+        ));
       }
       if (req.method === "POST" && url.pathname === "/admin/codex-lifecycle") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });

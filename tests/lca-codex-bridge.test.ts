@@ -823,7 +823,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       effort: "max",
       displayLabel: "Pro",
       uiEffortIndex: 4,
-      localTools: false,
+      localTools: true,
     });
     expect(resolveLcaCodexModelMode(LCA_CODEX_MODEL_ID, "xhigh", toolCapabilities)).toMatchObject({
       uiEffortIndex: 3,
@@ -840,7 +840,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(() => resolveLcaCodexModelMode("unknown", "high", toolCapabilities)).toThrow("model is not supported");
   });
 
-  test("builds a context-complete Pro prompt without exposing any local-tool capability", () => {
+  test("keeps an explicit connector-disabled Pro turn read-only", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = proRequest();
     request.context.systemPrompt = ["system-rule", "repo-rule"];
@@ -888,11 +888,18 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       timestamp: 4,
     }];
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
-    const configuredReadOnlyWarning = chatGptReadOnlyContextWarning(proRequest(), toolCapabilities);
-    expect(configuredReadOnlyWarning).toContain("Codex mode is configured");
-    expect(configuredReadOnlyWarning).not.toContain("configure MCP in the LCA Codex launcher");
+    expect(chatGptReadOnlyContextWarning(proRequest(), toolCapabilities)).toBeUndefined();
     expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
     expect(() => compileLcaCodexPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
+
+    const lazyPro = compileLcaCodexPrompt(
+      proRequest(),
+      toolCapabilities,
+      "turn_12345678901234567890123456789012",
+    );
+    expect(lazyPro.transport).toBe("mcp-lazy");
+    expect(lazyPro.text).toContain("codex_bind_turn");
+    expect(lazyPro.text).not.toContain("LCA Codex Pro with no lca-codex bridge");
   });
 
   test("reports conservative nonzero usage for browser text and image context", () => {
@@ -1464,8 +1471,10 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(compactEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
       expect(originalBrowserStopped).toBe(true);
       expect(originalBrowserReceivedToolResult).toBe(false);
+      expect(compactionPrompt).toContain('"transport":"mcp-lazy"');
+      expect(compactionPrompt).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
       expect(compactionPrompt).toContain(`"tool_call_id":"${callStart!.id}"`);
-      expect(compactionPrompt).toContain('"role":"tool_result"');
+      expect(compactionPrompt).not.toContain("<codex_context_json>");
 
       const secondRequest = rawWireRequest(environmentXml);
       secondRequest.context.messages.push({
@@ -1551,7 +1560,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     }
   });
 
-  test("runs Pro as one context-complete read-only browser turn with native warning, tracing, and exact replay", async () => {
+  test("runs connector-disabled Pro as one read-only browser turn with native warning, tracing, and exact replay", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-pro-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "lca-codex",

@@ -115,13 +115,18 @@ test("authenticated lifecycle control cancels orphaned browser turns", async () 
   const config = { ...defaultConfig(), port: 0 };
   const server = startServer(config);
   let cancelled = 0;
+  let resolveBrowser!: (answer: string) => void;
+  const browser = new Promise<string>(resolve => { resolveBrowser = resolve; });
   chatGptTurnSessions.clear();
   chatGptTurnSessions.getOrCreate("orphan", () => ({
     mode: "read-only",
-    browser: new Promise<string>(() => {}),
+    browser,
     trace: new ChatGptTraceFeed(),
     text: new ChatGptTextFeed(),
-    cancel: () => { cancelled += 1; },
+    cancel: () => {
+      cancelled += 1;
+      resolveBrowser("cancelled");
+    },
   }));
 
   try {

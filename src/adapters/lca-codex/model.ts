@@ -34,6 +34,6 @@ export function resolveLcaCodexModelMode(
     effort: mode.adapterEffort,
     displayLabel: mode.displayLabel,
     uiEffortIndex: mode.uiEffortIndex,
-    localTools: mode.adapterEffort === "max" ? false : capabilities.localToolsEnabled,
+    localTools: capabilities.localToolsEnabled,
   };
 }

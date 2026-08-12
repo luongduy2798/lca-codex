@@ -10,10 +10,9 @@ import type { BrokerToolRequest } from "./turn-broker";
 const ESTIMATE_TURN_TOKEN = "turn_00000000000000000000000000000000";
 
 // ChatGPT's product system prompt and the fixed lca-codex MCP schemas are not present in the
-// visible composer text. Reserve them explicitly; over-counting fails safe by compacting earlier.
+// visible composer text. Reserve them explicitly so the browser hard gate remains conservative.
 const CHATGPT_PLATFORM_RESERVE_TOKENS = 8_192;
-const CHATGPT_IMAGE_RESERVE_TOKENS = 4_096;
-const CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS = 8_192;
+export const CHATGPT_IMAGE_SAFETY_RESERVE_TOKENS = 20_000;
 
 export interface LcaCodexRoundEvidence {
   answer?: string;
@@ -30,9 +29,7 @@ export function estimateCompiledLcaCodexInputTokens(
   modelId: string,
 ): number {
   const imageTokens = compiled.images.reduce(
-    (total, image) => total + (image.detail === "original"
-      ? CHATGPT_ORIGINAL_IMAGE_RESERVE_TOKENS
-      : CHATGPT_IMAGE_RESERVE_TOKENS),
+    total => total + CHATGPT_IMAGE_SAFETY_RESERVE_TOKENS,
     0,
   );
   return CHATGPT_PLATFORM_RESERVE_TOKENS

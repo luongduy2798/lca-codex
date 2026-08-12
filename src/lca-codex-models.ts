@@ -7,31 +7,22 @@ export const LCA_CODEX_BASE_MODEL = "gpt-5.6-sol";
 export type LcaCodexCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type LcaCodexAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export const LCA_CODEX_INSTANT_MEDIUM_CONTEXT_WINDOW = 150_000;
-export const LCA_CODEX_HIGH_CONTEXT_WINDOW = 185_000;
-export const LCA_CODEX_EXTRA_HIGH_CONTEXT_WINDOW = 256_000;
-export const LCA_CODEX_PRO_CONTEXT_WINDOW = 272_000;
+/** Native Codex owns one conversation lifetime regardless of the selected browser reasoning effort. */
+export const LCA_CODEX_CONTEXT_WINDOW = 272_000;
+export const LCA_CODEX_AUTO_COMPACT_TOKEN_LIMIT = 244_800;
 
 export interface LcaCodexContextLimits {
   contextWindow: number;
   autoCompactTokenLimit: number;
 }
 
-/** Resolve the product limit for the selected visible LCA Codex mode. */
+/** Resolve the outer Codex lifetime limit. Browser reasoning effort does not change history size. */
 export function resolveLcaCodexContextLimits(
-  effort: LcaCodexAdapterEffort,
+  _effort: LcaCodexAdapterEffort,
 ): LcaCodexContextLimits {
-  const contextWindow = effort === "max"
-    ? LCA_CODEX_PRO_CONTEXT_WINDOW
-    : effort === "xhigh"
-      ? LCA_CODEX_EXTRA_HIGH_CONTEXT_WINDOW
-      : effort === "high"
-        ? LCA_CODEX_HIGH_CONTEXT_WINDOW
-        : LCA_CODEX_INSTANT_MEDIUM_CONTEXT_WINDOW;
   return {
-    contextWindow,
-    // Leave ten percent for Codex to submit and receive the compact checkpoint before the hard cap.
-    autoCompactTokenLimit: Math.floor(contextWindow * 0.9),
+    contextWindow: LCA_CODEX_CONTEXT_WINDOW,
+    autoCompactTokenLimit: LCA_CODEX_AUTO_COMPACT_TOKEN_LIMIT,
   };
 }
 

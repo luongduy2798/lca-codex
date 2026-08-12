@@ -795,12 +795,12 @@ test("explicit connector auto-approval still selects Allow once", async () => {
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
 });
 
-test("browser preflight fails closed with Codex's native context-window error contract", () => {
-  expect(() => assertLcaCodexInputWithinContextWindow(150_000, "medium")).toThrow(
-    "150,000-token context window",
+test("browser preflight uses one hard effective-input safety gate across reasoning modes", () => {
+  expect(() => assertLcaCodexInputWithinContextWindow(725_000, "medium")).toThrow(
+    "725,000-token ChatGPT Web safety limit",
   );
   try {
-    assertLcaCodexInputWithinContextWindow(150_000, "medium");
+    assertLcaCodexInputWithinContextWindow(725_000, "medium");
     throw new Error("expected context-window preflight to fail");
   } catch (error) {
     expect(error).toMatchObject({
@@ -810,16 +810,13 @@ test("browser preflight fails closed with Codex's native context-window error co
       code: "context_length_exceeded",
       retryable: false,
     });
-    expect(String(error)).toContain("/compact");
+    expect(String(error)).toContain("Reduce the current required input or attachments");
   }
 
-  expect(() => assertLcaCodexInputWithinContextWindow(149_999, "medium")).not.toThrow();
-  expect(() => assertLcaCodexInputWithinContextWindow(184_999, "high")).not.toThrow();
-  expect(() => assertLcaCodexInputWithinContextWindow(185_000, "high")).toThrow(
-    "185,000-token context window",
-  );
-  expect(() => assertLcaCodexInputWithinContextWindow(255_999, "xhigh")).not.toThrow();
-  expect(() => assertLcaCodexInputWithinContextWindow(255_999, "max")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(724_999, "medium")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(724_999, "high")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(724_999, "xhigh")).not.toThrow();
+  expect(() => assertLcaCodexInputWithinContextWindow(724_999, "max")).not.toThrow();
 });
 
 test("browser diagnostics redact context envelopes and capability values", () => {

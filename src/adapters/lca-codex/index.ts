@@ -369,9 +369,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
-      const turnCapabilities = parsed._compactionRequest
-        ? { ...configuredCapabilities, localToolsEnabled: false }
-        : configuredCapabilities;
+      const turnCapabilities = configuredCapabilities;
       const identity = extractChatGptTurnIdentity(parsed);
       const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;

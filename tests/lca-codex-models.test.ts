@@ -52,25 +52,13 @@ describe("single LCA Codex model", () => {
     expect(resolveLcaCodexReasoningMode("ultra", true).adapterEffort).toBe("max");
   });
 
-  test("keeps the mode-specific runtime context limits", () => {
-    for (const effort of ["low", "medium"] as const) {
+  test("uses one outer Codex lifetime across every reasoning mode", () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
       expect(resolveLcaCodexContextLimits(effort)).toEqual({
-        contextWindow: 150_000,
-        autoCompactTokenLimit: 135_000,
+        contextWindow: 272_000,
+        autoCompactTokenLimit: 244_800,
       });
     }
-    expect(resolveLcaCodexContextLimits("high")).toEqual({
-      contextWindow: 185_000,
-      autoCompactTokenLimit: 166_500,
-    });
-    expect(resolveLcaCodexContextLimits("xhigh")).toEqual({
-      contextWindow: 256_000,
-      autoCompactTokenLimit: 230_400,
-    });
-    expect(resolveLcaCodexContextLimits("max")).toEqual({
-      contextWindow: 272_000,
-      autoCompactTokenLimit: 244_800,
-    });
   });
 
   test("routes the single model while preserving the selected reasoning mode", () => {

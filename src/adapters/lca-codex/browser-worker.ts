@@ -25,7 +25,6 @@ import {
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
-import { resolveLcaCodexContextLimits } from "../../lca-codex-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { LcaCodexAdapterError } from "./adapter-error";
@@ -147,15 +146,22 @@ export async function resolveChatGptToolConfirmation(
 
 export function assertLcaCodexInputWithinContextWindow(
   estimatedInputTokens: number,
-  effort: LcaCodexModelMode["effort"],
+  _effort: LcaCodexModelMode["effort"],
 ): void {
-  const { contextWindow } = resolveLcaCodexContextLimits(effort);
-  if (estimatedInputTokens < contextWindow) return;
+  if (estimatedInputTokens < CHATGPT_HARD_EFFECTIVE_INPUT_LIMIT) return;
   throw new LcaCodexAdapterError(
-    `This task is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token context window for this LCA Codex model. Switch to a model with a larger context window, run /compact, then retry this Web model.`,
+    `This browser turn is estimated at ${estimatedInputTokens.toLocaleString("en-US")} effective input tokens after bounded/lazy context projection, which exceeds the ${CHATGPT_HARD_EFFECTIVE_INPUT_LIMIT.toLocaleString("en-US")}-token ChatGPT Web safety limit. Reduce the current required input or attachments before retrying.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
+
+/**
+ * Tuning watermark for effective browser input. Optional/cold history is already spilled eagerly by
+ * the bounded lazy prompt builder, so this is not a second runtime branch that waits until 600k.
+ */
+export const CHATGPT_SOFT_EFFECTIVE_INPUT_LIMIT = 600_000;
+/** Never submit a browser turn at or above this effective input size. */
+export const CHATGPT_HARD_EFFECTIVE_INPUT_LIMIT = 725_000;
 
 const browserStageTimeouts = {
   browserPage: 60_000,
