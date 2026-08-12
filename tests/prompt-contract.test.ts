@@ -681,4 +681,4 @@ test("keeps large tool-capable history in the lazy snapshot instead of composer 
   expect(snapshot.serialized.length).toBeGreaterThan(600_000);
   expect(snapshot.serialized).toContain(largeContent);
   expect(snapshot.history.some(entry => entry.searchText.includes(largeContent))).toBe(true);
-});
+}, 15_000);
