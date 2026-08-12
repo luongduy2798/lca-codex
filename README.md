@@ -69,8 +69,21 @@ policies.
 
 ## Quick start
 
-Install or update the desktop launcher using the distributed build for your platform. Updating or
-repairing the application preserves the ChatGPT profile and launcher configuration.
+Install or update the desktop launcher. To update or repair an existing installation, quit the
+launcher and run the same command again; it replaces the application and embedded runtime while
+preserving the ChatGPT profile and launcher configuration.
+
+**macOS or Linux**
+
+```bash
+curl -fsSL https://github.com/luongduy2798/lca-codex/releases/latest/download/install-launcher.sh | sh
+```
+
+**Windows PowerShell**
+
+```powershell
+irm https://github.com/luongduy2798/lca-codex/releases/latest/download/install-launcher.ps1 | iex
+```
 
 Then complete the three required checks in the app:
 
