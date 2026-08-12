@@ -93,7 +93,10 @@ per-mode inline context limits. Independently, the ChatGPT Web side keeps
 the active bootstrap bounded to at most four recent exchanges within an 8k-token budget. Effective
 browser input accounting includes fixed platform costs plus a 20k-token safety reserve per attached
 image; 600k is the soft tuning watermark and 725k is the hard browser safety guard. Historical
-content that remains only in the broker snapshot is not charged up front.
+content that remains only in the broker snapshot is not charged up front. This browser effective-input
+estimate is intentionally separate from Responses usage reported back to Codex: the latter estimates
+the full active native Codex context so the outer context gauge/accounting does not mistake a bounded
+browser projection for the accumulated Codex task history.
 
 Routed compaction v1/v2 runs as a dedicated browser checkpoint turn over a frozen broker snapshot.
 It must bind the lazy context connector and may use only read-only `codex_context` retrieval

@@ -38,7 +38,8 @@ test: check-bun
 	$(BUN) run launcher:test
 
 test-safe: check-bun
-	@root="$$(mktemp -d "$${TMPDIR:-/tmp}/lca-codex-test.XXXXXX")"; \
+	@set -e; \
+	root="$$(mktemp -d "$${TMPDIR:-/tmp}/lca-codex-test.XXXXXX")"; \
 	trap 'rm -rf "$$root"' EXIT; \
 	mkdir -p "$$root/home" "$$root/lca" "$$root/codex"; \
 	echo "Running tests with isolated HOME=$$root/home"; \

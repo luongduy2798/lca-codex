@@ -8,7 +8,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptMarkdownBuffer, type ChatGptMarkdownSegment } from "./markdown";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities, type LcaCodexModelMode } from "./model";
 import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaCodexPrompt, type LcaCodexPromptImage } from "./prompt";
-import { estimateCompiledLcaCodexInputTokens } from "./usage";
+import { estimateCompiledBrowserEffectiveInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
   assertTemporaryChatPage,
@@ -1670,7 +1670,7 @@ export class ChatGptBrowserWorker {
     let diagnosticPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
-      const estimatedInputTokens = estimateCompiledLcaCodexInputTokens(prepared, turn.modelId);
+      const estimatedInputTokens = estimateCompiledBrowserEffectiveInputTokens(prepared, turn.modelId);
       assertLcaCodexInputWithinContextWindow(
         estimatedInputTokens,
         requestedMode.effort,

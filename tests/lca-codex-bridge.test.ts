@@ -929,11 +929,11 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(lazyPro.text).not.toContain("LCA Codex Pro with no lca-codex bridge");
   });
 
-  test("reports conservative nonzero usage for browser text and image context", () => {
+  test("reports conservative nonzero native Codex context usage", () => {
     const textRequest = parsed();
     const textUsage = estimateLcaCodexUsage(textRequest, { answer: "done" }, toolCapabilities);
     expect(textUsage).toMatchObject({ estimated: true });
-    expect(textUsage.inputTokens).toBeGreaterThan(8_000);
+    expect(textUsage.inputTokens).toBeGreaterThan(0);
     expect(textUsage.outputTokens).toBeGreaterThan(0);
     expect(textUsage.totalTokens).toBe(textUsage.inputTokens + textUsage.outputTokens);
 
@@ -943,7 +943,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       { type: "image", imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==", detail: "high" },
     ];
     const imageUsage = estimateLcaCodexUsage(imageRequest, { answer: "done" }, toolCapabilities);
-    expect(imageUsage.inputTokens).toBeGreaterThanOrEqual(textUsage.inputTokens + 3_500);
+    expect(imageUsage.inputTokens).toBeGreaterThan(textUsage.inputTokens);
   });
 
   test("keeps the ChatGPT rate-limit dialog distinct from model capacity and UI failures", () => {

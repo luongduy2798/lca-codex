@@ -1,5 +1,5 @@
 import { estimateTokens } from "../../lib/token-estimate";
-import type { CodexParsedRequest, CodexUsage } from "../../types";
+import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest, CodexUsage } from "../../types";
 import type { CompiledLcaCodexPrompt } from "./prompt";
 import { compileLcaCodexPrompt } from "./prompt";
 import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
@@ -24,7 +24,7 @@ function conservativeTextTokens(text: string, modelId: string): number {
   return estimateTokens(text, modelId);
 }
 
-export function estimateCompiledLcaCodexInputTokens(
+export function estimateCompiledBrowserEffectiveInputTokens(
   compiled: CompiledLcaCodexPrompt,
   modelId: string,
 ): number {
@@ -38,7 +38,7 @@ export function estimateCompiledLcaCodexInputTokens(
     + imageTokens;
 }
 
-export function estimateLcaCodexInputTokens(
+export function estimateLcaCodexBrowserEffectiveInputTokens(
   parsed: CodexParsedRequest,
   capabilities: LcaCodexCapabilities,
 ): number {
@@ -48,7 +48,60 @@ export function estimateLcaCodexInputTokens(
     capabilities,
     mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
   );
-  return estimateCompiledLcaCodexInputTokens(compiled, parsed.modelId);
+  return estimateCompiledBrowserEffectiveInputTokens(compiled, parsed.modelId);
+}
+
+function nativeInputContent(content: string | CodexContentPart[]): unknown {
+  if (typeof content === "string") return content;
+  return content.map(part => part.type === "text"
+    ? { type: "text", text: part.text }
+    : { type: "image", ...(part.detail ? { detail: part.detail } : {}) });
+}
+
+function nativeAssistantContent(content: CodexAssistantContentPart[]): unknown[] {
+  return content.map(part => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "thinking") return { type: "thinking", text: part.thinking };
+    return {
+      type: "tool_call",
+      id: part.id,
+      name: part.name,
+      arguments: part.arguments,
+      ...(part.namespace ? { namespace: part.namespace } : {}),
+    };
+  });
+}
+
+function nativeMessageEnvelope(message: CodexMessage): Record<string, unknown> {
+  if (message.role === "toolResult") {
+    return {
+      role: "tool_result",
+      tool_call_id: message.toolCallId,
+      tool_name: message.toolName,
+      ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
+      is_error: message.isError,
+      content: nativeInputContent(message.content),
+    };
+  }
+  if (message.role === "assistant") {
+    return { role: "assistant", content: nativeAssistantContent(message.content) };
+  }
+  return { role: message.role, content: nativeInputContent(message.content) };
+}
+
+/**
+ * Estimate the full active context owned by native Codex, independently of the bounded/lazy
+ * ChatGPT browser projection. This is the number Responses usage exposes back to Codex for context
+ * accounting/UI. Image bytes and opaque reasoning signatures are intentionally represented only by
+ * their semantic placeholders; the bridge has no authoritative native tokenizer count for them.
+ */
+export function estimateLcaCodexNativeContextTokens(parsed: CodexParsedRequest): number {
+  const nativeContext = {
+    system: parsed.context.systemPrompt ?? [],
+    messages: parsed.context.messages.map(nativeMessageEnvelope),
+    tools: parsed.context.tools ?? [],
+  };
+  return conservativeTextTokens(JSON.stringify(nativeContext), parsed.modelId);
 }
 
 function roundEvidenceText(evidence: LcaCodexRoundEvidence): string {
@@ -72,7 +125,11 @@ export function estimateLcaCodexUsage(
   evidence: LcaCodexRoundEvidence,
   capabilities: LcaCodexCapabilities,
 ): CodexUsage {
-  const inputTokens = estimateLcaCodexInputTokens(parsed, capabilities);
+  // Browser effective-input pressure is checked separately before submission. Responses usage is
+  // consumed by native Codex as active-context accounting, so report the full outer Codex context
+  // here rather than the bounded/lazy ChatGPT prompt size.
+  void capabilities;
+  const inputTokens = estimateLcaCodexNativeContextTokens(parsed);
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);
   return {
     inputTokens,

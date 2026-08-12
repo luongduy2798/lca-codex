@@ -909,11 +909,13 @@ test("structured Markdown completes after a short settle with a conservative raw
   })).toBeTrue();
 
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const structuredEvidence = workerSource.indexOf("const hasStructuredMarkdown = chatGptResponseHasStructuredMarkdown(snapshot)");
+  const structuredGuard = workerSource.indexOf("const hasStructuredMarkdown = snapshot.responsePresent");
+  const structuredEvidence = workerSource.indexOf("chatGptResponseHasStructuredMarkdown(snapshot)", structuredGuard);
   const completion = workerSource.indexOf("const completionReady = completionTracker.update(", structuredEvidence);
   const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", completion);
   const finalEmission = workerSource.indexOf("turn.onTextDelta(final.delta)", finalSnapshot);
-  expect(structuredEvidence).toBeGreaterThan(-1);
+  expect(structuredGuard).toBeGreaterThan(-1);
+  expect(structuredEvidence).toBeGreaterThan(structuredGuard);
   expect(completion).toBeGreaterThan(structuredEvidence);
   expect(finalSnapshot).toBeGreaterThan(completion);
   expect(finalEmission).toBeGreaterThan(finalSnapshot);
