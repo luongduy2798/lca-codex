@@ -1181,6 +1181,63 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
 });
 
+test("browser completion settles from the last terminal snapshot when ChatGPT removes the response DOM", () => {
+  const tracker = new ChatGptCompletionTracker(500);
+  const terminal = {
+    responsePresent: true,
+    running: false,
+    currentText: "complete answer",
+    currentHtml: "<p>complete answer</p>",
+    completionActionVisible: true,
+  };
+  expect(tracker.update(terminal, 1_000)).toBe(false);
+  expect(tracker.update({
+    ...terminal,
+    responsePresent: false,
+    currentText: "",
+    currentHtml: "",
+    completionActionVisible: false,
+  }, 1_499)).toBe(false);
+  expect(tracker.update({
+    ...terminal,
+    responsePresent: false,
+    currentText: "",
+    currentHtml: "",
+    completionActionVisible: false,
+  }, 1_500)).toBe(true);
+});
+
+test("browser completion does not survive DOM loss when generation resumes", () => {
+  const tracker = new ChatGptCompletionTracker(500);
+  const terminal = {
+    responsePresent: true,
+    running: false,
+    currentText: "complete answer",
+    currentHtml: "<p>complete answer</p>",
+    completionActionVisible: true,
+  };
+  expect(tracker.update(terminal, 1_000)).toBe(false);
+  expect(tracker.update({
+    ...terminal,
+    responsePresent: false,
+    running: true,
+    currentText: "",
+    currentHtml: "",
+    completionActionVisible: false,
+  }, 1_250)).toBe(false);
+  expect(tracker.update(terminal, 1_500)).toBe(false);
+});
+
+test("browser completion polling continues outside the response-present branch", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const observedAt = workerSource.indexOf("const observedAt = Date.now();");
+  const completionReady = workerSource.indexOf("const completionReady = completionTracker.update", observedAt);
+  const responsePresentBranch = workerSource.indexOf("if (snapshot.responsePresent) {", observedAt);
+  expect(observedAt).toBeGreaterThan(-1);
+  expect(completionReady).toBeGreaterThan(observedAt);
+  expect(responsePresentBranch).toBeGreaterThan(completionReady);
+});
+
 test("pending-completion diagnostics record DOM metrics without response or overlay content", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async pendingCompletionDiagnostic");

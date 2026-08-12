@@ -160,6 +160,33 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(inspections).toHaveLength(0);
   });
 
+  test("gateway readiness accepts exec_command and shell_command as alternative command routes", async () => {
+    for (const commandRoutes of [
+      { exec_command: true, shell_command: false },
+      { exec_command: false, shell_command: true },
+    ]) {
+      const inspections = [gatewayRegistryResult({
+        ...commandRoutes,
+        write_stdin: true,
+        apply_patch: true,
+        view_image: true,
+      })];
+      const inspected = await waitForCodexToolGatewayRoutes({
+        names: ["exec_command", "shell_command", "write_stdin", "apply_patch", "view_image"],
+        retryDelaysMs: [0, 0],
+        inspect: async () => inspections.shift()!,
+      });
+
+      expect(inspected.availability).toEqual({
+        ...commandRoutes,
+        write_stdin: true,
+        apply_patch: true,
+        view_image: true,
+      });
+      expect(inspections).toHaveLength(0);
+    }
+  });
+
   test("rejects an opaque MultiAgent V2 child payload before starting the browser", async () => {
     const request = parseRequest({
       model: "lca-codex",

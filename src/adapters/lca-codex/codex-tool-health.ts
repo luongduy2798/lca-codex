@@ -123,6 +123,13 @@ export async function waitForCodexToolGatewayRoutes({
   let successfulInspection = false;
   let gatewayError: string | undefined;
 
+  const routesReady = (): boolean => names.every(name => {
+    if (name === "exec_command" || name === "shell_command") {
+      return availability.exec_command === true || availability.shell_command === true;
+    }
+    return availability[name] === true;
+  });
+
   for (const delayMs of retryDelaysMs) {
     if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
     try {
@@ -132,7 +139,7 @@ export async function waitForCodexToolGatewayRoutes({
       for (const name of names) {
         if (parsed[name] === true) availability[name] = true;
       }
-      if (names.every(name => availability[name])) break;
+      if (routesReady()) break;
     } catch (error) {
       gatewayError = error instanceof Error ? error.message : String(error);
     }

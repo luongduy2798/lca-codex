@@ -260,6 +260,12 @@ export class ChatGptCompletionTracker {
   constructor(private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS) {}
 
   update(state: Parameters<typeof chatGptTurnIsComplete>[0], now = Date.now()): boolean {
+    // ChatGPT may remove/replace the completed assistant DOM immediately after exposing
+    // terminal UI. Preserve an already-strong completion candidate across that transient
+    // gap so the settle window can finish instead of waiting for DOM-health failure.
+    if (!state.responsePresent && !state.running && this.candidate) {
+      return now - this.candidate.since >= this.stableMs;
+    }
     if (!chatGptTurnIsComplete(state)) {
       this.candidate = undefined;
       return false;
@@ -1794,6 +1800,7 @@ export class ChatGptBrowserWorker {
         CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS,
       );
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let terminalVisibleText: string | undefined;
       let previousActivitySignature = "";
       for (;;) {
         if (page.isClosed()) {
@@ -1841,6 +1848,30 @@ export class ChatGptBrowserWorker {
         previousActivitySignature = activitySignature;
         const nextPollMs = pollScheduler.nextDelay(activityChanged);
         const observedAt = Date.now();
+        const completionState = {
+          responsePresent: snapshot.responsePresent,
+          running,
+          currentText: snapshot.visibleText,
+          currentHtml: snapshot.fullHtml,
+          completionActionVisible: snapshot.completionActionVisible,
+        };
+        if (chatGptTurnIsComplete(completionState)) {
+          terminalVisibleText = snapshot.visibleText;
+        } else if (snapshot.responsePresent || running) {
+          // Live contradictory evidence invalidates the latched terminal snapshot. A fully
+          // absent, idle DOM is the one React replacement case where the latch must survive.
+          terminalVisibleText = undefined;
+        }
+        const hasStructuredMarkdown = snapshot.responsePresent
+          ? chatGptResponseHasStructuredMarkdown(snapshot)
+          : false;
+        const completionReady = completionTracker.update({
+          ...completionState,
+          completionActionVisible: completionState.completionActionVisible && hasStructuredMarkdown,
+        }, observedAt) || unstructuredCompletionTracker.update({
+          ...completionState,
+          completionActionVisible: completionState.completionActionVisible && !hasStructuredMarkdown,
+        }, observedAt);
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -1888,36 +1919,6 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
           });
           if (domError) throw new Error(domError);
-          const completionState = {
-            responsePresent: snapshot.responsePresent,
-            running,
-            currentText: snapshot.visibleText,
-            currentHtml: snapshot.fullHtml,
-            completionActionVisible: snapshot.completionActionVisible,
-          };
-          const hasStructuredMarkdown = chatGptResponseHasStructuredMarkdown(snapshot);
-          // A scoped completion action plus three unchanged structured-DOM observations is strong
-          // finality evidence. Keep the conservative window only while ChatGPT still exposes raw
-          // text that may hydrate into headings, lists or code after generation stops.
-          const completionReady = completionTracker.update({
-            ...completionState,
-            completionActionVisible: completionState.completionActionVisible && hasStructuredMarkdown,
-          }, observedAt) || unstructuredCompletionTracker.update({
-            ...completionState,
-            completionActionVisible: completionState.completionActionVisible && !hasStructuredMarkdown,
-          }, observedAt);
-          if (completionReady) {
-            if (snapshot.visibleText === "api_tool unavailable") {
-              throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
-            }
-            const final = markdownBuffer.finish();
-            if (!final.markdown && snapshot.visibleText) {
-              throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
-            }
-            if (final.delta) turn.onTextDelta(final.delta);
-            finalText = final.markdown;
-            break;
-          }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "completion-pending-30s");
@@ -1936,6 +1937,19 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
           });
           if (domError) throw new Error(domError);
+        }
+        if (completionReady) {
+          const completedVisibleText = terminalVisibleText ?? snapshot.visibleText;
+          if (completedVisibleText === "api_tool unavailable") {
+            throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
+          }
+          const final = markdownBuffer.finish();
+          if (!final.markdown && completedVisibleText) {
+            throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
+          }
+          if (final.delta) turn.onTextDelta(final.delta);
+          finalText = final.markdown;
+          break;
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, nextPollMs));
       }
