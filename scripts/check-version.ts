@@ -19,7 +19,6 @@ if (packageJson.devDependencies?.["@types/bun"] !== bunVersion) {
 }
 if (packageJson.engines?.bun !== bunVersion) throw new Error(`engines.bun is not synchronized to ${bunVersion}`);
 const expected = [
-  ["src/version.ts", `export const VERSION = ${JSON.stringify(packageVersion)};`],
   ["README.md", `requires Bun ${bunVersion}.`],
   ["scripts/generate-third-party-notices.ts", `Bun ${bunVersion}`],
   [".github/workflows/ci.yml", `bun-version: ${bunVersion}`],
@@ -32,6 +31,4 @@ const releaseWorkflow = readFileSync(resolve(root, ".github/workflows/release.ym
 if (releaseWorkflow.split(`bun-version: ${bunVersion}`).length - 1 !== 2) {
   throw new Error(`release.yml must pin Bun ${bunVersion} in both jobs`);
 }
-const launcherVersion = (JSON.parse(readFileSync(resolve(root, "launcher/package.json"), "utf8")) as { version?: string }).version;
-if (launcherVersion !== packageVersion) throw new Error(`launcher/package.json is not synchronized to ${packageVersion}`);
 process.stdout.write(`VERSION_SYNC_OK ${packageVersion} bun@${bunVersion}\n`);

@@ -1,16 +1,17 @@
 {
   "name": "lca-codex-launcher",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Desktop control center for LCA Codex",
   "author": "thayduytrutri",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "bun run scripts/dev.cjs",
+    "sync:version": "bun run scripts/sync-version.cjs",
+    "dev": "bun run sync:version && bun run scripts/dev.cjs",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
-    "build": "bun run typecheck && bun run build:renderer",
+    "build": "bun run sync:version && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "package": "bun run build && bun run build:runtime && bun run scripts/package.cjs",
     "package:mac": "bun run build && bun run build:runtime && bun run scripts/package.cjs --mac",
@@ -18,7 +19,7 @@
     "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "node --test tests/*.test.cjs",
-    "start": "electron ."
+    "start": "bun run sync:version && electron ."
   },
   "dependencies": {
     "motion": "^12.42.2",
@@ -63,16 +64,23 @@
       "icon": "assets/icon.icns",
       "minimumSystemVersion": "13.0",
       "hardenedRuntime": true,
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
     "win": {
       "icon": "assets/icon.ico",
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
       "category": "Development",
       "icon": "assets/icon.png",
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     },
     "nsis": {
       "oneClick": true,

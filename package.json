@@ -1,6 +1,6 @@
 {
   "name": "lca-codex",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "author": "thayduytrutri",
   "description": "A focused local Responses bridge that runs Codex tasks through a user-authenticated ChatGPT session.",
@@ -15,6 +15,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "prepare": "bun run scripts/setup-git-hooks.ts",
     "test": "bun test tests/*.test.ts",
     "audit": "bun run scripts/audit-dependencies.ts",
     "check-version": "bun run scripts/check-version.ts",

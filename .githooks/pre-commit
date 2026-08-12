@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+bun run scripts/sync-version-for-commit.ts

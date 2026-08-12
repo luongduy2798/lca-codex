@@ -1,7 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const { syncLauncherVersion } = require("../scripts/sync-version.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
@@ -40,6 +42,25 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.equal(manifest.build.nsis.runAfterFinish, false);
 });
 
+test("launcher version is generated from the root package version", () => {
+  assert.match(manifest.scripts.dev, /^bun run sync:version && /);
+  assert.match(manifest.scripts.build, /^bun run sync:version && /);
+  assert.match(manifest.scripts.start, /^bun run sync:version && /);
+
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-version-sync-"));
+  try {
+    fs.mkdirSync(path.join(scratch, "launcher"));
+    fs.writeFileSync(path.join(scratch, "package.json"), `${JSON.stringify({ version: "9.8.7" }, null, 2)}\n`);
+    fs.writeFileSync(path.join(scratch, "launcher", "package.json"), `${JSON.stringify({ name: "launcher", version: "0.0.0" }, null, 2)}\n`);
+
+    assert.equal(syncLauncherVersion(scratch), "9.8.7");
+    const synced = JSON.parse(fs.readFileSync(path.join(scratch, "launcher", "package.json"), "utf8"));
+    assert.equal(synced.version, "9.8.7");
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("release installers resolve checksummed native launcher assets", () => {
   const shellInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.sh"), "utf8");
   const windowsInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.ps1"), "utf8");
@@ -56,6 +77,7 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /process\.execPath/);
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);
+  assert.match(packager, /--config\.extraMetadata\.version=/);
   assert.match(packager, /target === "--mac" && !env\.CSC_LINK && !env\.CSC_NAME/);
   assert.match(packager, /--config\.mac\.identity=-/);
   assert.doesNotMatch(packager, /electron-builder\.cmd/);

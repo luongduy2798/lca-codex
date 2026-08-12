@@ -4,6 +4,10 @@ const os = require("node:os");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
+const repositoryRoot = path.resolve(root, "..");
+const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
+const version = repositoryManifest.version;
+if (typeof version !== "string" || !version.trim()) throw new Error("Root package.json has no version");
 const executable = process.execPath;
 const electronBuilderCli = require.resolve("electron-builder/out/cli/cli.js", { paths: [root] });
 const requested = process.argv[2];
@@ -32,6 +36,7 @@ const builderArgs = [
   target,
   "--publish",
   "never",
+  `--config.extraMetadata.version=${version}`,
 ];
 if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
   builderArgs.push("--config.mac.identity=-");

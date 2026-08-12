@@ -5,7 +5,7 @@ type ReleaseKind = "current" | "patch" | "minor" | "major";
 
 const root = resolve(import.meta.dir, "..");
 const kind = process.argv[2] as ReleaseKind | undefined;
-const versionFiles = ["package.json", "launcher/package.json", "src/version.ts"] as const;
+const versionFiles = ["package.json", "launcher/package.json"] as const;
 
 if (kind !== "current" && kind !== "patch" && kind !== "minor" && kind !== "major") {
   throw new Error("Expected release kind: current, patch, minor, or major");
@@ -65,13 +65,7 @@ if (localHead !== remoteHead) throw new Error("Local main must exactly match ori
 
 const rootPackagePath = resolve(root, "package.json");
 const launcherPackagePath = resolve(root, "launcher", "package.json");
-const versionSourcePath = resolve(root, "src", "version.ts");
 const rootPackage = JSON.parse(readFileSync(rootPackagePath, "utf8")) as Record<string, unknown> & { version?: string };
-const launcherPackage = JSON.parse(readFileSync(launcherPackagePath, "utf8")) as Record<string, unknown> & { version?: string };
-
-if (launcherPackage.version !== rootPackage.version) {
-  throw new Error(`Version mismatch: package.json=${rootPackage.version ?? "<missing>"}, launcher/package.json=${launcherPackage.version ?? "<missing>"}`);
-}
 
 const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(rootPackage.version ?? "");
 if (!match) throw new Error(`Expected a stable semver version, received ${rootPackage.version ?? "<missing>"}`);
@@ -102,23 +96,27 @@ if (tagCheck.exitCode === 0) throw new Error(`Tag ${tag} already exists`);
 
 if (kind !== "current") {
   rootPackage.version = nextVersion;
-  launcherPackage.version = nextVersion;
   writeFileSync(rootPackagePath, `${JSON.stringify(rootPackage, null, 2)}\n`);
-  writeFileSync(launcherPackagePath, `${JSON.stringify(launcherPackage, null, 2)}\n`);
-  writeFileSync(versionSourcePath, `export const VERSION = ${JSON.stringify(nextVersion)};\n`);
 }
 
 process.stdout.write(`Verifying ${tag} before publishing...\n`);
 try {
   run([process.execPath, "run", "verify"]);
 } catch (error) {
-  if (kind !== "current") restoreVersionFiles();
+  restoreVersionFiles();
   throw error;
 }
 
 if (kind !== "current") {
+  const launcherVersion = (JSON.parse(readFileSync(launcherPackagePath, "utf8")) as { version?: string }).version;
+  if (launcherVersion !== nextVersion) {
+    restoreVersionFiles();
+    throw new Error(`Launcher build did not synchronize launcher/package.json to ${nextVersion}`);
+  }
   gitRun(["add", ...versionFiles]);
   gitRun(["commit", "-m", `release: ${tag}`]);
+} else {
+  restoreVersionFiles();
 }
 gitRun(["tag", "-a", tag, "-m", `Release ${tag}`]);
 
