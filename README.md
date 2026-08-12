@@ -15,12 +15,13 @@
 
 Pick the single **LCA Codex** model in Codex's native model picker, then choose its reasoning level
 to select Instant, Medium, High, Extra High, or Pro behavior. Every turn still uses a fresh ChatGPT
-Temporary Chat. With the tool bridge active, the composer receives a bounded active bootstrap:
+Temporary Chat. With the tool bridge active, a normal turn's composer receives a bounded active bootstrap:
 active system/project instructions, the current checkpoint, up to four recent exchanges within an
 8k-token budget, the latest user request, and current-turn images. Deeper history and historical
 images stay in the immutable broker snapshot and are retrieved through the `lca-codex` connector
-only when needed. Visible reasoning, native Codex tool activity, and Markdown stream back into the
-same Codex task.
+only when needed. Compaction skips the inline recent-exchange projection and reads the frozen snapshot
+lazily instead. Visible reasoning, native Codex tool activity, and Markdown stream back into the same
+Codex task.
 
 ```text
 Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──▶ ChatGPT
@@ -50,10 +51,11 @@ back to the tools of that same Codex task.
   images, approvals, and configured tools/apps stay owned by Codex; calls and real results remain
   inside the same browser response—nothing is simulated as text.
 - **Bounded context at every reasoning level.** Browser reasoning effort no longer changes how much
-  Codex history is replayed inline. Each connector-backed turn gets a small active bootstrap (up to
-  four recent exchanges within an 8k-token budget) and can fetch older task state lazily through the
-  connector. If the connector is explicitly disabled, the selected reasoning mode runs read-only
-  instead.
+  Codex history is replayed inline. Each normal connector-backed turn gets a small active bootstrap
+  (up to four recent exchanges within an 8k-token budget) and can fetch older task state lazily
+  through the connector. Dedicated compaction turns omit that recent projection and summarize from
+  the frozen lazy snapshot instead. If the connector is explicitly disabled, the selected reasoning
+  mode runs read-only instead.
 - **Fail-closed and manually tested.** Model selection, large context transport, images, streaming,
   visible trace, compaction, native tool rounds, cancellation, and Pro were exercised end-to-end on
   macOS and Windows 11. UI drift and missing capabilities produce explicit errors rather than
@@ -101,8 +103,9 @@ the same active Codex tool registry when the connector is enabled.
 
 Every picker entry has one fixed ChatGPT reasoning mode. Codex still displays its built-in Effort and
 Speed rows, but changing them cannot silently change the selected browser model. Reasoning effort no
-longer changes how much conversation history is copied into the browser prompt: all tool-capable modes
-use the same bounded active bootstrap and retrieve older context lazily.
+longer changes how much conversation history is copied into the browser prompt: all normal tool-capable
+modes use the same bounded active bootstrap and retrieve older context lazily. Dedicated compaction
+uses the same frozen lazy snapshot without projecting the recent working set inline.
 
 ## Codex tool bridge
 

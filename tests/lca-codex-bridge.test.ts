@@ -1500,7 +1500,9 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(originalBrowserReceivedToolResult).toBe(false);
       expect(compactionPrompt).toContain('"transport":"mcp-lazy"');
       expect(compactionPrompt).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
-      expect(compactionPrompt).toContain(`"tool_call_id":"${callStart!.id}"`);
+      expect(compactionPrompt).toContain('"recent_inline":0');
+      expect(compactionPrompt).toContain('"recent_exchanges":0');
+      expect(compactionPrompt).not.toContain(`"tool_call_id":"${callStart!.id}"`);
       expect(compactionPrompt).not.toContain("<codex_context_json>");
 
       const secondRequest = rawWireRequest(environmentXml);

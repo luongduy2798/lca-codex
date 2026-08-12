@@ -364,6 +364,11 @@ test("read-only prompts resume without exposing a bind capability", () => {
 
 test("compaction prompts use the frozen snapshot through read-only lazy context", () => {
   const compact = request("high");
+  const priorCheckpoint = `${SUMMARY_PREFIX}\n\nPreserve the earlier architecture decision.`;
+  compact.context.messages = [
+    { role: "user", content: priorCheckpoint, timestamp: 1 },
+    { role: "user", content: "compact the current state", timestamp: 2 },
+  ];
   compact._compactionRequest = true;
   const token = "turn_12345678901234567890123456789012";
   const compiled = compileLcaCodexPrompt(
@@ -376,6 +381,16 @@ test("compaction prompts use the frozen snapshot through read-only lazy context"
   expect(compiled.text).toContain(`codex_bind_turn with turn_token ${token}`);
   expect(compiled.text).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
   expect(compiled.text).toContain("Compact may discard wording but must preserve semantic task state");
+  const active = activeContext(compiled.text) as { checkpoint?: unknown; recent_context?: unknown[]; latest_user?: unknown };
+  expect(JSON.stringify(active.checkpoint)).toContain("Preserve the earlier architecture decision.");
+  expect(active.recent_context).toBeUndefined();
+  expect(JSON.stringify(active.latest_user)).toContain("compact the current state");
+  expect(compiled.text).toContain("Recent conversation is intentionally not projected inline during compaction");
+  expect(compiled.text).toContain('"recent_inline":0');
+  expect(compiled.text).toContain('"current_turn_inline":0');
+  expect(compiled.text).toContain('"recent_exchanges":0');
+  expect(compiled.text).toContain('"recent_exchange_limit":0');
+  expect(compiled.text).toContain('"recent_token_budget":0');
   expect(compiled.text).not.toContain("<codex_context_json>");
   expect(compiled.text).not.toContain("web search, browsing, research");
   expect(compiled.text).not.toContain("missing local-computer bridge");
@@ -415,8 +430,10 @@ test("oversized compaction keeps raw history in the frozen snapshot instead of t
 
   expect(compiled.text.length).toBeLessThan(hugeToolOutput.length / 4);
   expect(compiled.text).toContain('"transport":"mcp-lazy"');
-  expect(compiled.text).toContain('"truncated":true');
-  expect(compiled.text).toContain('"history_ref":"history-2"');
+  expect(compiled.text).toContain('"recent_inline":0');
+  expect(compiled.text).not.toContain('"history_ref":"history-2"');
+  expect(compiled.text).not.toContain("BEGIN-OLD-TOOL-OUTPUT");
+  expect(compiled.text).not.toContain('"tool_call_id":"call_large"');
   expect(compiled.text).toContain("continue from the latest result");
   expect(snapshot.serialized).toContain("BEGIN-OLD-TOOL-OUTPUT");
   expect(snapshot.serialized).toContain("END-OLD-TOOL-OUTPUT");

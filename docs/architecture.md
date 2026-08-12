@@ -52,7 +52,7 @@ closed. Closing a running tab destroys its page and terminates that browser turn
 turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
 controls.
 
-Tool-capable turns do not replay the entire accumulated Codex history through the
+Normal tool-capable turns do not replay the entire accumulated Codex history through the
 visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
 Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory
 bootstrap: active system instructions, unknown/custom developer overrides, the Codex-resolved
@@ -85,7 +85,10 @@ its outer Codex turn.
 Historical image bytes remain in the broker and are returned only when `codex_context` is called with
 `action=image` for an attachment reference discovered by a history result. They are no longer
 re-uploaded into every fresh Temporary Chat. Normal connector-backed turns and routed compaction use
-the same bounded/lazy context transport; there is no full-history JSON fallback for compaction.
+the same lazy snapshot transport, but only normal turns project the recent four-exchange/8k working
+set inline. Compaction uses a minimal bootstrap with the prior checkpoint and latest user state, then
+retrieves recent/deep history from the frozen snapshot as needed. There is no full-history JSON
+fallback for compaction.
 
 The appended model advertises one outer Codex lifetime for every reasoning level: 272k tokens, with
 native auto-compaction at 244.8k (90%). Browser reasoning effort changes reasoning only; there are no
@@ -99,7 +102,8 @@ the full active native Codex context so the outer context gauge/accounting does 
 browser projection for the accumulated Codex task history.
 
 Routed compaction v1/v2 runs as a dedicated browser checkpoint turn over a frozen broker snapshot.
-It must bind the lazy context connector and may use only read-only `codex_context` retrieval
+It does not inline the normal recent working set. It must bind the lazy context connector and may use
+only read-only `codex_context` retrieval
 (`recent`, `search`, `get`, bounded `full`, and `image`); native execution, mutations, tool-registry
 calls, and ChatGPT-native tools are prohibited during compaction. The resulting checkpoint may drop
 old wording but must preserve semantic task state and useful history/attachment references before

@@ -262,7 +262,7 @@ function latestUserMessageIndex(messages: readonly CodexMessage[]): number {
   return -1;
 }
 
-/** Recent Codex working memory carried into every fresh tool-capable Temporary Chat. */
+/** Recent Codex working memory carried into fresh normal tool-capable Temporary Chats. */
 export const CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET = 8_000;
 export const CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT = 4;
 const CHATGPT_RECENT_CONTEXT_OVERHEAD_TOKENS = 200;
@@ -380,6 +380,26 @@ function recentConversationExchanges(entries: readonly ChatGptContextEntry[]): C
   }
   if (current?.length) exchanges.push(current);
   return exchanges.slice(-CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT);
+}
+
+function projectCompactionWorkingContext(
+  snapshot: ChatGptContextSnapshot,
+  modelId: string,
+): RecentWorkingContext {
+  const checkpointEntry = [...snapshot.history].reverse().find(entry =>
+    entry.role !== "developer"
+    && !isRecentOperationalWrapper(entry)
+    && isReadableCheckpointEntry(entry)
+  );
+  const projected = checkpointEntry
+    ? projectedRecentContextEntry(checkpointEntry, modelId, CHATGPT_RECENT_CHECKPOINT_TOKEN_CAP)
+    : undefined;
+  return {
+    ...(projected ? { checkpoint: projected.payload } : {}),
+    entries: [],
+    estimatedTokens: projected?.tokens ?? 0,
+    exchangeCount: 0,
+  };
 }
 
 /**
@@ -589,7 +609,9 @@ export function compileLcaCodexPrompt(
       }
     : { seen: 0, dropped: 0 };
   const workingContext = mcpLazy
-    ? projectRecentWorkingContext(snapshot, parsed.modelId, latestUserIndex)
+    ? parsed._compactionRequest
+      ? projectCompactionWorkingContext(snapshot, parsed.modelId)
+      : projectRecentWorkingContext(snapshot, parsed.modelId, latestUserIndex)
     : { entries: [], estimatedTokens: 0, exchangeCount: 0 };
   const activeContext = {
     version: 3,
@@ -605,16 +627,20 @@ export function compileLcaCodexPrompt(
   const sharedContract = mcpLazy
     ? [
       "Act as the model backend for this Codex turn. Honor system and developer_overrides first; project_instructions is Codex-resolved AGENTS guidance and direct latest_user instructions take precedence over it.",
-      "Treat checkpoint as the current compacted Codex task state and recent_context as authoritative immediate conversational continuity. Resolve follow-ups such as 'that', 'continue', 'why', or 'undo it' from recent_context before retrieving older history.",
       parsed._compactionRequest
-        ? `The active context below is only a bounded compaction bootstrap. The frozen task snapshot is available read-only through ${JSON.stringify(connectorLabel)}; retrieve older state before finalizing the checkpoint when the bootstrap is not sufficient to preserve it.`
+        ? "Treat checkpoint as prior compacted task state. Recent conversation is intentionally not projected inline during compaction; use codex_context recent against the frozen snapshot for newest state."
+        : "Treat checkpoint as the current compacted Codex task state and recent_context as authoritative immediate conversational continuity. Resolve follow-ups such as 'that', 'continue', 'why', or 'undo it' from recent_context before retrieving older history.",
+      parsed._compactionRequest
+        ? `The active context below is a minimal compaction bootstrap, not a recent-history projection. The frozen task snapshot is available read-only through ${JSON.stringify(connectorLabel)}; retrieve task state before finalizing the checkpoint when the bootstrap is not sufficient to preserve it.`
         : `Use only the active context below unless more is needed. Older history and Codex capability instructions are available on demand through ${JSON.stringify(connectorLabel)}; answer immediately with zero connector calls when the active context is sufficient.`,
       `The connector selected for this turn is ${JSON.stringify(connectorLabel)}. Treat it as an exclusive routing constraint for connector-dependent operations.`,
       `Use only ${JSON.stringify(connectorLabel)} for connector-dependent operations. Do not call another connector, app, MCP provider, host, local bridge, or similarly named tool provider even if one is available.`,
       "Connector names are opaque routing identifiers. Do not infer aliases, equivalence, fallback relationships, or shared ownership from similar names.",
       `A failure, timeout, transport error, missing tool, or unavailable action from ${JSON.stringify(connectorLabel)} does not authorize fallback to another connector. Report the blocker instead of switching providers.`,
       "Switching connectors requires explicit user authorization.",
-      "If a recent_context or checkpoint entry has truncated=true, use its history_ref with codex_context get only when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image.",
+      parsed._compactionRequest
+        ? "If the checkpoint entry has truncated=true, use its history_ref with codex_context get when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image."
+        : "If a recent_context or checkpoint entry has truncated=true, use its history_ref with codex_context get only when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image.",
       "Treat project/environment/tool/transport blocks and checkpoint as Codex operational context, not human-authored chat. For questions about what the user said, use human user turns only.",
       "Return required rich results as ordinary Markdown too. Do not mention this bridge or capability routing unless the user asks about it.",
     ]
@@ -677,8 +703,8 @@ export function compileLcaCodexPrompt(
           return latestUserIndex >= 0 && index > latestUserIndex;
         }).length,
         recent_exchanges: workingContext.exchangeCount,
-        recent_exchange_limit: CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT,
-        recent_token_budget: CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET,
+        recent_exchange_limit: parsed._compactionRequest ? 0 : CHATGPT_RECENT_CONTEXT_EXCHANGE_LIMIT,
+        recent_token_budget: parsed._compactionRequest ? 0 : CHATGPT_RECENT_CONTEXT_TOKEN_BUDGET,
       }),
       "</codex_context_ref>",
     ]
