@@ -1151,6 +1151,25 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     ], 200)).toThrow("completed text block");
   });
 
+  test("defers mutable connector Markdown until completion so replaced blocks are never retracted", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
+    const preliminary = [
+      { key: "0:0:p", html: "<p>I’ll inspect it.</p>", text: "I’ll inspect it.", streamable: true },
+      { key: "0:1:p", html: "<p>Running tool…</p>", text: "Running tool…", streamable: false },
+    ];
+    expect(buffer.observe(preliminary, 0, false)).toBe("");
+    expect(buffer.observe(preliminary, 5_000, false)).toBe("");
+
+    const final = [
+      { key: "0:0:p", html: "<p>Tool finished successfully.</p>", text: "Tool finished successfully.", streamable: false },
+    ];
+    expect(buffer.observe(final, 6_000, false)).toBe("");
+    expect(buffer.finish()).toEqual({
+      delta: "Tool finished successfully.",
+      markdown: "Tool finished successfully.",
+    });
+  });
+
   test("drops decorative HTML images without removing textual links", () => {
     const markdown = chatGptHtmlToMarkdown([
       '<p>Source card: <a href="https://github.com/example/repo"><img alt="GitHub" src="data:image/png;base64,AAAA"></a></p>',

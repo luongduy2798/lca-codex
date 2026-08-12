@@ -318,8 +318,13 @@ export class ChatGptTurnDomHealthTracker {
     currentText: string;
     completionActionVisible: boolean;
   }, now = Date.now()): string | undefined {
-    if (state.responsePresent) {
-      this.sawResponse = true;
+    if (state.responsePresent || state.running) {
+      // ChatGPT may temporarily remove the assistant turn while a connector/tool call is still
+      // running. The stop control is stronger evidence that the browser turn is alive than the
+      // presence of a particular React subtree, so do not age the missing-response watchdog while
+      // generation is active. If generation later stops with no response DOM, the grace window
+      // starts from that point and still fails closed if the DOM never returns.
+      if (state.responsePresent) this.sawResponse = true;
       this.missingResponseSince = undefined;
     } else {
       this.missingResponseSince ??= now;
@@ -1883,9 +1888,15 @@ export class ChatGptBrowserWorker {
             });
             await diagnostics.capture(page, "response-visible");
           }
-          // Match upstream: emit only semantic blocks that ChatGPT has structurally completed
-          // and kept byte-stable for the configured window. Once emitted, visible text is immutable.
-          const markdownDelta = markdownBuffer.observe(snapshot.markdownSegments, observedAt);
+          // Connector/tool turns can replace an earlier final-answer Markdown subtree after it
+          // has looked structurally complete for many seconds. Responses deltas cannot retract
+          // already-emitted text, so keep those snapshots mutable until terminal completion.
+          // Plain browser turns retain incremental block streaming.
+          const markdownDelta = markdownBuffer.observe(
+            snapshot.markdownSegments,
+            observedAt,
+            !mode.localTools,
+          );
           if (markdownDelta) turn.onTextDelta(markdownDelta);
           if (!firstTextLogged && snapshot.visibleText) {
             firstTextLogged = true;

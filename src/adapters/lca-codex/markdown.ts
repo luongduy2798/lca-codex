@@ -84,7 +84,7 @@ export class ChatGptMarkdownBuffer {
     }
   }
 
-  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
+  observe(segments: ChatGptMarkdownSegment[], now = Date.now(), allowCommit = true): string {
     this.assertCommittedPrefix(segments);
     this.latest = segments.map(segment => ({ ...segment }));
 
@@ -109,6 +109,8 @@ export class ChatGptMarkdownBuffer {
     for (const index of this.candidates.keys()) {
       if (index >= segments.length) this.candidates.delete(index);
     }
+
+    if (!allowCommit) return "";
 
     let delta = "";
     while (this.committed.length < segments.length) {

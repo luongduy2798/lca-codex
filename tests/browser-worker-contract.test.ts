@@ -1084,7 +1084,8 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("streamable: childIsComplete");
   expect(workerSource).toContain("group,");
   expect(workerSource).toContain("fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(\"\")");
-  expect(workerSource).toContain("markdownBuffer.observe(snapshot.markdownSegments, observedAt)");
+  expect(workerSource).toContain("!mode.localTools");
+  expect(workerSource).toContain("markdownBuffer.observe(");
   expect(workerSource).toContain("const final = markdownBuffer.finish()");
   expect(workerSource).toContain("const pollScheduler = new ChatGptAdaptivePollScheduler()");
   expect(workerSource).not.toContain("ChatGptTextDeltaCoalescer");
@@ -1155,7 +1156,7 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
     responsePresent: false,
-    running: true,
+    running: false,
     currentText: "",
     completionActionVisible: false,
   };
@@ -1181,6 +1182,29 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+});
+
+test("browser DOM health tolerates assistant DOM replacement while generation is still running", () => {
+  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
+  const visible = {
+    responsePresent: true,
+    running: true,
+    currentText: "working",
+    completionActionVisible: false,
+  };
+  const runningWithoutDom = {
+    ...visible,
+    responsePresent: false,
+    currentText: "",
+  };
+  expect(health.update(visible, 1_000)).toBeUndefined();
+  expect(health.update(runningWithoutDom, 2_000)).toBeUndefined();
+  expect(health.update(runningWithoutDom, 20_000)).toBeUndefined();
+
+  const stoppedWithoutDom = { ...runningWithoutDom, running: false };
+  expect(health.update(stoppedWithoutDom, 20_000)).toBeUndefined();
+  expect(health.update(stoppedWithoutDom, 20_999)).toBeUndefined();
+  expect(health.update(stoppedWithoutDom, 21_000)).toContain("response DOM disappeared");
 });
 
 test("browser completion settles from the last terminal snapshot when ChatGPT removes the response DOM", () => {
