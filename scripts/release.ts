@@ -46,7 +46,7 @@ function restoreVersionFiles(): void {
 }
 
 const branch = gitOutput(["branch", "--show-current"]);
-if (branch !== "main") throw new Error(`Releases must be created from main, not ${branch || "detached HEAD"}`);
+if (!branch) throw new Error("Releases must be created from a branch, not detached HEAD");
 
 const dirty = gitOutput(["status", "--porcelain"]);
 if (dirty) throw new Error("Working tree must be clean before releasing");
@@ -56,12 +56,15 @@ if (!/github\.com[:/]luongduy2798\/lca-codex(?:\.git)?$/.test(remote)) {
   throw new Error(`origin must point to luongduy2798/lca-codex, received ${remote}`);
 }
 
-process.stdout.write("Syncing main and tags from origin...\n");
-gitRun(["fetch", "origin", "main", "--tags"]);
+process.stdout.write(`Syncing ${branch} and tags from origin...\n`);
+gitRun(["fetch", "origin", branch, "--tags"]);
 
 const localHead = gitOutput(["rev-parse", "HEAD"]);
-const remoteHead = gitOutput(["rev-parse", "origin/main"]);
-if (localHead !== remoteHead) throw new Error("Local main must exactly match origin/main before releasing");
+const remoteBranch = `origin/${branch}`;
+const remoteHead = gitOutput(["rev-parse", "--verify", remoteBranch]);
+if (localHead !== remoteHead) {
+  throw new Error(`Local ${branch} must exactly match ${remoteBranch} before releasing`);
+}
 
 const rootPackagePath = resolve(root, "package.json");
 const launcherPackagePath = resolve(root, "launcher", "package.json");
@@ -120,15 +123,15 @@ if (kind !== "current") {
 }
 gitRun(["tag", "-a", tag, "-m", `Release ${tag}`]);
 
-process.stdout.write(`Pushing ${tag} atomically with main...\n`);
-const push = Bun.spawnSync(["git", "push", "--atomic", "origin", "main", tag], {
+process.stdout.write(`Pushing ${tag} atomically with ${branch}...\n`);
+const push = Bun.spawnSync(["git", "push", "--atomic", "origin", branch, tag], {
   cwd: root,
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",
 });
 if (push.exitCode !== 0) {
-  throw new Error(`Push failed. Local release commit and tag ${tag} were kept; retry with: git push --atomic origin main ${tag}`);
+  throw new Error(`Push failed. Local release commit and tag ${tag} were kept; retry with: git push --atomic origin ${branch} ${tag}`);
 }
 
 process.stdout.write(`Release ${tag} pushed. GitHub Release workflow will build and publish the installers.\n`);
