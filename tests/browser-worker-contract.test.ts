@@ -148,12 +148,12 @@ test("browser network lifecycle correlates the created conversation, turn stream
   });
 
   tracker.arm();
-  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
-    conversation_id: "conversation-1",
-  }));
   tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
     type: "heartbeat",
     turn_id: "turn-1",
+    conversation_id: "conversation-1",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
     conversation_id: "conversation-1",
   }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
@@ -176,7 +176,7 @@ test("browser network lifecycle correlates the created conversation, turn stream
   }));
   expect(completionBeforeStream.snapshot()).toEqual({
     armed: true,
-    conversationKnown: true,
+    conversationKnown: false,
     turnKnown: false,
     completed: false,
   });
@@ -211,7 +211,7 @@ test("browser network lifecycle lets the post-send conversation replace a stale 
   expect(tracker.snapshot()).toEqual({
     armed: true,
     conversationKnown: true,
-    turnKnown: false,
+    turnKnown: true,
     completed: false,
   });
 
@@ -249,7 +249,7 @@ test("browser network lifecycle is mandatory before Send and after launcher reat
   expect(workerSource).toContain("let networkCompletionObservedOnPriorPoll = false;");
   expect(workerSource).toContain("const networkCompletionReady = networkCompletionObserved");
   expect(workerSource).toContain("networkCompletionObservedOnPriorPoll = networkCompletionObserved;");
-  expect(workerSource).toContain("if (networkCompletionReady) {");
+  expect(workerSource).toContain("if (networkCompletionReady || recoveredCompletionReady) {");
   expect(workerSource).not.toContain("turnCompletionReady");
   expect(workerSource).not.toContain("completionTracker");
   expect(workerSource).toContain("ChatGPT network lifecycle observer is unavailable before Send");
@@ -997,9 +997,9 @@ test("response polling balances visible latency with weak-machine efficiency", (
   ]);
 });
 
-test("network completion finalizes the DOM-backed Markdown serializer without DOM completion heuristics", () => {
+test("terminal resolution finalizes the DOM-backed Markdown serializer", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {");
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady || recoveredCompletionReady) {");
   const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", networkCompletion);
   const finalEmission = workerSource.indexOf("turn.onTextDelta(final.delta)", finalSnapshot);
   expect(networkCompletion).toBeGreaterThan(-1);
@@ -1015,7 +1015,7 @@ test("network completion finalizes the DOM-backed Markdown serializer without DO
 test("network completion remains authoritative when the assistant DOM is absent on the terminal poll", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const responsePresentBranch = workerSource.indexOf("if (snapshot.responsePresent) {");
-  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {", responsePresentBranch);
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady || recoveredCompletionReady) {", responsePresentBranch);
   expect(responsePresentBranch).toBeGreaterThan(-1);
   expect(networkCompletion).toBeGreaterThan(responsePresentBranch);
   expect(workerSource.slice(responsePresentBranch, networkCompletion)).toContain("}");
@@ -1179,7 +1179,7 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("streamable: childIsComplete");
   expect(workerSource).toContain("group,");
   expect(workerSource).toContain("fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(\"\")");
-  expect(workerSource).toContain("!mode.localTools");
+  expect(workerSource).not.toContain("!mode.localTools");
   expect(workerSource).toContain("markdownBuffer.observe(");
   expect(workerSource).toContain("const final = markdownBuffer.finish()");
   expect(workerSource).toContain("const pollScheduler = new ChatGptAdaptivePollScheduler()");

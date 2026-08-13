@@ -13,6 +13,8 @@ launcher-owned lca-codex daemon
             ▲
             │ outbound OpenAI Tunnel
             ▼
+
+
       ChatGPT custom connector
 ```
 
@@ -35,11 +37,241 @@ current Codex task.
 - Runtime readiness is conjunctive: both the tunnel and the Responses daemon must be healthy. The
   launcher starts the tunnel first and never reports the runtime Ready when tunnel readiness is lost.
 
+### Browser response transport
+
+The ChatGPT-to-Codex return path is deliberately hybrid. ChatGPT WebSocket traffic is used only for
+page-scoped lifecycle and correlation; it is not the text transport. The worker separately polls the
+public assistant DOM for visible reasoning/commentary and semantic Markdown, then the Responses bridge
+encodes those append-only deltas as SSE/JSON for Codex. In compact form:
+
+```text
+ChatGPT WebSocket ── lifecycle / conversation + turn correlation ──┐
+                                                                  ├─ browser worker ── Responses SSE/JSON ──▶ Codex
+ChatGPT DOM polling ── visible trace + semantic Markdown ──────────┘
+```
+
+The three relevant network event types are `conversation-created`, `conversation-turn-stream`, and
+`conversation-turn-complete`, but their raw arrival order is not a protocol state machine. In live
+traffic a stream frame can arrive before the creation frame. The tracker therefore stores independent
+evidence, uses the stream frame's `conversation_id + turn_id` as the strongest ownership signal, and
+normalizes Activity milestones only after the owned conversation has enough evidence.
+
 The reversible Codex integration deliberately installs a Web-compatibility profile:
 `multi_agent = true` preserves routed subagent turns, `multi_agent_v2 = false` keeps their payloads
 readable by the current Web projection, and `remote_compaction_v2 = false` bounds retained Web image
 history. These settings adapt the outer Codex harness to ChatGPT Web constraints; they do not move
 planning, tool ownership, sandboxing, or approvals into LCA Codex.
+
+## End-to-end request flow
+
+The top-level diagram shows the components, but a normal routed turn crosses them in a specific
+order. The detailed flow below is split into narrow, vertically stacked phase diagrams so Mermaid does not
+shrink one wide multi-branch SVG to fit the page. Every card still shows the route, representative
+parameters sent, and the result received. The launcher must already have both
+the outbound tunnel and the loopback Responses daemon in the Ready state before Codex sends work to
+`lca-codex`.
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
+    classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
+    classDef error fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d,font-size:22px
+    classDef note fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#334155,font-size:20px
+
+    subgraph PA["Phase A · Responses request intake"]
+        direction TB
+        S00["<b>STEP 00 · Runtime is Ready</b><br/>Owner: launcher<br/><b>Required:</b> OpenAI Tunnel healthy<br/>and loopback Responses daemon healthy"]:::card
+        S01["<b>STEP 01 · Accept Responses request</b><br/><b>Route:</b> Codex app / CLI → Responses daemon<br/><b>Send:</b> POST /v1/responses<br/><b>Params:</b> model, input, tools?, tool_choice?, reasoning?,<br/>stream, previous_response_id?, parallel_tool_calls?<br/><b>Receive:</b> raw Responses request"]:::card
+        S02["<b>STEP 02 · Restore previous response state</b><br/><b>Route:</b> daemon → Responses parser / state<br/><b>Send:</b> previous_response_id?, input<br/><b>Action:</b> expandPreviousResponseInput(raw)<br/><b>Receive:</b> expanded input or missing replay state"]:::card
+        Q02{"<b>Continuation state available?</b>"}:::decision
+        E02["<b>STOP · Continuation cannot be restored</b><br/><b>Route:</b> daemon → Codex<br/><b>Return:</b> HTTP 409 invalid_request_error<br/><b>Reason:</b> local continuation state unavailable"]:::error
+        S03["<b>STEP 03 · Parse normalized request</b><br/><b>Owner:</b> Responses parser / state<br/><b>Input:</b> expanded request body<br/><b>Action:</b> normalize messages, tools, tool results, options<br/><b>Receive:</b> CodexParsedRequest<br/>modelId, previousResponseId?, context, stream, options,<br/>_rawBody?, _replayPrefixLen?"]:::card
+        S04["<b>STEP 04 · Enter LCA Codex adapter</b><br/><b>Route:</b> Responses daemon → adapter<br/><b>Send:</b> runTurn(parsed, headers, abortSignal)<br/><b>Receive:</b> one task-scoped execution turn"]:::card
+    end
+
+    S00 --> S01 --> S02 --> Q02
+    Q02 -- "no" --> E02
+    Q02 -- "yes" --> S03 --> S04
+```
+
+### Phase B - Freeze trusted Codex state
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+
+    subgraph PB["Phase B · Freeze trusted Codex state"]
+        direction TB
+        S05["<b>STEP 05 · Resolve trusted execution authority</b><br/><b>Owner:</b> LCA Codex adapter<br/><b>Inputs:</b> threadId?, turnId?, cwd, roots, writableRoots,<br/>sandboxPolicy, exact tools[]<br/><b>Receive:</b> task identity + reusable execution session"]:::card
+        S06["<b>STEP 06 · Freeze immutable context snapshot</b><br/><b>Route:</b> adapter → turn broker<br/><b>Send:</b> environment, traceId, ttl?, contextSnapshot<br/><b>Snapshot contains:</b> effective Codex history + attachments<br/><b>Receive:</b> turn_token and snapshot identity"]:::card
+        S07["<b>STEP 07 · Compile bounded browser prompt</b><br/><b>Owner:</b> adapter<br/><b>Input:</b> parsed request + capabilities + turn_token + snapshot<br/><b>Prompt:</b> active_context v3 with system?, developer_overrides?,<br/>project_instructions?, checkpoint?, recent_context?, latest_user<br/><b>Receive:</b> text, images[], transport=mcp-lazy, contextSnapshotId"]:::card
+    end
+
+    S05 --> S06 --> S07
+```
+
+### Phase C - Start one Temporary Chat generation
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
+    classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
+
+    subgraph PC["Phase C · Start one Temporary Chat generation"]
+        direction TB
+        S08["<b>STEP 08 · Prepare task-bound browser surface</b><br/><b>Owner:</b> Electron tab / browser worker<br/><b>Action:</b> lease tab, attach prompt/images<br/><b>Critical:</b> attach CDP WebSocket observer BEFORE Send<br/><b>Receive:</b> armed network tracker"]:::card
+        S09["<b>STEP 09 · Submit prompt to ChatGPT Web</b><br/><b>Route:</b> browser worker → ChatGPT Web<br/><b>Send:</b> text, images[], selected model/reasoning mode<br/><b>Receive:</b> page-scoped lifecycle frames<br/><b>Ordering:</b> stream and created may arrive in either order"]:::card
+        S10["<b>STEP 10 · Correlate the submitted turn</b><br/><b>Route:</b> ChatGPT Web → browser worker<br/><b>Stream evidence:</b> conversation_id + turn_id establishes ownership<br/><b>Created evidence:</b> confirms that owned conversation<br/><b>Rule:</b> submission is accepted only after correlated network evidence"]:::card
+        S11["<b>STEP 11 · Stream visible model progress</b><br/><b>Route:</b> browser worker → adapter<br/><b>Receive:</b> reasoning summary, commentary, Markdown deltas<br/><b>Callbacks:</b> onReasoningSummary, onCommentary, onTextDelta"]:::card
+        Q11{"<b>Does this generation need connector access?</b>"}:::decision
+        D11["<b>DIRECT PATH · No connector call</b><br/><b>Result:</b> ChatGPT answers from active_context only<br/><b>Important:</b> turn_token is never bound<br/><b>Next:</b> wait for authoritative network completion"]:::success
+    end
+
+    S08 --> S09 --> S10 --> S11 --> Q11
+    Q11 -- "no" --> D11
+    Q11 -- "yes" --> C11["<b>CONNECTOR PATH</b><br/><b>Next:</b> Phase D"]:::card
+```
+
+### Phase D - Bind connector capability once
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
+
+    subgraph PD["Phase D · Bind connector capability once"]
+        direction TB
+        S12["<b>STEP 12 · Bind turn capability</b><br/><b>Route:</b> ChatGPT Web → connector/tunnel → MCP → broker<br/><b>Send:</b> codex_bind_turn with turn_token<br/><b>Broker action:</b> claim(token)<br/><b>Receive:</b> binding_id + active environment metadata<br/><b>Rule:</b> every later connector call uses binding_id only"]:::card
+        Q12{"<b>Which connector operation is needed?</b>"}:::decision
+    end
+
+    S12 --> Q12
+    Q12 -- "read context" --> R12["<b>READ CONTEXT</b><br/><b>Next:</b> Phase E1"]:::card
+    Q12 -- "native tool" --> T12["<b>NATIVE TOOL</b><br/><b>Next:</b> Phase E2"]:::card
+```
+
+### Phase E1 - Read frozen context
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
+
+    subgraph PE1["Phase E1 · Read frozen context"]
+        direction TB
+        S13["<b>STEP 13 · Query lazy Codex context</b><br/><b>Route:</b> ChatGPT Web → connector → MCP → broker<br/><b>Send:</b> codex_context<br/>binding_id, action=instructions|recent|search|get|full|image,<br/>query?, ids?, offset?, limit?, max_chars?, attachment_ref?<br/><b>Receive:</b> snapshot content / attachment / next_offset?"]:::card
+        S14["<b>STEP 14 · Return context to same generation</b><br/><b>Route:</b> broker → MCP → connector → ChatGPT Web<br/><b>Receive:</b> content or structured result<br/><b>Important:</b> outer Codex executes no native tool<br/><b>Generation:</b> same ChatGPT response continues"]:::card
+    end
+
+    S13 --> S14 --> N14["<b>Same generation continues</b><br/><b>Next:</b> Phase F"]:::success
+```
+
+### Phase E2 - Execute an exact native Codex tool
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef note fill:#f8fafc,stroke:#94a3b8,stroke-width:1.5px,color:#334155,font-size:20px
+    classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
+
+    subgraph PE2["Phase E2 · Execute an exact native Codex tool"]
+        direction TB
+        S15["<b>STEP 15 · Request native tool invocation</b><br/><b>Route:</b> ChatGPT Web → connector → MCP → broker<br/><b>Send:</b> binding_id + exact native request<br/>examples: cmd, patch, or wire_name + arguments? / input?<br/><b>Broker:</b> invoke(bindingId, wireName, ...)"]:::card
+        S16["<b>STEP 16 · Broker blocks connector request</b><br/><b>Owner:</b> turn broker<br/><b>Action:</b> allocate call_id and queue BrokerToolRequest<br/><b>Payload:</b> callId, wireName, freeform, arguments? / input?<br/><b>Important:</b> original MCP request stays open"]:::card
+        S17["<b>STEP 17 · Surface Responses function_call to Codex</b><br/><b>Route:</b> broker → adapter → Responses daemon → Codex<br/><b>Events:</b> tool_call_start, tool_call_delta, tool_call_end<br/><b>Responses output:</b> function_call with call_id, name, arguments<br/><b>Turn state:</b> response.completed with endTurn=false"]:::card
+        N17["<b>Parallel batch rule</b><br/>A batch may contain multiple call_id values.<br/>Every outstanding call_id must receive a result<br/>before the browser generation can resume."]:::note
+        S18["<b>STEP 18 · Outer Codex executes the exact tool</b><br/><b>Owner:</b> Codex harness<br/><b>Authority:</b> native tool registry, sandbox, approvals,<br/>session lifecycle and local side effects<br/><b>Receive:</b> native tool result for each call_id"]:::card
+        S19["<b>STEP 19 · Post function_call_output continuation</b><br/><b>Route:</b> Codex → Responses daemon<br/><b>Send:</b> POST /v1/responses<br/><b>Params:</b> previous_response_id + input[] containing<br/>function_call_output with call_id + output, stream<br/><b>Receive:</b> continuation request"]:::card
+        S20["<b>STEP 20 · Parse returned toolResult messages</b><br/><b>Route:</b> daemon → parser → adapter<br/><b>Receive:</b> toolResult with toolCallId, toolName,<br/>toolNamespace?, content, isError?<br/><b>Session:</b> reuse existing execution session and outstanding batch"]:::card
+        S21["<b>STEP 21 · Complete blocked broker invocation</b><br/><b>Route:</b> adapter → broker<br/><b>Send:</b> completeTool(turn_token, call_id, result)<br/><b>Result:</b> content, structuredContent?, isError?<br/><b>Receive:</b> original blocked MCP invoke resolves"]:::card
+        S22["<b>STEP 22 · Return tool result to ChatGPT</b><br/><b>Route:</b> broker → MCP → connector → ChatGPT Web<br/><b>Receive:</b> connector tool result<br/><b>Critical:</b> SAME browser response/generation resumes<br/><b>Never:</b> no replacement Temporary Chat for this round-trip"]:::card
+    end
+
+    S15 --> S16 --> S17 --> S18 --> S19 --> S20 --> S21 --> S22
+    S17 -. "parallel batch" .-> N17
+    S22 --> N22["<b>SAME browser generation resumes</b><br/><b>Next:</b> Phase F"]:::success
+```
+
+### Phase F - Continue or finish the same generation
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
+
+    subgraph PF["Phase F · Continue or finish the same generation"]
+        direction TB
+        S23["<b>STEP 23 · Model continues after connector result</b><br/><b>Route:</b> ChatGPT Web → browser worker → adapter<br/><b>Receive:</b> more reasoning, commentary and Markdown deltas<br/><b>Generation:</b> still the original submitted turn"]:::card
+        Q23{"<b>Need another connector operation?</b>"}:::decision
+    end
+
+    S23 --> Q23
+```
+
+### Phase G - Authoritative completion and Responses encoding
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
+flowchart TD
+    classDef card fill:#ffffff,stroke:#64748b,stroke-width:2px,color:#0f172a,font-size:22px
+    classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
+    classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
+    classDef error fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d,font-size:22px
+
+    subgraph PG["Phase G · Authoritative completion and Responses encoding"]
+        direction TB
+        Q24{"<b>How does the browser turn terminate?</b>"}:::decision
+        S24["<b>STEP 24 · Resolve terminal lifecycle</b><br/><b>Normal:</b> matching conversation-turn-complete for the owned turn<br/><b>Gap recovery:</b> only after a known CDP observer gap + correlated turn + stable terminal DOM evidence<br/><b>Rule:</b> DOM is never a general completion source"]:::card
+        S25["<b>STEP 25 · Flush final browser outcome</b><br/><b>Owner:</b> browser worker / adapter<br/><b>During generation:</b> stable top-level Markdown blocks may already be streamed<br/><b>Terminal:</b> one normal React poll, then flush the remaining mutable Markdown tail"]:::card
+        S26["<b>STEP 26 · Revoke turn capability</b><br/><b>Route:</b> adapter → turn broker<br/><b>Action:</b> retire turn_token + binding_id<br/><b>Result:</b> reject later or still-pending connector use"]:::card
+        S27["<b>STEP 27 · Encode final Responses result</b><br/><b>Route:</b> adapter → daemon → Codex<br/><b>If stream=true:</b> SSE reasoning/text/output_item events,<br/>then response.completed with output + usage<br/><b>If stream=false:</b> completed JSON Responses object"]:::success
+        S28["<b>STEP 28 · Remember bounded continuation state</b><br/><b>Route:</b> daemon → Responses state<br/><b>Send:</b> raw request + completed response<br/><b>Result:</b> future previous_response_id can restore this turn"]:::card
+        E24["<b>TERMINAL ERROR / INCOMPLETE</b><br/><b>Route:</b> adapter / daemon → Codex<br/><b>Return:</b> response.failed or response.incomplete<br/><b>Cleanup:</b> active turn capability is still revoked"]:::error
+    end
+
+    Q24 -- "network completion or guarded gap recovery" --> S24 --> S25 --> S26 --> S27 --> S28
+    Q24 -- "failure or incomplete" --> E24
+```
+
+Payloads in the diagram are intentionally representative rather than exhaustive schemas: field names
+match the wire or internal structures used by the implementation, while optional fields that do not
+change the lifecycle are omitted. The key IDs are distinct: `previous_response_id` chains Responses
+requests, `turn_token` is the turn-scoped capability accepted only by the bind step, `binding_id` is returned by
+`codex_bind_turn`, and each native invocation receives its own `call_id` that must match the later
+`function_call_output`.
+
+The important property of the tool path is that ChatGPT does not execute repository tools itself.
+The connector call blocks in the local broker while the adapter surfaces an ordinary Responses tool
+call to the outer Codex harness. Codex performs that call with the exact tool registry, sandbox, and
+approval policy attached to the active turn. When Codex posts the tool result back, the existing
+browser response resumes; LCA Codex does not start a second planner or a replacement ChatGPT turn for
+the tool round-trip.
+
+Normal completion is network-authoritative. The browser worker accepts the correlated
+`conversation-turn-complete` evidence for the owned conversation, confirms that latched terminal state
+on the next ordinary poll, flushes the remaining Markdown tail, and finishes the Responses stream.
+A second terminal source exists only for a proven CDP observer gap: if ownership was already established
+but the terminal frame may have been lost while disconnected, recovery requires a visible response,
+terminal action evidence, no Stop control, at least 1.5 seconds of stable activity, and a confirming
+subsequent poll. This narrow recovery does not restore the old DOM-lifecycle model. For a completed
+response the daemon records bounded continuation state for `previous_response_id`; the turn broker
+revokes the turn token/binding and rejects any later use of that capability. The Electron tab may remain
+visible for inspection, but its completed capability is not reusable by another Codex turn.
+
+Compaction is a separate end-to-end path rather than a variation of the normal tool loop. A Codex
+compaction request starts a dedicated browser checkpoint turn over a frozen broker snapshot. Normal
+recent-history projection and mutation/native-tool access are removed; the checkpoint turn must bind
+only to retrieve read-only `codex_context` state. Its result is converted back to the Responses
+compaction contract and returned to Codex, which remains the owner of replacement history.
 
 ## Browser lifecycle
 
@@ -52,29 +284,37 @@ closed. Closing a running tab destroys its page and terminates that browser turn
 turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
 controls.
 
-Within an open tab, the authoritative generation lifecycle is network-scoped rather than DOM-scoped.
-Before Send, the worker attaches a page CDP WebSocket observer and arms it for the new submission. It
-correlates `conversation-created` to that new conversation, then its `conversation-turn-stream`, and
-accepts only the matching `conversation-turn-complete` as normal completion. Frames seen before arming
-are ignored; a fresh creation event replaces a provisional stale heartbeat correlation, and completion
-from another conversation is rejected. Submission acceptance likewise requires correlated network
-conversation/turn evidence.
+Within an open tab, normal generation lifecycle is network-scoped rather than DOM-scoped. Before Send,
+the worker attaches a page CDP WebSocket observer and arms it for the new submission. The tracker does
+not assume `created → stream → complete` arrival order: `conversation-turn-stream` may arrive first and
+is the strongest ownership evidence because it carries both `conversation_id` and `turn_id`.
+`conversation-created` is stored independently and confirms the owned conversation; a completion is
+normal-terminal only when the owned conversation has matching created, stream/turn, and complete
+evidence. Frames seen before arming are ignored, unrelated completions are rejected, and a provisional
+stale stream can be replaced by a later stream only when the replacement conversation has matching
+creation evidence. Submission acceptance likewise requires correlated network conversation/turn
+evidence.
 
-The public ChatGPT DOM is deliberately not a liveness or completion authority. Assistant nodes may be
-removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or absent.
-Those changes do not end or complete the turn. DOM access is limited to rendering concerns: visible
-reasoning/commentary, local-tool confirmation, final Markdown serialization, and pressing Stop for an
-explicit abort. After the matching network completion event, the worker performs one ordinary poll to
-allow a final React commit, then finalizes from the current DOM or the latest cached visible response.
-There is no DOM-completion fallback and no response-DOM watchdog timeout.
+The public ChatGPT DOM is deliberately not the normal liveness/completion authority. Assistant nodes
+may be removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or
+absent. DOM instead supplies the visible content stream. `responseDomSnapshot` separates Markdown inside
+`[data-streaming-response-status]` as intermediate commentary from top-level answer Markdown. The
+Markdown buffer then appends only structurally complete, byte-stable answer blocks, so both tool-capable
+and read-only turns can stream final-answer text to Codex while ChatGPT is still generating. The final
+mutable block remains buffered until terminal resolution. Visible reasoning/commentary and local-tool
+confirmation are also DOM-derived; Stop is pressed only for an explicit abort.
 
-The network observer is therefore required infrastructure, not optional telemetry. Initial attachment
-must succeed before Send. If the launcher-owned CDP transport drops, the worker may reconnect to the
-same surface without replaying the ChatGPT generation, preserving any local-tool side effects already
-performed. The observer must then reattach as well; failure is terminal rather than permission to
-continue from DOM heuristics. Activity logs expose only one-shot lifecycle milestones and the fixed
-`network` completion source, never raw WebSocket payloads, response content, credentials, or opaque
-conversation/turn identifiers.
+The network observer is required infrastructure, not optional telemetry. Initial attachment must
+succeed before Send. If the launcher-owned CDP transport drops, the worker reconnects to the same
+surface without replaying the ChatGPT generation, keeps the existing correlation tracker, marks that a
+network-observer gap occurred, and reattaches a fresh CDP session. A failed reattachment is terminal.
+Normally, matching network completion is latched across the next poll so React can commit its final
+DOM tail. Only when a known observer gap occurred and the turn was already correlated may the guarded
+`network_gap_dom_recovery` path resolve a missed terminal frame from stable terminal DOM evidence; this
+requires no visible Stop control, a visible response/action footer, 1.5 seconds of unchanged activity,
+and confirmation on another poll. Activity logs expose normalized one-shot `created`, `streaming`, and
+`completed` milestones plus `network` versus `network_gap_dom_recovery` completion source; they never
+log raw WebSocket payloads, response content, credentials, or opaque conversation/turn identifiers.
 
 Normal tool-capable turns do not replay the entire accumulated Codex history through the
 visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective

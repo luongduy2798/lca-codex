@@ -50,6 +50,7 @@ export const CHATGPT_MARKDOWN_BLOCK_STABILITY_MS = 750;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const CHATGPT_RESPONSE_POLL_MS = 250;
 export const CHATGPT_RESPONSE_IDLE_POLL_MS = 500;
+const CHATGPT_NETWORK_GAP_RECOVERY_STABILITY_MS = 1_500;
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -241,8 +242,8 @@ const chatGptNetworkString = (value: unknown): string | undefined => (
 export class ChatGptNetworkTurnTracker {
   private armed = false;
   private conversationId?: string;
-  private conversationCreated = false;
   private turnId?: string;
+  private readonly createdConversationIds = new Set<string>();
   private readonly completedConversationIds = new Set<string>();
   private createdTransitionEmitted = false;
   private streamingTransitionEmitted = false;
@@ -253,8 +254,8 @@ export class ChatGptNetworkTurnTracker {
   arm(): void {
     this.armed = true;
     this.conversationId = undefined;
-    this.conversationCreated = false;
     this.turnId = undefined;
+    this.createdConversationIds.clear();
     this.completedConversationIds.clear();
     this.createdTransitionEmitted = false;
     this.streamingTransitionEmitted = false;
@@ -282,26 +283,26 @@ export class ChatGptNetworkTurnTracker {
       if (topicId === "conversations" && eventType === "conversation-created") {
         const conversationId = chatGptNetworkString(payload.conversation_id);
         if (!conversationId) continue;
-        // A creation event is authoritative for this freshly submitted Temporary Chat. If a
-        // late heartbeat from an older websocket turn arrived just after arming, replace that
-        // provisional correlation instead of letting stale network traffic own the new turn.
-        if (!this.conversationCreated || this.conversationId === conversationId) {
-          if (this.conversationId !== conversationId) this.turnId = undefined;
-          this.conversationId = conversationId;
-          this.conversationCreated = true;
-        }
+        this.createdConversationIds.add(conversationId);
         this.emitTransitions();
         continue;
       }
 
       if (topicId.startsWith("conversation-turn-") && eventType === "conversation-turn-stream") {
         const conversationId = chatGptNetworkString(payload.conversation_id);
-        if (!conversationId) continue;
-        if (this.conversationCreated && this.conversationId !== conversationId) continue;
-        if (!this.conversationId) this.conversationId = conversationId;
-        if (this.conversationId !== conversationId) continue;
-        this.turnId = chatGptNetworkString(payload.turn_id)
+        const turnId = chatGptNetworkString(payload.turn_id)
           ?? chatGptNetworkString(topicId.slice("conversation-turn-".length));
+        if (!conversationId || !turnId) continue;
+        if (!this.conversationId || this.conversationId === conversationId) {
+          this.conversationId = conversationId;
+          this.turnId = turnId;
+        } else {
+          const currentCreated = this.createdConversationIds.has(this.conversationId);
+          const replacementCreated = this.createdConversationIds.has(conversationId);
+          if (currentCreated || !replacementCreated) continue;
+          this.conversationId = conversationId;
+          this.turnId = turnId;
+        }
         this.emitTransitions();
         continue;
       }
@@ -315,11 +316,13 @@ export class ChatGptNetworkTurnTracker {
   }
 
   private emitTransitions(): void {
-    if (this.conversationCreated && !this.createdTransitionEmitted) {
+    const ownedConversationCreated = this.conversationId !== undefined
+      && this.createdConversationIds.has(this.conversationId);
+    if (ownedConversationCreated && !this.createdTransitionEmitted) {
       this.createdTransitionEmitted = true;
       this.onTransition?.("created");
     }
-    if (this.conversationCreated && this.turnId !== undefined && !this.streamingTransitionEmitted) {
+    if (ownedConversationCreated && this.turnId !== undefined && !this.streamingTransitionEmitted) {
       this.streamingTransitionEmitted = true;
       this.onTransition?.("streaming");
     }
@@ -334,9 +337,9 @@ export class ChatGptNetworkTurnTracker {
       armed: this.armed,
       conversationKnown: this.conversationId !== undefined,
       turnKnown: this.turnId !== undefined,
-      completed: this.conversationCreated
-        && this.turnId !== undefined
+      completed: this.turnId !== undefined
         && this.conversationId !== undefined
+        && this.createdConversationIds.has(this.conversationId)
         && this.completedConversationIds.has(this.conversationId),
     };
   }
@@ -1965,12 +1968,19 @@ export class ChatGptBrowserWorker {
       const pollScheduler = new ChatGptAdaptivePollScheduler();
       let lastResponseVisibleText = "";
       let networkCompletionObservedOnPriorPoll = false;
+      let networkObserverGapObserved = false;
+      let recoveredCompletionStableSince: number | undefined;
+      let recoveredCompletionObservedOnPriorPoll = false;
+      let completionSource: "network" | "network_gap_dom_recovery" = "network";
       let previousActivitySignature = "";
       const reattachLauncherSurface = async (): Promise<boolean> => {
         if (!launcherSurfaceId || !turnConnection || turnConnection.isConnected()) return false;
         if (turn.abortSignal?.aborted) {
           throw new DOMException("LCA Codex turn aborted", "AbortError");
         }
+        networkObserverGapObserved = true;
+        recoveredCompletionStableSince = undefined;
+        recoveredCompletionObservedOnPriorPoll = false;
         const staleConnection = turnConnection;
         let connection: Awaited<ReturnType<typeof connectLauncherBrowserHost>>;
         try {
@@ -2081,6 +2091,30 @@ export class ChatGptBrowserWorker {
         previousActivitySignature = activitySignature;
         const nextPollMs = pollScheduler.nextDelay(activityChanged);
         const observedAt = Date.now();
+
+        let recoveredCompletionObserved = false;
+        if (networkObserverGapObserved
+          && networkState.turnKnown
+          && !networkState.completed
+          && snapshot.responsePresent
+          && snapshot.completionActionVisible) {
+          const stopVisible = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+          if (!stopVisible) {
+            if (activityChanged || recoveredCompletionStableSince === undefined) {
+              recoveredCompletionStableSince = observedAt;
+            }
+            recoveredCompletionObserved = observedAt - recoveredCompletionStableSince
+              >= CHATGPT_NETWORK_GAP_RECOVERY_STABILITY_MS;
+          } else {
+            recoveredCompletionStableSince = undefined;
+          }
+        } else {
+          recoveredCompletionStableSince = undefined;
+        }
+        const recoveredCompletionReady = recoveredCompletionObserved
+          && recoveredCompletionObservedOnPriorPoll;
+        recoveredCompletionObservedOnPriorPoll = recoveredCompletionObserved;
+
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -2092,14 +2126,12 @@ export class ChatGptBrowserWorker {
             });
             await diagnostics.capture(page, "response-visible");
           }
-          // Connector/tool turns can replace an earlier final-answer Markdown subtree after it
-          // has looked structurally complete for many seconds. Responses deltas cannot retract
-          // already-emitted text, so keep those snapshots mutable until terminal completion.
-          // Plain browser turns retain incremental block streaming.
+          // responseDomSnapshot already separates intermediate commentary from top-level answer
+          // Markdown. Stream only semantic blocks that are structurally complete and byte-stable;
+          // websocket lifecycle remains the terminal authority and finish() flushes the final tail.
           const markdownDelta = markdownBuffer.observe(
             snapshot.markdownSegments,
             observedAt,
-            !mode.localTools,
           );
           if (markdownDelta) turn.onTextDelta(markdownDelta);
           if (!firstTextLogged && snapshot.visibleText) {
@@ -2138,7 +2170,13 @@ export class ChatGptBrowserWorker {
             );
           }
         }
-        if (networkCompletionReady) {
+        if (networkCompletionReady || recoveredCompletionReady) {
+          if (recoveredCompletionReady && !networkCompletionReady) {
+            completionSource = "network_gap_dom_recovery";
+            console.warn(
+              `[lca-codex] browser turn ${turn.traceId} recovered completion after a CDP observer gap`,
+            );
+          }
           const completedVisibleText = snapshot.visibleText || lastResponseVisibleText;
           if (completedVisibleText === "api_tool unavailable") {
             throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
@@ -2164,7 +2202,7 @@ export class ChatGptBrowserWorker {
         attempt,
         durationMs: activityDuration(startedAt),
         responseChars: finalText.length,
-        completionSource: "network",
+        completionSource,
       });
       console.info(`[lca-codex] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;

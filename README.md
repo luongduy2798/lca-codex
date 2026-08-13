@@ -120,14 +120,24 @@ longer changes how much conversation history is copied into the browser prompt: 
 modes use the same bounded active bootstrap and retrieve older context lazily. Dedicated compaction
 uses the same frozen lazy snapshot without projecting the recent working set inline.
 
-Browser-turn state comes from ChatGPT's page-scoped WebSocket lifecycle, not from response UI. The
-worker attaches its network observer before Send, correlates the new conversation/turn, and considers
-the turn complete only after the matching network completion event. Response DOM, Stop/Copy controls,
-and React remounts do not decide whether a turn is running or finished. The UI is still read to stream
-visible reasoning/commentary, handle local-tool confirmation, and serialize the final Markdown; one
-normal poll after network completion gives the final React render a chance to commit. If network
-observation cannot attach before Send or cannot be restored after a transient CDP reconnect, the turn
-fails explicitly rather than falling back to UI lifecycle guesses.
+Browser-turn lifecycle comes from ChatGPT's page-scoped WebSocket traffic, not from response UI. The
+worker attaches its network observer before Send and treats `conversation-created`,
+`conversation-turn-stream`, and `conversation-turn-complete` as order-independent evidence: raw turn
+stream frames may arrive before the conversation-created frame. The stream event carries both
+`conversation_id` and `turn_id` and anchors ownership; creation confirms that conversation, and only a
+matching completion normally terminates it. Response DOM, Stop/Copy controls, and React remounts do
+not normally decide whether a turn is running or finished.
+
+Rendering is intentionally hybrid rather than a ChatGPT-WS text passthrough. WebSocket traffic owns
+lifecycle/correlation, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
+local bridge encodes those deltas as Responses SSE back to Codex. Markdown inside ChatGPT's
+`[data-streaming-response-status]` container is treated as intermediate commentary; structurally
+complete, byte-stable top-level answer blocks stream incrementally for both tool-capable and read-only
+turns, then terminal completion flushes the remaining tail. After a normal matching network completion,
+one ordinary poll lets the final React render commit. If CDP disconnects after the turn was already
+correlated, the same surface and tracker are reattached; only that proven observer-gap case may use a
+guarded stable-DOM recovery when the terminal WebSocket frame was missed. Initial observer attachment
+still fails closed before Send, and DOM is never a general completion fallback.
 
 ## Codex tool bridge
 
