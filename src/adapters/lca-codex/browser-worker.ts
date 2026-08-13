@@ -234,7 +234,6 @@ export function chatGptTurnIsComplete(state: {
   completionActionVisible: boolean;
 }): boolean {
   return state.responsePresent
-    && !state.running
     && state.currentText.length > 0
     && state.completionActionVisible;
 }
@@ -255,24 +254,45 @@ export function chatGptSubmissionEvidence(state: {
 }
 
 export class ChatGptCompletionTracker {
-  private candidate?: { signature: string; since: number };
+  private candidate?: { signature: string; since: number; running: boolean };
 
   constructor(private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS) {}
 
-  update(state: Parameters<typeof chatGptTurnIsComplete>[0], now = Date.now()): boolean {
+  update(state: Parameters<typeof chatGptTurnIsComplete>[0] & {
+    activitySignature?: string;
+  }, now = Date.now()): boolean {
     // ChatGPT may remove/replace the completed assistant DOM immediately after exposing
     // terminal UI. Preserve an already-strong completion candidate across that transient
     // gap so the settle window can finish instead of waiting for DOM-health failure.
-    if (!state.responsePresent && !state.running && this.candidate) {
-      return now - this.candidate.since >= this.stableMs;
+    if (!state.responsePresent && this.candidate) {
+      // A response-scoped terminal action is stronger completion evidence than the global Stop
+      // button, which ChatGPT can leave visible after the answer/action footer is already final.
+      // Preserve a candidate across DOM replacement when Stop was already stale at the moment we
+      // observed that terminal evidence. A newly-visible Stop after an idle candidate is still a
+      // real contradictory resume signal and invalidates the latch.
+      if (!state.running || this.candidate.running) {
+        return now - this.candidate.since >= this.stableMs;
+      }
+      this.candidate = undefined;
+      return false;
     }
     if (!chatGptTurnIsComplete(state)) {
       this.candidate = undefined;
       return false;
     }
-    const signature = `${state.currentText}\0${state.currentHtml ?? state.currentText}`;
+    // A response-scoped action footer can appear while connector/tool trace UI is still moving.
+    // Require the whole observed turn activity to remain stable across the settle window, not just
+    // the rendered Markdown subtree, so a genuinely-live tool round cannot masquerade as terminal.
+    // `activitySignature` deliberately includes the global running flag too: a stale Stop that
+    // remains continuously visible does not block completion, while a real Stop state transition
+    // restarts the short settle window.
+    const signature = [
+      state.currentText,
+      state.currentHtml ?? state.currentText,
+      state.activitySignature ?? "",
+    ].join("\0");
     if (this.candidate?.signature !== signature) {
-      this.candidate = { signature, since: now };
+      this.candidate = { signature, since: now, running: state.running };
       return false;
     }
     return now - this.candidate.since >= this.stableMs;
@@ -303,8 +323,9 @@ export class ChatGptAdaptivePollScheduler {
 export class ChatGptTurnDomHealthTracker {
   private sawResponse = false;
   private missingResponseSince?: number;
+  private pendingMissingResponseFailure?: string;
   private emptyCompletionSince?: number;
-  private missingCompletionAction?: { text: string; since: number };
+  private missingCompletionAction?: { text: string; activitySignature?: string; since: number };
 
   constructor(
     private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
@@ -317,26 +338,38 @@ export class ChatGptTurnDomHealthTracker {
     running: boolean;
     currentText: string;
     completionActionVisible: boolean;
+    activitySignature?: string;
   }, now = Date.now()): string | undefined {
-    if (state.responsePresent || state.running) {
-      // ChatGPT may temporarily remove the assistant turn while a connector/tool call is still
-      // running. The stop control is stronger evidence that the browser turn is alive than the
-      // presence of a particular React subtree, so do not age the missing-response watchdog while
-      // generation is active. If generation later stops with no response DOM, the grace window
-      // starts from that point and still fails closed if the DOM never returns.
-      if (state.responsePresent) this.sawResponse = true;
+    if (state.responsePresent) {
+      this.sawResponse = true;
       this.missingResponseSince = undefined;
+      this.pendingMissingResponseFailure = undefined;
+    } else if (state.running) {
+      // ChatGPT may temporarily remove the assistant turn while a connector/tool call is still
+      // running, and deep-reasoning turns can legitimately remain in that state without any DOM
+      // change for an unbounded amount of time. Do not infer a failed turn from elapsed time alone;
+      // lifecycle abort/turn timeout and explicit terminal UI remain the authoritative bounds.
+      this.missingResponseSince = undefined;
+      this.pendingMissingResponseFailure = undefined;
     } else {
       this.missingResponseSince ??= now;
       if (now - this.missingResponseSince >= this.missingResponseMs) {
-        return this.sawResponse
+        const failure = this.sawResponse
           ? "ChatGPT response DOM disappeared while the browser turn was active"
           : "ChatGPT did not create a response DOM after the message was sent";
+        // Reaching the grace boundary is only a failure candidate. ChatGPT can commit a React
+        // replacement/final answer immediately after an idle poll; in that race the diagnostic
+        // frame already shows a healthy terminal response even though the previous snapshot was
+        // absent. Require the normal next poll to confirm the same failure state instead of
+        // throwing from a stale observation. This adds no new timeout or grace period.
+        if (this.pendingMissingResponseFailure === failure) return failure;
+        this.pendingMissingResponseFailure = failure;
+      } else {
+        this.pendingMissingResponseFailure = undefined;
       }
     }
 
     const emptyCompletion = state.responsePresent
-      && !state.running
       && state.currentText.length === 0
       && state.completionActionVisible;
     if (!emptyCompletion) {
@@ -354,8 +387,16 @@ export class ChatGptTurnDomHealthTracker {
       && !state.completionActionVisible;
     if (!missingCompletionAction) {
       this.missingCompletionAction = undefined;
-    } else if (this.missingCompletionAction?.text !== state.currentText) {
-      this.missingCompletionAction = { text: state.currentText, since: now };
+    } else if (this.missingCompletionAction?.text !== state.currentText
+      || this.missingCompletionAction.activitySignature !== state.activitySignature) {
+      // A connector/tool turn can temporarily expose answer-looking Markdown while more tool
+      // activity is still changing the assistant turn. The completion-action watchdog must age
+      // only from the last observed turn activity, not from the first answer-looking snapshot.
+      this.missingCompletionAction = {
+        text: state.currentText,
+        activitySignature: state.activitySignature,
+        since: now,
+      };
     } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
       return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
     }
@@ -565,7 +606,44 @@ class ChatGptBrowserDiagnostics {
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
   }
 
-  async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
+  private async failureScreenshot(page: Page): Promise<{ screenshot: Uint8Array; method: "cdp" | "playwright" }> {
+    let cdpFailure: unknown;
+    try {
+      // Playwright's high-level screenshot path can wait on renderer lifecycle and has timed out
+      // exactly when the response DOM disappears. Capture the failure frame directly through CDP
+      // first so the diagnostic reflects the UI at the error boundary instead of five seconds
+      // later (or not at all).
+      const session = await page.context().newCDPSession(page);
+      try {
+        const captured = await session.send("Page.captureScreenshot", {
+          format: "png",
+          fromSurface: true,
+          captureBeyondViewport: false,
+        });
+        return { screenshot: Buffer.from(captured.data, "base64"), method: "cdp" };
+      } finally {
+        await session.detach().catch(() => {});
+      }
+    } catch (error) {
+      cdpFailure = error;
+    }
+
+    try {
+      return {
+        screenshot: await page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" }),
+        method: "playwright",
+      };
+    } catch (playwrightFailure) {
+      const cdpMessage = cdpFailure instanceof Error ? cdpFailure.message : String(cdpFailure);
+      const playwrightMessage = playwrightFailure instanceof Error ? playwrightFailure.message : String(playwrightFailure);
+      throw new Error(`CDP screenshot failed: ${cdpMessage}; Playwright screenshot failed: ${playwrightMessage}`);
+    }
+  }
+
+  async capture(page: Page, checkpoint: string, error?: unknown): Promise<{
+    screenshotPath?: string;
+    statePath: string;
+  } | undefined> {
     // Full screenshots and DOM snapshots are expensive enough to be visible on the critical path.
     // Keep them opt-in for normal turns, while still capturing failures and unusually long waits.
     if (error === undefined
@@ -580,9 +658,20 @@ class ChatGptBrowserDiagnostics {
       }
       const sequence = String(++this.sequence).padStart(2, "0");
       const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
-      const [screenshot, state] = await Promise.all([
-        page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" }),
-        page.evaluate(({ composerSelector, effortControlSelector, effortItemSelector, assistantTurnSelector }) => {
+      const screenshotPromise = error === undefined
+        ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
+          .then(screenshot => ({ screenshot, method: "playwright" as const }))
+        : this.failureScreenshot(page);
+      const [screenshotResult, stateResult] = await Promise.allSettled([
+        screenshotPromise,
+        page.evaluate(({
+          composerSelector,
+          effortControlSelector,
+          effortItemSelector,
+          assistantTurnSelector,
+          stopButtonSelector,
+          completionActionSelector,
+        }) => {
           const visible = (element: Element): boolean => {
             const candidate = element as HTMLElement;
             const style = getComputedStyle(candidate);
@@ -609,11 +698,14 @@ class ChatGptBrowserDiagnostics {
               testId: element.getAttribute("data-testid"),
               ariaExpanded: element.getAttribute("aria-expanded"),
               ariaChecked: element.getAttribute("aria-checked"),
+              ariaHaspopup: element.getAttribute("aria-haspopup"),
               dataState: element.getAttribute("data-state"),
               text: boundedText(element),
             }));
           const composers = [...document.querySelectorAll(composerSelector)].filter(visible);
           const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(visible);
+          const visibleStopButtons = [...document.querySelectorAll(stopButtonSelector)].filter(visible);
+          const visibleCompletionActions = [...document.querySelectorAll(completionActionSelector)].filter(visible);
           return {
             url: location.href,
             title: document.title,
@@ -625,6 +717,10 @@ class ChatGptBrowserDiagnostics {
               textChars: composers.map(element => (element.textContent ?? "").length),
               selectedConnectors: rows('[data-id^="plugin:"][data-keyword]', 20),
             },
+            turnControls: {
+              visibleStopButtons: visibleStopButtons.length,
+              visibleCompletionActions: visibleCompletionActions.length,
+            },
             effortControls: rows(effortControlSelector, 10),
             effortItems: rows(effortItemSelector, 20),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
@@ -635,6 +731,17 @@ class ChatGptBrowserDiagnostics {
               assistant: assistantTurns.map(element => ({
                 textChars: (element.textContent ?? "").length,
                 htmlChars: (element as HTMLElement).innerHTML.length,
+                completionActionCount: element.querySelectorAll(completionActionSelector).length,
+                visibleCompletionActionCount: [...element.querySelectorAll(completionActionSelector)].filter(visible).length,
+                terminalActionGroupCount: [...element.querySelectorAll('[role="group"]')].filter(group => (
+                  group.querySelector(completionActionSelector) !== null
+                  || group.querySelector('button[aria-haspopup="menu"]') !== null
+                )).length,
+                visibleTerminalActionGroupCount: [...element.querySelectorAll('[role="group"]')].filter(group => (
+                  visible(group)
+                  && (group.querySelector(completionActionSelector) !== null
+                    || [...group.querySelectorAll('button[aria-haspopup="menu"]')].some(visible))
+                )).length,
               })),
             },
           };
@@ -643,11 +750,23 @@ class ChatGptBrowserDiagnostics {
           effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
           effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
           assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
+          stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
+          completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
         }),
       ]);
       const capturedAt = new Date().toISOString();
-      atomicWriteFile(join(this.directory, `${stem}.png`), screenshot);
-      atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
+      const screenshotPath = join(this.directory, `${stem}.png`);
+      const statePath = join(this.directory, `${stem}.json`);
+      if (screenshotResult.status === "fulfilled") {
+        atomicWriteFile(screenshotPath, screenshotResult.value.screenshot);
+      }
+      const screenshotError = screenshotResult.status === "rejected"
+        ? screenshotResult.reason instanceof Error ? screenshotResult.reason.message : String(screenshotResult.reason)
+        : undefined;
+      const stateError = stateResult.status === "rejected"
+        ? stateResult.reason instanceof Error ? stateResult.reason.message : String(stateResult.reason)
+        : undefined;
+      atomicWriteFile(statePath, `${JSON.stringify({
         version: 1,
         capturedAt,
         traceId: this.traceId,
@@ -655,16 +774,43 @@ class ChatGptBrowserDiagnostics {
         ...(error !== undefined ? {
           error: redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
         } : {}),
-        state,
+        capture: {
+          screenshot: screenshotResult.status === "fulfilled"
+            ? { status: "captured", method: screenshotResult.value.method }
+            : { status: "failed", error: screenshotError },
+          state: stateResult.status === "fulfilled"
+            ? { status: "captured" }
+            : { status: "failed", error: stateError },
+        },
+        ...(stateResult.status === "fulfilled" ? { state: stateResult.value } : {}),
       }, null, 2)}\n`);
+      if (screenshotError || stateError) {
+        console.warn(
+          `[lca-codex] browser diagnostic partial capture trace=${this.traceId} checkpoint=${stem}`
+          + (screenshotError ? ` screenshot=${screenshotError}` : "")
+          + (stateError ? ` state=${stateError}` : ""),
+        );
+      }
       console.info(`[lca-codex] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
+      return {
+        ...(screenshotResult.status === "fulfilled" ? { screenshotPath } : {}),
+        statePath,
+      };
     } catch (captureError) {
       console.warn(
         `[lca-codex] browser diagnostic capture failed trace=${this.traceId}`
         + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
         + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
       );
+      return undefined;
     }
+  }
+
+  async captureError(page: Page, checkpoint: string, error: Error): Promise<Error> {
+    const artifact = await this.capture(page, checkpoint, error);
+    if (!artifact) return error;
+    error.message += ` Browser diagnostic screenshot: ${artifact.screenshotPath ?? "unavailable"}; state: ${artifact.statePath}`;
+    return error;
   }
 }
 
@@ -1410,13 +1556,33 @@ export class ChatGptBrowserWorker {
         candidate.closest("[data-streaming-response-status]") === null
       ));
       const rendered = renderedRoots.at(-1);
+      const followsRendered = (candidate: HTMLElement): boolean => Boolean(rendered
+        && !rendered.contains(candidate)
+        && (rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING));
       const completionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(completionActionSelector)]
           .filter(visible)
-          .find(candidate => !rendered.contains(candidate)
-            && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
+          .find(followsRendered)
         : undefined;
-      const completionActionSet = new Set(completionAction ? [completionAction] : []);
+      // ChatGPT can responsively collapse the Copy button into the response footer's overflow
+      // menu. Treat that same response-scoped terminal action group as completion evidence instead
+      // of requiring Copy itself to remain visible. A global/stale Copy elsewhere on the page is
+      // still insufficient because this group must belong to the active response and follow its
+      // final Markdown.
+      const terminalActionGroup = rendered
+        ? [...root.querySelectorAll<HTMLElement>('[role="group"]')]
+          .filter(visible)
+          .filter(candidate => candidate.closest("[data-streaming-response-status]") === null)
+          .filter(followsRendered)
+          .find(candidate => (
+            candidate.querySelector(completionActionSelector) !== null
+            || [...candidate.querySelectorAll<HTMLElement>('button[aria-haspopup="menu"]')].some(visible)
+          ) && [...candidate.querySelectorAll<HTMLElement>("button")].some(visible))
+        : undefined;
+      const completionActionSet = new Set([
+        ...(completionAction ? [completionAction] : []),
+        ...(terminalActionGroup ? [terminalActionGroup] : []),
+      ]);
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
       commentaryRoots.forEach(candidate => candidates.set(candidate, "commentary"));
@@ -1452,7 +1618,7 @@ export class ChatGptBrowserWorker {
       root.querySelectorAll<HTMLElement>(
         'button, [role="status"], [aria-busy="true"], [data-testid*="cot"], [data-testid*="reason"], [data-testid*="thought"]',
       ).forEach(candidate => {
-        if (completionActionSet.has(candidate)) return;
+        if ([...completionActionSet].some(action => action === candidate || action.contains(candidate))) return;
         if (overlapsRenderedAnswer(candidate) || overlapsCommentary(candidate)) return;
         const semantic = statusSemantic(candidate);
         // A renderer may wrap the final Markdown in a reason/status container. That wrapper and
@@ -1554,7 +1720,7 @@ export class ChatGptBrowserWorker {
         fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
         markdownSegments,
         hasUnstructuredMarkdown,
-        completionActionVisible: completionAction !== undefined,
+        completionActionVisible: completionAction !== undefined || terminalActionGroup !== undefined,
         traceBlocks,
       };
     }, CHATGPT_COMPLETION_ACTION_SELECTOR, { timeout: 2_000 }).catch(() => {
@@ -1683,7 +1849,7 @@ export class ChatGptBrowserWorker {
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
-      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
+      let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
         if (!launcherSurfaceId) {
           const managed = await this.pageForNewTurn();
           if (abortSignal.aborted) {
@@ -1735,12 +1901,12 @@ export class ChatGptBrowserWorker {
           turn.modelId,
           turn.reasoning,
           turn.capabilities,
-          checkpoint => diagnostics.capture(page, checkpoint),
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
         )
       ), turn.abortSignal);
       await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
-        this.attachPrompt(page, prepared.text, mode.localTools, checkpoint => diagnostics.capture(page, checkpoint))
+        this.attachPrompt(page, prepared.text, mode.localTools, async checkpoint => { await diagnostics.capture(page, checkpoint); })
       ), turn.abortSignal);
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
@@ -1753,7 +1919,7 @@ export class ChatGptBrowserWorker {
       // A positional locator based on the pre-send count can therefore become permanently
       // detached even though the current assistant response is still visible. Track the latest
       // visible assistant turn so Playwright re-resolves the live DOM after React swaps.
-      const responseTurn = responseTurns.filter({ visible: true }).last();
+      let responseTurn = responseTurns.filter({ visible: true }).last();
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async (stageSignal) => {
@@ -1807,7 +1973,40 @@ export class ChatGptBrowserWorker {
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
       let terminalVisibleText: string | undefined;
       let previousActivitySignature = "";
+      const reattachLauncherSurface = async (): Promise<boolean> => {
+        if (!launcherSurfaceId || !turnConnection || turnConnection.isConnected()) return false;
+        if (turn.abortSignal?.aborted) {
+          throw new DOMException("LCA Codex turn aborted", "AbortError");
+        }
+        const staleConnection = turnConnection;
+        try {
+          const connection = await connectLauncherBrowserHost(
+            this.config.browserHostDescriptorPath!,
+            browserStageTimeouts.browserPage,
+            launcherSurfaceId,
+            turn.abortSignal,
+          );
+          turnConnection = connection.browser;
+          page = connection.page;
+          diagnosticPage = page;
+          responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last();
+          await staleConnection.close().catch(() => {});
+          console.warn(
+            `[lca-codex] browser turn ${turn.traceId} reattached to its launcher surface after a CDP disconnect`,
+          );
+          return true;
+        } catch (error) {
+          if (turn.abortSignal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+            throw new DOMException("LCA Codex turn aborted", "AbortError");
+          }
+          console.warn(
+            `[lca-codex] browser turn ${turn.traceId} could not reattach its launcher surface after a CDP disconnect: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return false;
+        }
+      };
       for (;;) {
+        if (await reattachLauncherSurface()) continue;
         if (page.isClosed()) {
           throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
         }
@@ -1833,13 +2032,22 @@ export class ChatGptBrowserWorker {
           this.config.autoApproveToolCalls,
           turn.abortSignal,
           CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
-          () => diagnostics.capture(page, "tool-confirmation-visible"),
+          async () => { await diagnostics.capture(page, "tool-confirmation-visible"); },
         )) {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
 
-        const snapshot = await this.responseDomSnapshot(responseTurn);
+        let snapshot: ChatGptResponseDomSnapshot;
+        try {
+          snapshot = await this.responseDomSnapshot(responseTurn);
+        } catch (error) {
+          // A CDP transport can disappear between the loop's liveness check and the DOM evaluate.
+          // Reconnect to the same launcher-owned WebContents surface rather than replaying the
+          // ChatGPT turn (which could duplicate already-executed local tool side effects).
+          if (await reattachLauncherSurface()) continue;
+          throw error;
+        }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
@@ -1872,9 +2080,11 @@ export class ChatGptBrowserWorker {
           : false;
         const completionReady = completionTracker.update({
           ...completionState,
+          activitySignature,
           completionActionVisible: completionState.completionActionVisible && hasStructuredMarkdown,
         }, observedAt) || unstructuredCompletionTracker.update({
           ...completionState,
+          activitySignature,
           completionActionVisible: completionState.completionActionVisible && !hasStructuredMarkdown,
         }, observedAt);
         if (snapshot.responsePresent) {
@@ -1928,8 +2138,11 @@ export class ChatGptBrowserWorker {
             running,
             currentText: snapshot.visibleText,
             completionActionVisible: snapshot.completionActionVisible,
+            activitySignature,
           });
-          if (domError) throw new Error(domError);
+          if (domError) {
+            throw await diagnostics.captureError(page, "response-dom-health-failed", new Error(domError));
+          }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "completion-pending-30s");
@@ -1946,8 +2159,11 @@ export class ChatGptBrowserWorker {
             running,
             currentText: "",
             completionActionVisible: false,
+            activitySignature,
           });
-          if (domError) throw new Error(domError);
+          if (domError) {
+            throw await diagnostics.captureError(page, "response-dom-health-failed", new Error(domError));
+          }
         }
         if (completionReady) {
           const completedVisibleText = terminalVisibleText ?? snapshot.visibleText;
@@ -1986,10 +2202,16 @@ export class ChatGptBrowserWorker {
         reason: error instanceof Error ? error.name : "Error",
         ...(error instanceof LcaCodexAdapterError ? { status: error.status, code: error.code } : {}),
       }, error instanceof DOMException && error.name === "AbortError" ? "warning" : "error");
-      if (diagnosticPage && !diagnosticPage.isClosed()) {
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+      let surfacedError = error instanceof Error ? error : new Error(String(error));
+      if (diagnosticPage
+        && !diagnosticPage.isClosed()
+        && !surfacedError.message.includes("Browser diagnostic screenshot:")) {
+        // Capture once at the failure boundary and return that artifact in this same error. Do not
+        // take a second full screenshot after an exact DOM-health capture: it delays error delivery
+        // and can observe a different UI after React has already remounted the turn.
+        surfacedError = await diagnostics.captureError(diagnosticPage, "turn-failed", surfacedError);
       }
-      throw error;
+      throw surfacedError;
     } finally {
       prepared.release();
       if (turnConnection) {
