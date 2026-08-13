@@ -2787,6 +2787,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
   let chatTitle: string | undefined;
   let taskTitle: string | undefined;
   let sawStart = false;
+  let sawNetworkStreaming = false;
 
   for (const record of records) {
     const recordSource = activityRecordSource(record);
@@ -2803,6 +2804,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
 
     if (record.event === "lca_codex.turn_started") {
       sawStart = true;
+      sawNetworkStreaming = false;
       status = undefined;
       terminalAt = undefined;
       pendingTools.clear();
@@ -2823,12 +2825,17 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
     } else if (record.event === "lca_codex.turn_send_accepted"
       || record.event === "lca_codex.turn_first_response"
       || record.event === "lca_codex.turn_first_reasoning"
-      || record.event === "lca_codex.network_turn_created"
-      || record.event === "lca_codex.network_turn_completed") {
+      || record.event === "lca_codex.network_turn_created") {
+      if (!sawNetworkStreaming) phase = "waiting";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.network_turn_completed") {
       phase = "waiting";
       source = "chatgpt";
-    } else if (record.event === "lca_codex.turn_first_text"
-      || record.event === "lca_codex.network_turn_streaming") {
+    } else if (record.event === "lca_codex.turn_first_text") {
+      phase = "running";
+      source = "chatgpt";
+    } else if (record.event === "lca_codex.network_turn_streaming") {
+      sawNetworkStreaming = true;
       phase = "running";
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_completed") {
@@ -2840,6 +2847,7 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
       terminalAt = activityTimestamp(record);
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_retry_scheduled") {
+      sawNetworkStreaming = false;
       status = undefined;
       terminalAt = undefined;
       phase = "waiting";
