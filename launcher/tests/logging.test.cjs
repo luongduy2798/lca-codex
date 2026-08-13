@@ -79,101 +79,12 @@ test("LCA Codex activity accepts only known payload-free diagnostic fields", () 
   assert.deepEqual(parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
     event: "lca_codex.network_turn_completed",
     level: "info",
-    observedAt: 1_754_000_000_123,
     detail: {
       traceId: "abc123",
       attempt: 1,
       sinceSendMs: 900,
     },
-  })}`), {
-    event: "lca_codex.network_turn_completed",
-    level: "info",
-    observedAt: 1_754_000_000_123,
-    detail: {
-      traceId: "abc123",
-      attempt: 1,
-      sinceSendMs: 900,
-    },
-  });
-
-  assert.deepEqual(parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
-    event: "lca_codex.network_turn_streaming",
-    level: "info",
-    observedAt: -1,
-    detail: { traceId: "abc123" },
-  })}`), {
-    event: "lca_codex.network_turn_streaming",
-    level: "info",
-    detail: { traceId: "abc123" },
-  });
-});
-
-test("launcher activity backdates correlated network evidence without allowing arbitrary timestamps", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-observed-at-"));
-  const filePath = path.join(root, "launcher.jsonl");
-  try {
-    const logger = createLogger({ filePath });
-    const base = Date.now();
-    logger.info("lca_codex.turn_started", { traceId: "trace_observed_at" });
-    logger.info("lca_codex.tool_started", {
-      traceId: "trace_observed_at",
-      tool: "codex_exec",
-      callId: "call_1",
-    });
-    logger.info("lca_codex.network_turn_streaming", {
-      traceId: "trace_observed_at",
-      attempt: 1,
-    }, { at: base });
-
-    const records = logger.activityTaskRecords({ traceId: "trace_observed_at" });
-    const streamingIndex = records.findIndex(record => record.event === "lca_codex.network_turn_streaming");
-    const toolIndex = records.findIndex(record => record.event === "lca_codex.tool_started");
-    assert.ok(streamingIndex >= 0 && streamingIndex < toolIndex);
-
-    const future = Date.now() + 60_000;
-    const futureRecord = logger.info("lca_codex.network_turn_completed", {
-      traceId: "trace_observed_at",
-    }, { at: future });
-    assert.ok(Date.parse(futureRecord.at) < future);
-
-    const ancientRecord = logger.info("lca_codex.network_turn_created", {
-      traceId: "trace_observed_at",
-    }, { at: 1 });
-    assert.ok(Date.parse(ancientRecord.at) > 1);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("launcher task phase does not regress when backdated streaming precedes send acceptance", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-network-phase-"));
-  const filePath = path.join(root, "launcher.jsonl");
-  try {
-    const logger = createLogger({ filePath });
-    const base = Date.now();
-    logger.info("lca_codex.turn_started", {
-      traceId: "trace_network_phase",
-      threadId: "thread_network_phase",
-    });
-    logger.info("lca_codex.network_turn_streaming", {
-      traceId: "trace_network_phase",
-      attempt: 1,
-    }, { at: base });
-    logger.info("lca_codex.turn_send_accepted", {
-      traceId: "trace_network_phase",
-      attempt: 1,
-    });
-    logger.info("lca_codex.network_turn_created", {
-      traceId: "trace_network_phase",
-      attempt: 1,
-    });
-
-    const [task] = logger.activityChatTasks({ chatId: "chat:thread_network_phase" });
-    assert.equal(task.status, "running");
-    assert.equal(task.source, "chatgpt");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  })}`).event, "lca_codex.network_turn_completed");
 });
 
 test("failed launcher IPC calls are written to runtime activity", async () => {

@@ -49,7 +49,7 @@ function recordRuntimeLine(logger, name, stream, line) {
   const activity = parseLcaCodexActivity(line);
   if (activity) {
     const method = activity.level === "error" ? "error" : activity.level === "warning" ? "warn" : "info";
-    logger[method](activity.event, activity.detail, activity.observedAt === undefined ? undefined : { at: activity.observedAt });
+    logger[method](activity.event, activity.detail);
     return;
   }
   logger[stream === "stderr" ? "warn" : "info"](`runtime.${name}_${stream}`, { line });

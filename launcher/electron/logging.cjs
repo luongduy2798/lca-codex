@@ -102,17 +102,7 @@ function parseLcaCodexActivity(line) {
       if (!LCA_CODEX_ACTIVITY_DETAIL_KEYS.has(key)) continue;
       if (item === null || ["string", "number", "boolean"].includes(typeof item)) detail[key] = item;
     }
-    const observedAt = typeof value.observedAt === "number"
-      && Number.isFinite(value.observedAt)
-      && value.observedAt >= 0
-      ? Math.round(value.observedAt)
-      : undefined;
-    return {
-      event: value.event,
-      level: value.level,
-      detail,
-      ...(observedAt === undefined ? {} : { observedAt }),
-    };
+    return { event: value.event, level: value.level, detail };
   } catch {
     return null;
   }
@@ -476,7 +466,6 @@ function summarizeActivityTask(task, now = Date.now()) {
   let source = "lca";
   let attempt = 1;
   let sawStart = false;
-  let sawNetworkStreaming = false;
 
   for (const record of task.records) {
     const recordSource = activityRecordSource(record);
@@ -486,7 +475,6 @@ function summarizeActivityTask(task, now = Date.now()) {
     }
     if (record.event === "lca_codex.turn_started") {
       sawStart = true;
-      sawNetworkStreaming = false;
       status = undefined;
       terminalAt = undefined;
       pendingTools.clear();
@@ -507,17 +495,12 @@ function summarizeActivityTask(task, now = Date.now()) {
     } else if (record.event === "lca_codex.turn_send_accepted"
       || record.event === "lca_codex.turn_first_response"
       || record.event === "lca_codex.turn_first_reasoning"
-      || record.event === "lca_codex.network_turn_created") {
-      if (!sawNetworkStreaming) phase = "waiting";
-      source = "chatgpt";
-    } else if (record.event === "lca_codex.network_turn_completed") {
+      || record.event === "lca_codex.network_turn_created"
+      || record.event === "lca_codex.network_turn_completed") {
       phase = "waiting";
       source = "chatgpt";
-    } else if (record.event === "lca_codex.turn_first_text") {
-      phase = "running";
-      source = "chatgpt";
-    } else if (record.event === "lca_codex.network_turn_streaming") {
-      sawNetworkStreaming = true;
+    } else if (record.event === "lca_codex.turn_first_text"
+      || record.event === "lca_codex.network_turn_streaming") {
       phase = "running";
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_completed") {
@@ -529,7 +512,6 @@ function summarizeActivityTask(task, now = Date.now()) {
       terminalAt = activityRecordTimestamp(record);
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_retry_scheduled") {
-      sawNetworkStreaming = false;
       status = undefined;
       terminalAt = undefined;
       phase = "waiting";
@@ -760,7 +742,6 @@ function writeRetainedRecords(filePath, records) {
 }
 
 function createLogger({ filePath, publish, threadIndexPath }) {
-  const loggerStartedAt = Date.now();
   const rotatedRecords = readPersistedRecords(`${filePath}.1`);
   const currentRecords = readPersistedRecords(filePath);
   const records = currentRecords.slice(-MAX_MEMORY_RECORDS);
@@ -860,17 +841,9 @@ function createLogger({ filePath, publish, threadIndexPath }) {
     return { deleted: next.deleted };
   };
 
-  const append = (level, event, detail = {}, options = {}) => {
-    const receivedAt = Date.now();
-    const requestedAt = options?.at;
-    const recordAt = typeof requestedAt === "number"
-      && Number.isFinite(requestedAt)
-      && requestedAt >= loggerStartedAt
-      && requestedAt <= receivedAt
-      ? requestedAt
-      : receivedAt;
+  const append = (level, event, detail = {}) => {
     const record = {
-      at: new Date(recordAt).toISOString(),
+      at: new Date().toISOString(),
       level,
       event,
       detail: detail && typeof detail === "object" && !Array.isArray(detail) ? sanitize(detail) : {},
@@ -895,10 +868,10 @@ function createLogger({ filePath, publish, threadIndexPath }) {
   };
 
   return {
-    debug: (event, detail, options) => append("debug", event, detail, options),
-    info: (event, detail, options) => append("info", event, detail, options),
-    warn: (event, detail, options) => append("warning", event, detail, options),
-    error: (event, detail, options) => append("error", event, detail, options),
+    debug: (event, detail) => append("debug", event, detail),
+    info: (event, detail) => append("info", event, detail),
+    warn: (event, detail) => append("warning", event, detail),
+    error: (event, detail) => append("error", event, detail),
     recent: (limit = 150) => records
       .slice(-Math.max(1, Math.min(300, limit)))
       .map(decorateActivityRecord),

@@ -243,34 +243,26 @@ export class ChatGptNetworkTurnTracker {
   private conversationId?: string;
   private conversationCreated = false;
   private turnId?: string;
-  private createdObservedAt?: number;
-  private streamingObservedAt?: number;
-  private readonly completedConversationObservedAt = new Map<string, number>();
+  private readonly completedConversationIds = new Set<string>();
   private createdTransitionEmitted = false;
   private streamingTransitionEmitted = false;
   private completedTransitionEmitted = false;
 
-  constructor(private readonly onTransition?: (
-    transition: ChatGptNetworkTurnTransition,
-    observedAt: number,
-  ) => void) {}
+  constructor(private readonly onTransition?: (transition: ChatGptNetworkTurnTransition) => void) {}
 
   arm(): void {
     this.armed = true;
     this.conversationId = undefined;
     this.conversationCreated = false;
     this.turnId = undefined;
-    this.createdObservedAt = undefined;
-    this.streamingObservedAt = undefined;
-    this.completedConversationObservedAt.clear();
+    this.completedConversationIds.clear();
     this.createdTransitionEmitted = false;
     this.streamingTransitionEmitted = false;
     this.completedTransitionEmitted = false;
   }
 
-  observeWebSocketPayload(payloadData: string, observedAt = Date.now()): void {
+  observeWebSocketPayload(payloadData: string): void {
     if (!this.armed || !payloadData) return;
-    const observedAtMs = Number.isFinite(observedAt) && observedAt >= 0 ? Math.round(observedAt) : Date.now();
     let parsed: unknown;
     try {
       parsed = JSON.parse(payloadData);
@@ -294,13 +286,9 @@ export class ChatGptNetworkTurnTracker {
         // late heartbeat from an older websocket turn arrived just after arming, replace that
         // provisional correlation instead of letting stale network traffic own the new turn.
         if (!this.conversationCreated || this.conversationId === conversationId) {
-          if (this.conversationId !== conversationId) {
-            this.turnId = undefined;
-            this.streamingObservedAt = undefined;
-          }
+          if (this.conversationId !== conversationId) this.turnId = undefined;
           this.conversationId = conversationId;
           this.conversationCreated = true;
-          this.createdObservedAt ??= observedAtMs;
         }
         this.emitTransitions();
         continue;
@@ -314,16 +302,13 @@ export class ChatGptNetworkTurnTracker {
         if (this.conversationId !== conversationId) continue;
         this.turnId = chatGptNetworkString(payload.turn_id)
           ?? chatGptNetworkString(topicId.slice("conversation-turn-".length));
-        this.streamingObservedAt ??= observedAtMs;
         this.emitTransitions();
         continue;
       }
 
       if (topicId === "conversations" && eventType === "conversation-turn-complete") {
         const conversationId = chatGptNetworkString(payload.conversation_id);
-        if (conversationId && !this.completedConversationObservedAt.has(conversationId)) {
-          this.completedConversationObservedAt.set(conversationId, observedAtMs);
-        }
+        if (conversationId) this.completedConversationIds.add(conversationId);
         this.emitTransitions();
       }
     }
@@ -332,18 +317,15 @@ export class ChatGptNetworkTurnTracker {
   private emitTransitions(): void {
     if (this.conversationCreated && !this.createdTransitionEmitted) {
       this.createdTransitionEmitted = true;
-      this.onTransition?.("created", this.createdObservedAt ?? Date.now());
+      this.onTransition?.("created");
     }
     if (this.conversationCreated && this.turnId !== undefined && !this.streamingTransitionEmitted) {
       this.streamingTransitionEmitted = true;
-      this.onTransition?.("streaming", this.streamingObservedAt ?? this.createdObservedAt ?? Date.now());
+      this.onTransition?.("streaming");
     }
     if (this.snapshot().completed && !this.completedTransitionEmitted) {
       this.completedTransitionEmitted = true;
-      const completedObservedAt = this.conversationId === undefined
-        ? undefined
-        : this.completedConversationObservedAt.get(this.conversationId);
-      this.onTransition?.("completed", completedObservedAt ?? this.streamingObservedAt ?? Date.now());
+      this.onTransition?.("completed");
     }
   }
 
@@ -355,7 +337,7 @@ export class ChatGptNetworkTurnTracker {
       completed: this.conversationCreated
         && this.turnId !== undefined
         && this.conversationId !== undefined
-        && this.completedConversationObservedAt.has(this.conversationId),
+        && this.completedConversationIds.has(this.conversationId),
     };
   }
 }
@@ -364,7 +346,7 @@ class ChatGptNetworkTurnObserver {
   private session?: CDPSession;
   private readonly tracker: ChatGptNetworkTurnTracker;
 
-  constructor(onTransition?: (transition: ChatGptNetworkTurnTransition, observedAt: number) => void) {
+  constructor(onTransition?: (transition: ChatGptNetworkTurnTransition) => void) {
     this.tracker = new ChatGptNetworkTurnTracker(onTransition);
   }
 
@@ -386,7 +368,7 @@ class ChatGptNetworkTurnObserver {
     session.on("Network.webSocketFrameReceived", event => {
       const response = chatGptNetworkRecord(chatGptNetworkRecord(event)?.response);
       const payloadData = chatGptNetworkString(response?.payloadData);
-      if (payloadData) this.tracker.observeWebSocketPayload(payloadData, Date.now());
+      if (payloadData) this.tracker.observeWebSocketPayload(payloadData);
     });
     try {
       await session.send("Network.enable");
@@ -1831,7 +1813,7 @@ export class ChatGptBrowserWorker {
     });
     const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
     let networkArmedAt: number | undefined;
-    const networkObserver = new ChatGptNetworkTurnObserver((transition, observedAt) => {
+    const networkObserver = new ChatGptNetworkTurnObserver(transition => {
       const event = transition === "created"
         ? "lca_codex.network_turn_created"
         : transition === "streaming"
@@ -1840,11 +1822,9 @@ export class ChatGptBrowserWorker {
       logLcaCodexActivity(event, {
         traceId: turn.traceId,
         attempt,
-        elapsedMs: Math.max(0, Math.round(observedAt - startedAt)),
-        ...(networkArmedAt === undefined
-          ? {}
-          : { sinceSendMs: Math.max(0, Math.round(observedAt - networkArmedAt)) }),
-      }, "info", { observedAt });
+        elapsedMs: activityDuration(startedAt),
+        ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
+      });
     });
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;

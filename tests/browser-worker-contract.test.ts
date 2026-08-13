@@ -129,8 +129,8 @@ test("a transient launcher CDP disconnect reattaches the same browser surface in
 });
 
 test("browser network lifecycle correlates the created conversation, turn stream, and terminal event", () => {
-  const transitions: Array<{ transition: string; observedAt: number }> = [];
-  const tracker = new ChatGptNetworkTurnTracker((transition, observedAt) => transitions.push({ transition, observedAt }));
+  const transitions: string[] = [];
+  const tracker = new ChatGptNetworkTurnTracker(transition => transitions.push(transition));
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
     type: "message",
     topic_id: topicId,
@@ -150,15 +150,15 @@ test("browser network lifecycle correlates the created conversation, turn stream
   tracker.arm();
   tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
     conversation_id: "conversation-1",
-  }), 1_000);
+  }));
   tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
     type: "heartbeat",
     turn_id: "turn-1",
     conversation_id: "conversation-1",
-  }), 1_100);
+  }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
     conversation_id: "unrelated-conversation",
-  }), 1_150);
+  }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
     conversationKnown: true,
@@ -183,18 +183,13 @@ test("browser network lifecycle correlates the created conversation, turn stream
 
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
     conversation_id: "conversation-1",
-  }), 1_200);
+  }));
   expect(tracker.snapshot().completed).toBeTrue();
-  expect(transitions).toEqual([
-    { transition: "created", observedAt: 1_000 },
-    { transition: "streaming", observedAt: 1_100 },
-    { transition: "completed", observedAt: 1_200 },
-  ]);
+  expect(transitions).toEqual(["created", "streaming", "completed"]);
 });
 
 test("browser network lifecycle lets the post-send conversation replace a stale heartbeat", () => {
-  const transitions: Array<{ transition: string; observedAt: number }> = [];
-  const tracker = new ChatGptNetworkTurnTracker((transition, observedAt) => transitions.push({ transition, observedAt }));
+  const tracker = new ChatGptNetworkTurnTracker();
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
     type: "message",
     topic_id: topicId,
@@ -206,66 +201,34 @@ test("browser network lifecycle lets the post-send conversation replace a stale 
     type: "heartbeat",
     turn_id: "old-turn",
     conversation_id: "old-conversation",
-  }), 2_000);
-  expect(transitions).toEqual([]);
+  }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
     conversation_id: "fresh-conversation",
-  }), 2_400);
+  }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
     conversation_id: "old-conversation",
-  }), 2_450);
+  }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
     conversationKnown: true,
     turnKnown: false,
     completed: false,
   });
-  expect(transitions).toEqual([{ transition: "created", observedAt: 2_400 }]);
 
   tracker.observeWebSocketPayload(frame("conversation-turn-fresh-turn", "conversation-turn-stream", {
     type: "heartbeat",
     turn_id: "fresh-turn",
     conversation_id: "fresh-conversation",
-  }), 2_500);
+  }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
     conversation_id: "fresh-conversation",
-  }), 2_600);
+  }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
     conversationKnown: true,
     turnKnown: true,
     completed: true,
   });
-  expect(transitions).toEqual([
-    { transition: "created", observedAt: 2_400 },
-    { transition: "streaming", observedAt: 2_500 },
-    { transition: "completed", observedAt: 2_600 },
-  ]);
-});
-
-test("browser network lifecycle preserves an early valid stream observation until creation confirms correlation", () => {
-  const transitions: Array<{ transition: string; observedAt: number }> = [];
-  const tracker = new ChatGptNetworkTurnTracker((transition, observedAt) => transitions.push({ transition, observedAt }));
-  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
-    type: "message",
-    topic_id: topicId,
-    payload: { type, payload },
-  }]);
-
-  tracker.arm();
-  tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
-    turn_id: "turn-1",
-    conversation_id: "conversation-1",
-  }), 3_000);
-  expect(transitions).toEqual([]);
-
-  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
-    conversation_id: "conversation-1",
-  }), 3_400);
-  expect(transitions).toEqual([
-    { transition: "created", observedAt: 3_400 },
-    { transition: "streaming", observedAt: 3_000 },
-  ]);
 });
 
 test("browser network lifecycle is mandatory before Send and after launcher reattachment", () => {
