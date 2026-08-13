@@ -1035,11 +1035,162 @@ test("manual restart is a full stop followed by a fresh start", async () => {
     browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
   });
   const calls = [];
-  supervisor.stopRuntime = async () => { calls.push("stop"); return { lifecycle: "stopped" }; };
+  supervisor.stopRuntime = async (options) => {
+    calls.push(["stop", options]);
+    return { lifecycle: "stopped" };
+  };
   supervisor.startRuntime = async () => { calls.push("start"); return { lifecycle: "ready" }; };
 
   assert.deepEqual(await supervisor.restart(), { lifecycle: "ready" });
-  assert.deepEqual(calls, ["stop", "start"]);
+  assert.deepEqual(calls, [["stop", { forceOwnedDaemon: true }], "start"]);
+});
+
+test("manual restart force-stops its unhealthy launcher-owned daemon before starting again", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-restart-unhealthy-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  const daemonPid = 123_456_789;
+  const calls = [];
+  supervisor.daemon = { pid: daemonPid, exitCode: null, signalCode: null };
+  supervisor.readSetupConfig = () => config;
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: process.pid,
+    daemonPid,
+    tunnelPid: null,
+    status: "degraded",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealth = async () => false;
+  supervisor.adoptConfiguredTunnelForStop = async () => {};
+  supervisor.stopChild = async (name) => {
+    calls.push(["force-stop", name]);
+    supervisor[name] = null;
+  };
+  supervisor.waitForPortRelease = async () => { calls.push(["port-released"]); };
+  supervisor.clearState = () => { calls.push(["clear-state"]); };
+  try {
+    assert.deepEqual(
+      await supervisor.performStopForSetup({ forceOwnedDaemon: true }),
+      { status: "stopped" },
+    );
+    assert.deepEqual(calls, [
+      ["force-stop", "daemon"],
+      ["port-released"],
+      ["clear-state"],
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual restart force-stops a busy launcher-owned daemon while manual stop remains fail-closed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-restart-busy-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  const daemonPid = 123_456_788;
+  const calls = [];
+  supervisor.daemon = { pid: daemonPid, exitCode: null, signalCode: null };
+  supervisor.readSetupConfig = () => config;
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: process.pid,
+    daemonPid,
+    tunnelPid: null,
+    status: "ready",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealth = async () => true;
+  supervisor.adoptConfiguredTunnelForStop = async () => {};
+  supervisor.acquireDrain = async () => {
+    throw new Error("Refusing to stop launcher-owned runtime because atomic idleness could not be proven: daemon has 0 active HTTP turn(s) and 1 active browser turn(s)");
+  };
+  supervisor.stopChild = async (name) => {
+    calls.push(["force-stop", name]);
+    supervisor[name] = null;
+  };
+  supervisor.waitForPortRelease = async () => { calls.push(["port-released"]); };
+  supervisor.clearState = () => { calls.push(["clear-state"]); };
+  try {
+    await assert.rejects(
+      supervisor.performStopForSetup(),
+      /1 active browser turn/,
+    );
+    assert.deepEqual(calls, []);
+
+    assert.deepEqual(
+      await supervisor.performStopForSetup({ forceOwnedDaemon: true }),
+      { status: "stopped" },
+    );
+    assert.deepEqual(calls, [
+      ["force-stop", "daemon"],
+      ["port-released"],
+      ["clear-state"],
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual restart can reclaim a verified stale daemon that no longer serves health", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-restart-stale-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  const stalePid = process.pid;
+  const calls = [];
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: stalePid,
+    tunnelPid: null,
+    status: "degraded",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealthPayload = async () => null;
+  supervisor.daemonPidMatchesRuntimeCommand = () => true;
+  supervisor.forceStopVerifiedPid = async (name, pid) => { calls.push(["force-stop", name, pid]); };
+  supervisor.waitForPortRelease = async () => { calls.push(["port-released"]); };
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    absent: true,
+    state: "stopped",
+    processRunning: false,
+    pid: null,
+  });
+  supervisor.clearState = () => { calls.push(["clear-state"]); };
+  try {
+    assert.equal(
+      await supervisor.stopStaleOwnedRuntime(config, { forceOwnedDaemon: true }),
+      true,
+    );
+    assert.deepEqual(calls, [
+      ["force-stop", "stale daemon", stalePid],
+      ["port-released"],
+      ["clear-state"],
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("manual stop recovers a detached stale runtime before adopting its tunnel", async () => {

@@ -1696,7 +1696,7 @@ class RuntimeSupervisor {
     });
   }
 
-  async stopStaleOwnedRuntime(config) {
+  async stopStaleOwnedRuntime(config, { forceOwnedDaemon = false } = {}) {
     const state = this.readState();
     if (!state) return false;
     const health = await this.proxyHealthPayload(config);
@@ -1707,9 +1707,22 @@ class RuntimeSupervisor {
       throw new Error("The process on the Responses port does not match the stale launcher marker");
     }
     if (!daemonRunning && processRunning(state.daemonPid)) {
-      throw new Error(
-        `The stale daemon PID ${state.daemonPid} is still alive but did not provide matching health evidence`,
-      );
+      if (!forceOwnedDaemon) {
+        throw new Error(
+          `The stale daemon PID ${state.daemonPid} is still alive but did not provide matching health evidence`,
+        );
+      }
+      if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) {
+        throw new Error(`Another launcher process still owns the runtime (pid ${state.ownerPid})`);
+      }
+      if (!this.daemonPidMatchesRuntimeCommand(state.daemonPid, config)) {
+        throw new Error(
+          `The stale daemon PID ${state.daemonPid} is still alive but could not be verified as an LCA Codex runtime`,
+        );
+      }
+      this.logger.warn("runtime.restart_forcing_unhealthy_stale_daemon", { pid: state.daemonPid });
+      await this.forceStopVerifiedPid("stale daemon", state.daemonPid);
+      await this.waitForPortRelease(config);
     }
     let managedTunnelRunning = false;
     const tunnelHealth = await this.waitForKnownTunnelStatus(config);
@@ -1726,7 +1739,7 @@ class RuntimeSupervisor {
         + " does not recognize it; refusing to terminate an unverified process",
       );
     }
-    if (!daemonRunning && !managedTunnelRunning) {
+    if (!daemonRunning && !processRunning(state.daemonPid) && !managedTunnelRunning) {
       this.clearState();
       return true;
     }
@@ -1748,14 +1761,24 @@ class RuntimeSupervisor {
         await this.waitForProcessExit("stale daemon", state.daemonPid);
         await this.waitForPortRelease(config);
       } catch (error) {
-        if (drained) {
+        if (forceOwnedDaemon) {
+          this.logger.warn("runtime.restart_forcing_busy_stale_daemon", {
+            pid: state.daemonPid,
+            message: errorMessage(error),
+          });
+          await this.forceStopVerifiedPid("stale daemon", state.daemonPid);
+          await this.waitForPortRelease(config);
+          drained = false;
+        } else if (drained) {
           try {
             await this.control(config, "resume");
           } catch (resumeError) {
             throw new Error(appendFailure(errorMessage(error), "stale daemon resume compensation failed", resumeError));
           }
+          throw error;
+        } else {
+          throw error;
         }
-        throw error;
       }
     }
     if (managedTunnelRunning) {
@@ -1865,12 +1888,12 @@ class RuntimeSupervisor {
     return status;
   }
 
-  async stopRuntime() {
+  async stopRuntime({ forceOwnedDaemon = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
     this.cancelStartRequested = true;
     this.lifecyclePhase = "stopping";
     this.publishRuntime();
-    this.stopPromise = this.performUserStop();
+    this.stopPromise = this.performUserStop({ forceOwnedDaemon });
     try {
       return await this.stopPromise;
     } finally {
@@ -1881,8 +1904,8 @@ class RuntimeSupervisor {
     }
   }
 
-  async performUserStop() {
-    await this.performStopForSetup();
+  async performUserStop({ forceOwnedDaemon = false } = {}) {
+    await this.performStopForSetup({ forceOwnedDaemon });
     this.logger.info("runtime.user_stopped");
     const status = await this.observeRuntime();
     this.publishRuntimeState?.(status);
@@ -1899,7 +1922,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async performStopForSetup() {
+  async performStopForSetup({ forceOwnedDaemon = false } = {}) {
     if (this.startPromise) {
       try {
         await this.startPromise;
@@ -1924,7 +1947,7 @@ class RuntimeSupervisor {
         && runtimeMayBeLive
         && !this.daemon
         && !this.tunnel) {
-        const recovered = await this.stopStaleOwnedRuntime(config);
+        const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon });
         if (!recovered) {
           throw new Error("an existing runtime could not be safely recovered");
         }
@@ -1944,7 +1967,7 @@ class RuntimeSupervisor {
             throw new Error("runtime configuration is missing while launcher ownership processes are still alive");
           }
         } else if (runtimeMayBeLive) {
-          const recovered = await this.stopStaleOwnedRuntime(config);
+          const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon });
           if (!recovered) {
             throw new Error("an existing runtime could not be safely recovered");
           }
@@ -1956,9 +1979,26 @@ class RuntimeSupervisor {
         const daemonPid = this.daemon.pid;
         if (!Number.isInteger(daemonPid)
           || !await this.proxyHealth(config, 2_000, daemonPid)) {
-          throw new Error("launcher-owned daemon did not provide matching health evidence");
+          if (!forceOwnedDaemon) {
+            throw new Error("launcher-owned daemon did not provide matching health evidence");
+          }
+          this.logger.warn("runtime.restart_forcing_unhealthy_daemon", { pid: daemonPid });
+          await this.stopChild("daemon");
+          await this.waitForPortRelease(config);
+        } else {
+          try {
+            drained = await this.acquireDrain(config);
+          } catch (error) {
+            if (!forceOwnedDaemon) throw error;
+            this.logger.warn("runtime.restart_forcing_busy_daemon", {
+              pid: daemonPid,
+              message: errorMessage(error),
+            });
+            await this.stopChild("daemon");
+            await this.waitForPortRelease(config);
+            drained = false;
+          }
         }
-        drained = await this.acquireDrain(config);
       }
       if (this.tunnel) {
         if (!config) throw new Error("launcher-owned tunnel cannot be stopped without a valid configuration");
@@ -2009,7 +2049,7 @@ class RuntimeSupervisor {
   }
 
   async restart() {
-    await this.stopRuntime();
+    await this.stopRuntime({ forceOwnedDaemon: true });
     return this.startRuntime();
   }
 
