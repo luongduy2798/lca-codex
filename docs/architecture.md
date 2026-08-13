@@ -52,6 +52,30 @@ closed. Closing a running tab destroys its page and terminates that browser turn
 turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
 controls.
 
+Within an open tab, the authoritative generation lifecycle is network-scoped rather than DOM-scoped.
+Before Send, the worker attaches a page CDP WebSocket observer and arms it for the new submission. It
+correlates `conversation-created` to that new conversation, then its `conversation-turn-stream`, and
+accepts only the matching `conversation-turn-complete` as normal completion. Frames seen before arming
+are ignored; a fresh creation event replaces a provisional stale heartbeat correlation, and completion
+from another conversation is rejected. Submission acceptance likewise requires correlated network
+conversation/turn evidence.
+
+The public ChatGPT DOM is deliberately not a liveness or completion authority. Assistant nodes may be
+removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or absent.
+Those changes do not end or complete the turn. DOM access is limited to rendering concerns: visible
+reasoning/commentary, local-tool confirmation, final Markdown serialization, and pressing Stop for an
+explicit abort. After the matching network completion event, the worker performs one ordinary poll to
+allow a final React commit, then finalizes from the current DOM or the latest cached visible response.
+There is no DOM-completion fallback and no response-DOM watchdog timeout.
+
+The network observer is therefore required infrastructure, not optional telemetry. Initial attachment
+must succeed before Send. If the launcher-owned CDP transport drops, the worker may reconnect to the
+same surface without replaying the ChatGPT generation, preserving any local-tool side effects already
+performed. The observer must then reattach as well; failure is terminal rather than permission to
+continue from DOM heuristics. Activity logs expose only one-shot lifecycle milestones and the fixed
+`network` completion source, never raw WebSocket payloads, response content, credentials, or opaque
+conversation/turn identifiers.
+
 Normal tool-capable turns do not replay the entire accumulated Codex history through the
 visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
 Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory

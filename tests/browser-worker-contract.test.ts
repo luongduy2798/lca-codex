@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptCompletionTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, chatGptResponseHasStructuredMarkdown, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/lca-codex/browser-worker";
+import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptNetworkTurnTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert } from "../src/adapters/lca-codex/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -126,6 +126,135 @@ test("a transient launcher CDP disconnect reattaches the same browser surface in
   expect(workerSource).toContain("responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last()");
   expect(workerSource.match(/if \(await reattachLauncherSurface\(\)\) continue;/g)?.length).toBe(2);
   expect(workerSource).toContain("rather than replaying the\n          // ChatGPT turn");
+});
+
+test("browser network lifecycle correlates the created conversation, turn stream, and terminal event", () => {
+  const transitions: string[] = [];
+  const tracker = new ChatGptNetworkTurnTracker(transition => transitions.push(transition));
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload, metadata: {} },
+  }]);
+
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "before-arm",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: false,
+    conversationKnown: false,
+    turnKnown: false,
+    completed: false,
+  });
+
+  tracker.arm();
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "conversation-1",
+  }));
+  tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "turn-1",
+    conversation_id: "conversation-1",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "unrelated-conversation",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    conversationKnown: true,
+    turnKnown: true,
+    completed: false,
+  });
+
+  const completionBeforeStream = new ChatGptNetworkTurnTracker();
+  completionBeforeStream.arm();
+  completionBeforeStream.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "conversation-without-stream",
+  }));
+  completionBeforeStream.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "conversation-without-stream",
+  }));
+  expect(completionBeforeStream.snapshot()).toEqual({
+    armed: true,
+    conversationKnown: true,
+    turnKnown: false,
+    completed: false,
+  });
+
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "conversation-1",
+  }));
+  expect(tracker.snapshot().completed).toBeTrue();
+  expect(transitions).toEqual(["created", "streaming", "completed"]);
+});
+
+test("browser network lifecycle lets the post-send conversation replace a stale heartbeat", () => {
+  const tracker = new ChatGptNetworkTurnTracker();
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+
+  tracker.arm();
+  tracker.observeWebSocketPayload(frame("conversation-turn-old-turn", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "old-turn",
+    conversation_id: "old-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "fresh-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "old-conversation",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    conversationKnown: true,
+    turnKnown: false,
+    completed: false,
+  });
+
+  tracker.observeWebSocketPayload(frame("conversation-turn-fresh-turn", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "fresh-turn",
+    conversation_id: "fresh-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "fresh-conversation",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    conversationKnown: true,
+    turnKnown: true,
+    completed: true,
+  });
+});
+
+test("browser network lifecycle is mandatory before Send and after launcher reattachment", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const attach = workerSource.indexOf("await networkObserver.attach(page);");
+  const arm = workerSource.indexOf("networkObserver.arm();", attach);
+  const send = workerSource.indexOf('await sendButton.press("Enter");', arm);
+  expect(attach).toBeGreaterThan(-1);
+  expect(arm).toBeGreaterThan(attach);
+  expect(send).toBeGreaterThan(arm);
+  expect(workerSource.match(/await networkObserver\.attach\(page\);/g)?.length).toBe(2);
+  expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_reattached"');
+  expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_unavailable"');
+  expect(workerSource).toContain('"lca_codex.network_turn_created"');
+  expect(workerSource).toContain('"lca_codex.network_turn_streaming"');
+  expect(workerSource).toContain('"lca_codex.network_turn_completed"');
+  expect(workerSource).toContain('completionSource: "network"');
+  expect(workerSource).toContain("let networkCompletionObservedOnPriorPoll = false;");
+  expect(workerSource).toContain("const networkCompletionReady = networkCompletionObserved");
+  expect(workerSource).toContain("networkCompletionObservedOnPriorPoll = networkCompletionObserved;");
+  expect(workerSource).toContain("if (networkCompletionReady) {");
+  expect(workerSource).not.toContain("turnCompletionReady");
+  expect(workerSource).not.toContain("completionTracker");
+  expect(workerSource).toContain("ChatGPT network lifecycle observer is unavailable before Send");
+  expect(workerSource).toContain("ChatGPT network lifecycle observer could not reattach to the active turn");
+  expect(workerSource).not.toContain('payloadData.includes("[DONE]")');
 });
 
 test("connector verification and real tool turns share one Playwright selector", () => {
@@ -677,21 +806,6 @@ test("unrelated ChatGPT dialogs are left untouched", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
-test("the known terminal ChatGPT error alert returns a structured retryable failure", async () => {
-  const fixture = dialogPage(
-    "Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
-  );
-
-  await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
-    name: "LcaCodexAdapterError",
-    status: 502,
-    errorType: "server_error",
-    code: "upstream_server_error",
-    retryable: true,
-  });
-  expect(fixture.pressed).toEqual([]);
-});
-
 test("a failed subscription fetch is retryable and does not falsely invalidate ChatGPT login", async () => {
   const fixture = dialogPage(
     "Failed to load subscription: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
@@ -706,21 +820,10 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
   });
 });
 
-test("terminal model errors are scoped to the new assistant turn instead of global page alerts", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain("throwIfChatGptTerminalErrorAlert(responseTurn)");
-  expect(workerSource).not.toContain("throwIfChatGptTerminalErrorAlert(page)");
-});
-
 test("submission acceptance stops when its stage is aborted", async () => {
   const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
     waitForSubmissionAccepted(
-      page: Page,
-      userTurns: unknown,
-      responseTurns: unknown,
-      responseTurn: unknown,
-      initialUserTurnCount: number,
-      initialResponseTurnCount: number,
+      networkObserver: unknown,
       signal: AbortSignal,
     ): Promise<unknown>;
   }).waitForSubmissionAccepted;
@@ -729,21 +832,9 @@ test("submission acceptance stops when its stage is aborted", async () => {
 
   await expect(waitForSubmissionAccepted.call(
     {},
-    {} as Page,
     {},
-    {},
-    {},
-    0,
-    0,
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
-});
-
-test("unrelated ChatGPT alerts are not terminal", async () => {
-  const fixture = dialogPage("Your file was uploaded successfully");
-
-  await throwIfChatGptTerminalErrorAlert(fixture.page);
-  expect(fixture.pressed).toEqual([]);
 });
 
 function toolConfirmationPage(options: { disappearAfterReads?: number } = {}): {
@@ -865,7 +956,6 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
     "tool-confirmation-visible",
     "response-visible",
     "completion-pending-30s",
-    "response-dom-health-failed",
     "turn-completed",
     "turn-failed",
   ]) {
@@ -882,10 +972,11 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   expect(workerSource).toContain('checkpoint !== "completion-pending-30s"');
 });
 
-test("browser DOM health failures return their exact failure-time diagnostic paths to Codex", () => {
+test("browser lifecycle no longer fails from response DOM health heuristics", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/diagnostics\.captureError\(page, "response-dom-health-failed"/g)?.length).toBe(2);
-  expect(workerSource).toContain('Browser diagnostic screenshot: ${artifact.screenshotPath ?? "unavailable"}; state: ${artifact.statePath}');
+  expect(workerSource).not.toContain("ChatGptTurnDomHealthTracker");
+  expect(workerSource).not.toContain("response DOM disappeared");
+  expect(workerSource).not.toContain("response-dom-health-failed");
   expect(workerSource).toContain('surfacedError.message.includes("Browser diagnostic screenshot:")');
   expect(workerSource).toContain('diagnostics.captureError(diagnosticPage, "turn-failed", surfacedError)');
   expect(workerSource).not.toContain('diagnostics.capture(diagnosticPage, "turn-failed", surfacedError)');
@@ -906,52 +997,30 @@ test("response polling balances visible latency with weak-machine efficiency", (
   ]);
 });
 
-test("structured Markdown completes after a short settle with a conservative raw-DOM fallback", () => {
-  const completedState = {
-    responsePresent: true,
-    running: false,
-    currentText: "Mình đang dùng GPT-5.6 Sol.",
-    currentHtml: "<p>Mình đang dùng GPT-5.6 Sol.</p>",
-    completionActionVisible: true,
-  };
-  const structuredTracker = new ChatGptCompletionTracker();
-  const rawDomTracker = new ChatGptCompletionTracker(2_000);
-  expect(structuredTracker.update(completedState, 1_000)).toBeFalse();
-  expect(structuredTracker.update(completedState, 1_499)).toBeFalse();
-  expect(structuredTracker.update(completedState, 1_500)).toBeTrue();
-  expect(rawDomTracker.update(completedState, 1_000)).toBeFalse();
-  expect(rawDomTracker.update(completedState, 2_999)).toBeFalse();
-  expect(rawDomTracker.update(completedState, 3_000)).toBeTrue();
-
-  const rawText = [{ key: "0:root", html: "raw answer", text: "raw answer", streamable: false }];
-  const semanticParagraph = [{ key: "0:0:p", html: "<p>answer</p>", text: "answer", streamable: false }];
-  expect(chatGptResponseHasStructuredMarkdown({
-    markdownSegments: rawText,
-    hasUnstructuredMarkdown: true,
-  })).toBeFalse();
-  expect(chatGptResponseHasStructuredMarkdown({
-    markdownSegments: semanticParagraph,
-    hasUnstructuredMarkdown: false,
-  })).toBeTrue();
-
+test("network completion finalizes the DOM-backed Markdown serializer without DOM completion heuristics", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const structuredGuard = workerSource.indexOf("const hasStructuredMarkdown = snapshot.responsePresent");
-  const structuredEvidence = workerSource.indexOf("chatGptResponseHasStructuredMarkdown(snapshot)", structuredGuard);
-  const completion = workerSource.indexOf("const completionReady = completionTracker.update(", structuredEvidence);
-  const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", completion);
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {");
+  const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", networkCompletion);
   const finalEmission = workerSource.indexOf("turn.onTextDelta(final.delta)", finalSnapshot);
-  expect(structuredGuard).toBeGreaterThan(-1);
-  expect(structuredEvidence).toBeGreaterThan(structuredGuard);
-  expect(completion).toBeGreaterThan(structuredEvidence);
-  expect(finalSnapshot).toBeGreaterThan(completion);
+  expect(networkCompletion).toBeGreaterThan(-1);
+  expect(finalSnapshot).toBeGreaterThan(networkCompletion);
   expect(finalEmission).toBeGreaterThan(finalSnapshot);
-  expect(workerSource).toContain("CHATGPT_COMPLETION_SETTLE_MS = 500");
-  expect(workerSource).toContain("CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS = 2_000");
-  expect(workerSource).toContain("const unstructuredCompletionTracker = new ChatGptCompletionTracker(");
-  expect(workerSource).toContain("if (markdownRoot.innerHTML.trim()) hasUnstructuredMarkdown = true");
-  expect(workerSource).not.toContain("displayCompletionTracker");
+  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) =>");
+  expect(workerSource).not.toContain("ChatGptCompletionTracker");
+  expect(workerSource).not.toContain("chatGptResponseHasStructuredMarkdown");
   expect(workerSource).not.toContain("markdownBuffer.flush()");
   expect(workerSource).toContain("const markdownBuffer = new ChatGptMarkdownBuffer(");
+});
+
+test("network completion remains authoritative when the assistant DOM is absent on the terminal poll", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const responsePresentBranch = workerSource.indexOf("if (snapshot.responsePresent) {");
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {", responsePresentBranch);
+  expect(responsePresentBranch).toBeGreaterThan(-1);
+  expect(networkCompletion).toBeGreaterThan(responsePresentBranch);
+  expect(workerSource.slice(responsePresentBranch, networkCompletion)).toContain("}");
+  expect(workerSource).toContain("const completedVisibleText = snapshot.visibleText || lastResponseVisibleText;");
+  expect(workerSource).not.toContain("if (snapshot.responsePresent && networkCompletionReady)");
 });
 
 test("adaptive polling backs off only after repeated unchanged snapshots", () => {
@@ -1178,232 +1247,6 @@ test("trace parsing excludes the Answer now UI control", () => {
   expect(isChatGptTraceControl({ kind: "answer", text: "Answer now" })).toBe(false);
 });
 
-test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {
-  const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
-  const absent = {
-    responsePresent: false,
-    running: false,
-    currentText: "",
-    completionActionVisible: false,
-  };
-  expect(missing.update(absent, 1_000)).toBeUndefined();
-  expect(missing.update(absent, 2_000)).toBeUndefined();
-  expect(missing.update(absent, 2_001)).toContain("did not create a response DOM");
-
-  const empty = new ChatGptTurnDomHealthTracker(1_000, 500);
-  const terminal = {
-    ...absent,
-    responsePresent: true,
-    running: false,
-    completionActionVisible: true,
-  };
-  expect(empty.update(terminal, 1_000)).toBeUndefined();
-  expect(empty.update(terminal, 1_500)).toContain("completed without a final answer");
-
-  const missingCompletionAction = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
-  const completedWithoutMarker = {
-    ...terminal,
-    currentText: "complete answer",
-    completionActionVisible: false,
-  };
-  expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
-  expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
-  expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
-});
-
-test("browser completion-action watchdog ages from the last observed turn activity", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 750);
-  const terminalLooking = {
-    responsePresent: true,
-    running: false,
-    currentText: "answer-looking text",
-    completionActionVisible: false,
-    activitySignature: "answer\0tool-call-1",
-  };
-
-  expect(health.update(terminalLooking, 1_000)).toBeUndefined();
-  expect(health.update({ ...terminalLooking, activitySignature: "answer\0tool-call-2" }, 1_700)).toBeUndefined();
-  expect(health.update({ ...terminalLooking, activitySignature: "answer\0tool-call-2" }, 2_449)).toBeUndefined();
-  expect(health.update({ ...terminalLooking, activitySignature: "answer\0tool-call-2" }, 2_450)).toContain("DOM may have changed");
-});
-
-test("browser DOM health tolerates transient assistant DOM replacement while generation is still running", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 60_000);
-  const visible = {
-    responsePresent: true,
-    running: true,
-    currentText: "working",
-    completionActionVisible: false,
-  };
-  const runningWithoutDom = {
-    ...visible,
-    responsePresent: false,
-    currentText: "",
-  };
-  expect(health.update(visible, 1_000)).toBeUndefined();
-  expect(health.update(runningWithoutDom, 2_000)).toBeUndefined();
-  expect(health.update(runningWithoutDom, 20_000)).toBeUndefined();
-
-  const stoppedWithoutDom = { ...runningWithoutDom, running: false };
-  expect(health.update(stoppedWithoutDom, 20_000)).toBeUndefined();
-  expect(health.update(stoppedWithoutDom, 20_999)).toBeUndefined();
-  expect(health.update(stoppedWithoutDom, 21_000)).toBeUndefined();
-  expect(health.update(stoppedWithoutDom, 21_001)).toContain("response DOM disappeared");
-});
-
-test("browser DOM health cancels a grace-expired missing-response failure when React restores the turn on the confirmation poll", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 60_000);
-  const visible = {
-    responsePresent: true,
-    running: false,
-    currentText: "earlier assistant UI",
-    completionActionVisible: false,
-  };
-  const absent = {
-    ...visible,
-    responsePresent: false,
-    currentText: "",
-  };
-  const terminal = {
-    ...visible,
-    currentText: "final answer",
-    completionActionVisible: true,
-  };
-
-  expect(health.update(visible, 1_000)).toBeUndefined();
-  expect(health.update(absent, 2_000)).toBeUndefined();
-  expect(health.update(absent, 3_000)).toBeUndefined();
-  expect(health.update(terminal, 3_001)).toBeUndefined();
-  expect(health.update(terminal, 4_500)).toBeUndefined();
-});
-
-test("browser DOM health does not time out a deep-reasoning turn solely because its DOM stays absent", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500, 60_000);
-  const visible = {
-    responsePresent: true,
-    running: true,
-    currentText: "working",
-    completionActionVisible: false,
-  };
-  const runningWithoutDom = {
-    ...visible,
-    responsePresent: false,
-    currentText: "",
-  };
-  expect(health.update(visible, 1_000)).toBeUndefined();
-  expect(health.update(runningWithoutDom, 2_000)).toBeUndefined();
-  expect(health.update(runningWithoutDom, 62_000)).toBeUndefined();
-  expect(health.update(runningWithoutDom, 602_000)).toBeUndefined();
-});
-
-test("browser completion settles from the last terminal snapshot when ChatGPT removes the response DOM", () => {
-  const tracker = new ChatGptCompletionTracker(500);
-  const terminal = {
-    responsePresent: true,
-    running: false,
-    currentText: "complete answer",
-    currentHtml: "<p>complete answer</p>",
-    completionActionVisible: true,
-  };
-  expect(tracker.update(terminal, 1_000)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    responsePresent: false,
-    currentText: "",
-    currentHtml: "",
-    completionActionVisible: false,
-  }, 1_499)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    responsePresent: false,
-    currentText: "",
-    currentHtml: "",
-    completionActionVisible: false,
-  }, 1_500)).toBe(true);
-});
-
-test("browser completion treats response-scoped terminal UI as stronger than a stale Stop button", () => {
-  const tracker = new ChatGptCompletionTracker(500);
-  const terminalWithStaleStop = {
-    responsePresent: true,
-    running: true,
-    currentText: "complete answer",
-    currentHtml: "<p>complete answer</p>",
-    completionActionVisible: true,
-  };
-  expect(tracker.update(terminalWithStaleStop, 1_000)).toBe(false);
-  expect(tracker.update(terminalWithStaleStop, 1_499)).toBe(false);
-  expect(tracker.update(terminalWithStaleStop, 1_500)).toBe(true);
-
-  const remounted = {
-    ...terminalWithStaleStop,
-    responsePresent: false,
-    currentText: "",
-    currentHtml: "",
-    completionActionVisible: false,
-  };
-  const latched = new ChatGptCompletionTracker(500);
-  expect(latched.update(terminalWithStaleStop, 2_000)).toBe(false);
-  expect(latched.update(remounted, 2_500)).toBe(true);
-});
-
-test("browser completion settles only after terminal tool activity also becomes stable", () => {
-  const tracker = new ChatGptCompletionTracker(500);
-  const terminal = {
-    responsePresent: true,
-    running: true,
-    currentText: "complete answer",
-    currentHtml: "<p>complete answer</p>",
-    completionActionVisible: true,
-    activitySignature: "1\0terminal\0answer\0tool:running",
-  };
-
-  expect(tracker.update(terminal, 1_000)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    activitySignature: "1\0terminal\0answer\0tool:completed",
-  }, 1_400)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    activitySignature: "1\0terminal\0answer\0tool:completed",
-  }, 1_899)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    activitySignature: "1\0terminal\0answer\0tool:completed",
-  }, 1_900)).toBe(true);
-});
-
-test("browser completion does not survive DOM loss when generation resumes", () => {
-  const tracker = new ChatGptCompletionTracker(500);
-  const terminal = {
-    responsePresent: true,
-    running: false,
-    currentText: "complete answer",
-    currentHtml: "<p>complete answer</p>",
-    completionActionVisible: true,
-  };
-  expect(tracker.update(terminal, 1_000)).toBe(false);
-  expect(tracker.update({
-    ...terminal,
-    responsePresent: false,
-    running: true,
-    currentText: "",
-    currentHtml: "",
-    completionActionVisible: false,
-  }, 1_250)).toBe(false);
-  expect(tracker.update(terminal, 1_500)).toBe(false);
-});
-
-test("browser completion polling continues outside the response-present branch", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const observedAt = workerSource.indexOf("const observedAt = Date.now();");
-  const completionReady = workerSource.indexOf("const completionReady = completionTracker.update", observedAt);
-  const responsePresentBranch = workerSource.indexOf("if (snapshot.responsePresent) {", observedAt);
-  expect(observedAt).toBeGreaterThan(-1);
-  expect(completionReady).toBeGreaterThan(observedAt);
-  expect(responsePresentBranch).toBeGreaterThan(completionReady);
-});
-
 test("pending-completion diagnostics record DOM metrics without response or overlay content", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const start = workerSource.indexOf("private async pendingCompletionDiagnostic");
@@ -1415,7 +1258,7 @@ test("pending-completion diagnostics record DOM metrics without response or over
   expect(diagnosticSource).not.toMatch(/\bariaLabel:\s*candidate\.getAttribute/);
 });
 
-test("browser completion uses response-scoped terminal actions when Copy collapses into overflow", () => {
+test("response DOM parsing recognizes terminal action groups when Copy collapses into overflow", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(sessionSource).toContain('button[data-testid="copy-turn-action-button"]');
@@ -1427,37 +1270,21 @@ test("browser completion uses response-scoped terminal actions when Copy collaps
   expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
 });
 
-test("browser response tracking follows the latest visible assistant turn across React DOM replacement", () => {
+test("browser DOM serialization re-resolves the latest visible assistant turn after launcher reattachment", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain("responseTurns.filter({ visible: true }).last()");
-  expect(workerSource).not.toContain("responseTurns.nth(initialResponseTurnCount)");
+  expect(workerSource.match(/responseTurn = page\.locator\(CHATGPT_ASSISTANT_TURN_SELECTOR\)\.filter\(\{ visible: true \}\)\.last\(\)/g)?.length).toBe(2);
+  expect(workerSource).not.toContain("initialResponseTurnCount");
 });
 
-test("browser send accepts only conclusive ChatGPT submission evidence", () => {
+test("browser submission acceptance uses only network lifecycle evidence", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const idle = {
-    initialUserTurnCount: 1,
-    userTurnCount: 1,
-    initialAssistantTurnCount: 2,
-    assistantTurnCount: 2,
-    generationRunning: false,
-  };
-  expect(chatGptSubmissionEvidence(idle)).toBeUndefined();
-  expect(chatGptSubmissionEvidence({ ...idle, userTurnCount: 2 })).toBe("user_turn");
-  expect(chatGptSubmissionEvidence({ ...idle, assistantTurnCount: 3 })).toBe("assistant_turn");
-  expect(chatGptSubmissionEvidence({ ...idle, generationRunning: true })).toBe("generation_running");
-  expect(workerSource).toContain("waitForSubmissionAccepted");
-  expect(workerSource).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
-});
-
-test("visible reasoning keeps the browser turn healthy before final assistant markdown exists", () => {
-  const health = new ChatGptTurnDomHealthTracker(1_000, 500);
-  const reasoning = {
-    responsePresent: true,
-    running: false,
-    currentText: "",
-    completionActionVisible: false,
-  };
-  expect(health.update(reasoning, 1_000)).toBeUndefined();
-  expect(health.update(reasoning, 10_000)).toBeUndefined();
+  const start = workerSource.indexOf("private async waitForSubmissionAccepted(");
+  const end = workerSource.indexOf("private async attachedPromptText", start);
+  const submissionSource = workerSource.slice(start, end);
+  expect(submissionSource).toContain('if (networkState.turnKnown) return "network_turn";');
+  expect(submissionSource).toContain('if (networkState.conversationKnown) return "network_conversation";');
+  expect(submissionSource).toContain("networkObserver.isAttached()");
+  expect(submissionSource).not.toContain("userTurnCount");
+  expect(submissionSource).not.toContain("assistantTurnCount");
+  expect(submissionSource).not.toContain("generationRunning");
 });

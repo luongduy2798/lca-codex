@@ -2717,6 +2717,11 @@ const CHATGPT_ACTIVITY_EVENTS = new Set([
   "lca_codex.turn_first_response",
   "lca_codex.turn_first_reasoning",
   "lca_codex.turn_first_text",
+  "lca_codex.network_turn_created",
+  "lca_codex.network_turn_streaming",
+  "lca_codex.network_turn_completed",
+  "lca_codex.network_observer_unavailable",
+  "lca_codex.network_observer_reattached",
   "lca_codex.turn_completed",
   "lca_codex.turn_failed",
 ]);
@@ -2817,10 +2822,13 @@ function buildActivityTaskGroup(traceId: string, input: LogRecord[], now: number
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_send_accepted"
       || record.event === "lca_codex.turn_first_response"
-      || record.event === "lca_codex.turn_first_reasoning") {
+      || record.event === "lca_codex.turn_first_reasoning"
+      || record.event === "lca_codex.network_turn_created"
+      || record.event === "lca_codex.network_turn_completed") {
       phase = "waiting";
       source = "chatgpt";
-    } else if (record.event === "lca_codex.turn_first_text") {
+    } else if (record.event === "lca_codex.turn_first_text"
+      || record.event === "lca_codex.network_turn_streaming") {
       phase = "running";
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_completed") {
@@ -3114,6 +3122,11 @@ const lcaActivityEventLabels: Record<string, string> = {
   "lca_codex.turn_first_response": "First ChatGPT response",
   "lca_codex.turn_first_reasoning": "First reasoning update",
   "lca_codex.turn_first_text": "First answer text",
+  "lca_codex.network_turn_created": "ChatGPT · WS turn created",
+  "lca_codex.network_turn_streaming": "ChatGPT · WS streaming",
+  "lca_codex.network_turn_completed": "ChatGPT · WS turn completed",
+  "lca_codex.network_observer_unavailable": "ChatGPT · Network observer unavailable",
+  "lca_codex.network_observer_reattached": "ChatGPT · Network observer reattached",
   "lca_codex.turn_completed": "LCA Codex turn completed",
   "lca_codex.turn_failed": "LCA Codex turn failed",
   "lca_codex.turn_retry_scheduled": "LCA Codex retry scheduled",
@@ -3150,6 +3163,7 @@ function lcaActivityDetail(key: string, value: unknown): string {
   if (key === "sinceSendMs") return `after send ${formatActivityDuration(value)}`;
   if (key === "durationMs") return `duration ${formatActivityDuration(value)}`;
   if (key === "responseChars" && typeof value === "number") return `${value.toLocaleString()} chars`;
+  if (key === "completionSource") return `completion source: ${String(value)}`;
   if (key === "traceId") return `turn ${String(value)}`;
   if (key === "callId") return `call ${String(value)}`;
   return key === "tool" ? String(value) : `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`;
@@ -3169,6 +3183,7 @@ function logDetail(event: string, detail: Record<string, unknown>, grouped = fal
       "sinceSendMs",
       "durationMs",
       "responseChars",
+      "completionSource",
       "status",
       "reason",
       "code",

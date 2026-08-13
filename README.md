@@ -120,6 +120,15 @@ longer changes how much conversation history is copied into the browser prompt: 
 modes use the same bounded active bootstrap and retrieve older context lazily. Dedicated compaction
 uses the same frozen lazy snapshot without projecting the recent working set inline.
 
+Browser-turn state comes from ChatGPT's page-scoped WebSocket lifecycle, not from response UI. The
+worker attaches its network observer before Send, correlates the new conversation/turn, and considers
+the turn complete only after the matching network completion event. Response DOM, Stop/Copy controls,
+and React remounts do not decide whether a turn is running or finished. The UI is still read to stream
+visible reasoning/commentary, handle local-tool confirmation, and serialize the final Markdown; one
+normal poll after network completion gives the final React render a chance to commit. If network
+observation cannot attach before Send or cannot be restored after a transient CDP reconnect, the turn
+fails explicitly rather than falling back to UI lifecycle guesses.
+
 ## Codex tool bridge
 
 The bridge connects ChatGPT back to the current Codex task through the official

@@ -144,6 +144,9 @@ test("closing the launcher follows the persisted background-launcher preference"
 test("tray activity keeps active work visible but detects stalled LCA turns", () => {
   assert.match(electronMain, /ACTIVITY_STALL_MS/);
   assert.match(electronMain, /"lca_codex\.turn_started": \{ label: "Turn started", terminal: false, stallable: true \}/);
+  assert.match(electronMain, /"lca_codex\.network_turn_created": \{ label: "ChatGPT turn created", terminal: false, stallable: true \}/);
+  assert.match(electronMain, /"lca_codex\.network_turn_streaming": \{ label: "ChatGPT streaming", terminal: false, stallable: true \}/);
+  assert.match(electronMain, /"lca_codex\.network_turn_completed": \{ label: "ChatGPT network completed", terminal: false, stallable: false \}/);
   assert.match(electronMain, /stallable: !terminal && record\.detail\?\.layer !== "codex"/);
   assert.match(electronMain, /if \(!activity\.stallable\) return;/);
   assert.match(electronMain, /latestTrayActivity = "Stalled";[\s\S]*?clearTrayActivityAfter\(8_000\)/);

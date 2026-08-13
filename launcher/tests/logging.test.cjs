@@ -56,6 +56,35 @@ test("LCA Codex activity accepts only known payload-free diagnostic fields", () 
   assert.equal(parseLcaCodexActivity(
     '[lca-codex-activity] {"event":"lca_codex.unknown","level":"info","detail":{}}',
   ), null);
+
+  assert.deepEqual(parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
+    event: "lca_codex.turn_completed",
+    level: "info",
+    detail: {
+      traceId: "abc123",
+      completionSource: "network",
+      responseChars: 456,
+      payload: "must not be logged",
+    },
+  })}`), {
+    event: "lca_codex.turn_completed",
+    level: "info",
+    detail: {
+      traceId: "abc123",
+      completionSource: "network",
+      responseChars: 456,
+    },
+  });
+
+  assert.deepEqual(parseLcaCodexActivity(`[lca-codex-activity] ${JSON.stringify({
+    event: "lca_codex.network_turn_completed",
+    level: "info",
+    detail: {
+      traceId: "abc123",
+      attempt: 1,
+      sinceSendMs: 900,
+    },
+  })}`).event, "lca_codex.network_turn_completed");
 });
 
 test("failed launcher IPC calls are written to runtime activity", async () => {

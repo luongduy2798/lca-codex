@@ -19,6 +19,11 @@ const LCA_CODEX_ACTIVITY_EVENTS = new Set([
   "lca_codex.turn_first_response",
   "lca_codex.turn_first_reasoning",
   "lca_codex.turn_first_text",
+  "lca_codex.network_turn_created",
+  "lca_codex.network_turn_streaming",
+  "lca_codex.network_turn_completed",
+  "lca_codex.network_observer_unavailable",
+  "lca_codex.network_observer_reattached",
   "lca_codex.turn_completed",
   "lca_codex.turn_failed",
   "lca_codex.turn_retry_scheduled",
@@ -30,6 +35,7 @@ const LCA_CODEX_ACTIVITY_DETAIL_KEYS = new Set([
   "attempt",
   "callId",
   "code",
+  "completionSource",
   "durationMs",
   "elapsedMs",
   "layer",
@@ -424,6 +430,11 @@ function activityRecordSource(record) {
     "lca_codex.turn_first_response",
     "lca_codex.turn_first_reasoning",
     "lca_codex.turn_first_text",
+    "lca_codex.network_turn_created",
+    "lca_codex.network_turn_streaming",
+    "lca_codex.network_turn_completed",
+    "lca_codex.network_observer_unavailable",
+    "lca_codex.network_observer_reattached",
     "lca_codex.turn_completed",
     "lca_codex.turn_failed",
   ].includes(record.event)) return "chatgpt";
@@ -483,10 +494,13 @@ function summarizeActivityTask(task, now = Date.now()) {
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_send_accepted"
       || record.event === "lca_codex.turn_first_response"
-      || record.event === "lca_codex.turn_first_reasoning") {
+      || record.event === "lca_codex.turn_first_reasoning"
+      || record.event === "lca_codex.network_turn_created"
+      || record.event === "lca_codex.network_turn_completed") {
       phase = "waiting";
       source = "chatgpt";
-    } else if (record.event === "lca_codex.turn_first_text") {
+    } else if (record.event === "lca_codex.turn_first_text"
+      || record.event === "lca_codex.network_turn_streaming") {
       phase = "running";
       source = "chatgpt";
     } else if (record.event === "lca_codex.turn_completed") {

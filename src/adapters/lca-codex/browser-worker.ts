@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Locator, type Page } from "playwright-core";
 import { atomicWriteFile, defaultChromeExecutable, expandUserPath, getConfigDir } from "../../config";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
@@ -46,11 +46,6 @@ export async function closeChatGptBrowserWorkers(): Promise<void> {
   }
 }
 
-export const CHATGPT_RESPONSE_DOM_GRACE_MS = 60_000;
-export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
-export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
-export const CHATGPT_COMPLETION_SETTLE_MS = 500;
-export const CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_MARKDOWN_BLOCK_STABILITY_MS = 750;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const CHATGPT_RESPONSE_POLL_MS = 250;
@@ -81,8 +76,6 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   );
 }
 
-type ChatGptTextScope = Pick<Locator, "getByText">;
-
 const chatGptSessionFailureAlert = (page: Page): Locator => page
   .locator('[role="alert"]')
   .filter({ hasText: /Failed to load subscription/i })
@@ -93,18 +86,6 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
   throw new LcaCodexAdapterError(
     "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
     { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true },
-  );
-}
-
-const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
-  .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
-  .last();
-
-export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
-  if (!await chatGptTerminalErrorAlert(scope).isVisible().catch(() => false)) return;
-  throw new LcaCodexAdapterError(
-    "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
-    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
   );
 }
 
@@ -226,76 +207,182 @@ export interface ResolvedBrowserConfig {
   autoApproveToolCalls: boolean;
 }
 
-export function chatGptTurnIsComplete(state: {
-  responsePresent: boolean;
-  running: boolean;
-  currentText: string;
-  currentHtml?: string;
-  completionActionVisible: boolean;
-}): boolean {
-  return state.responsePresent
-    && state.currentText.length > 0
-    && state.completionActionVisible;
+export type ChatGptSubmissionEvidence = "network_conversation" | "network_turn";
+
+export interface ChatGptNetworkTurnState {
+  armed: boolean;
+  conversationKnown: boolean;
+  turnKnown: boolean;
+  completed: boolean;
 }
 
-export type ChatGptSubmissionEvidence = "user_turn" | "assistant_turn" | "generation_running";
+export type ChatGptNetworkTurnTransition = "created" | "streaming" | "completed";
 
-export function chatGptSubmissionEvidence(state: {
-  initialUserTurnCount: number;
-  userTurnCount: number;
-  initialAssistantTurnCount: number;
-  assistantTurnCount: number;
-  generationRunning: boolean;
-}): ChatGptSubmissionEvidence | undefined {
-  if (state.userTurnCount > state.initialUserTurnCount) return "user_turn";
-  if (state.assistantTurnCount > state.initialAssistantTurnCount) return "assistant_turn";
-  if (state.generationRunning) return "generation_running";
-  return undefined;
-}
+type ChatGptNetworkRecord = Record<string, unknown>;
 
-export class ChatGptCompletionTracker {
-  private candidate?: { signature: string; since: number; running: boolean };
+const chatGptNetworkRecord = (value: unknown): ChatGptNetworkRecord | undefined => (
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as ChatGptNetworkRecord
+    : undefined
+);
 
-  constructor(private readonly stableMs = CHATGPT_COMPLETION_SETTLE_MS) {}
+const chatGptNetworkString = (value: unknown): string | undefined => (
+  typeof value === "string" && value.length > 0 ? value : undefined
+);
 
-  update(state: Parameters<typeof chatGptTurnIsComplete>[0] & {
-    activitySignature?: string;
-  }, now = Date.now()): boolean {
-    // ChatGPT may remove/replace the completed assistant DOM immediately after exposing
-    // terminal UI. Preserve an already-strong completion candidate across that transient
-    // gap so the settle window can finish instead of waiting for DOM-health failure.
-    if (!state.responsePresent && this.candidate) {
-      // A response-scoped terminal action is stronger completion evidence than the global Stop
-      // button, which ChatGPT can leave visible after the answer/action footer is already final.
-      // Preserve a candidate across DOM replacement when Stop was already stale at the moment we
-      // observed that terminal evidence. A newly-visible Stop after an idle candidate is still a
-      // real contradictory resume signal and invalidates the latch.
-      if (!state.running || this.candidate.running) {
-        return now - this.candidate.since >= this.stableMs;
+/**
+ * Tracks the lifecycle of the single ChatGPT conversation created by one browser send.
+ *
+ * The public DOM can disappear or remount while React is rendering a turn. ChatGPT's websocket
+ * independently exposes `conversation-created`, `conversation-turn-stream`, and
+ * `conversation-turn-complete` events. Keep only opaque IDs in memory so the worker can correlate
+ * those events without logging response content or browser credentials.
+ */
+export class ChatGptNetworkTurnTracker {
+  private armed = false;
+  private conversationId?: string;
+  private conversationCreated = false;
+  private turnId?: string;
+  private readonly completedConversationIds = new Set<string>();
+  private createdTransitionEmitted = false;
+  private streamingTransitionEmitted = false;
+  private completedTransitionEmitted = false;
+
+  constructor(private readonly onTransition?: (transition: ChatGptNetworkTurnTransition) => void) {}
+
+  arm(): void {
+    this.armed = true;
+    this.conversationId = undefined;
+    this.conversationCreated = false;
+    this.turnId = undefined;
+    this.completedConversationIds.clear();
+    this.createdTransitionEmitted = false;
+    this.streamingTransitionEmitted = false;
+    this.completedTransitionEmitted = false;
+  }
+
+  observeWebSocketPayload(payloadData: string): void {
+    if (!this.armed || !payloadData) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payloadData);
+    } catch {
+      return;
+    }
+    const entries = Array.isArray(parsed) ? parsed : [parsed];
+    for (const value of entries) {
+      const entry = chatGptNetworkRecord(value);
+      if (!entry || entry.type !== "message") continue;
+      const topicId = chatGptNetworkString(entry.topic_id);
+      const envelope = chatGptNetworkRecord(entry.payload);
+      const eventType = chatGptNetworkString(envelope?.type);
+      const payload = chatGptNetworkRecord(envelope?.payload);
+      if (!topicId || !eventType || !payload) continue;
+
+      if (topicId === "conversations" && eventType === "conversation-created") {
+        const conversationId = chatGptNetworkString(payload.conversation_id);
+        if (!conversationId) continue;
+        // A creation event is authoritative for this freshly submitted Temporary Chat. If a
+        // late heartbeat from an older websocket turn arrived just after arming, replace that
+        // provisional correlation instead of letting stale network traffic own the new turn.
+        if (!this.conversationCreated || this.conversationId === conversationId) {
+          if (this.conversationId !== conversationId) this.turnId = undefined;
+          this.conversationId = conversationId;
+          this.conversationCreated = true;
+        }
+        this.emitTransitions();
+        continue;
       }
-      this.candidate = undefined;
-      return false;
+
+      if (topicId.startsWith("conversation-turn-") && eventType === "conversation-turn-stream") {
+        const conversationId = chatGptNetworkString(payload.conversation_id);
+        if (!conversationId) continue;
+        if (this.conversationCreated && this.conversationId !== conversationId) continue;
+        if (!this.conversationId) this.conversationId = conversationId;
+        if (this.conversationId !== conversationId) continue;
+        this.turnId = chatGptNetworkString(payload.turn_id)
+          ?? chatGptNetworkString(topicId.slice("conversation-turn-".length));
+        this.emitTransitions();
+        continue;
+      }
+
+      if (topicId === "conversations" && eventType === "conversation-turn-complete") {
+        const conversationId = chatGptNetworkString(payload.conversation_id);
+        if (conversationId) this.completedConversationIds.add(conversationId);
+        this.emitTransitions();
+      }
     }
-    if (!chatGptTurnIsComplete(state)) {
-      this.candidate = undefined;
-      return false;
+  }
+
+  private emitTransitions(): void {
+    if (this.conversationCreated && !this.createdTransitionEmitted) {
+      this.createdTransitionEmitted = true;
+      this.onTransition?.("created");
     }
-    // A response-scoped action footer can appear while connector/tool trace UI is still moving.
-    // Require the whole observed turn activity to remain stable across the settle window, not just
-    // the rendered Markdown subtree, so a genuinely-live tool round cannot masquerade as terminal.
-    // `activitySignature` deliberately includes the global running flag too: a stale Stop that
-    // remains continuously visible does not block completion, while a real Stop state transition
-    // restarts the short settle window.
-    const signature = [
-      state.currentText,
-      state.currentHtml ?? state.currentText,
-      state.activitySignature ?? "",
-    ].join("\0");
-    if (this.candidate?.signature !== signature) {
-      this.candidate = { signature, since: now, running: state.running };
-      return false;
+    if (this.conversationCreated && this.turnId !== undefined && !this.streamingTransitionEmitted) {
+      this.streamingTransitionEmitted = true;
+      this.onTransition?.("streaming");
     }
-    return now - this.candidate.since >= this.stableMs;
+    if (this.snapshot().completed && !this.completedTransitionEmitted) {
+      this.completedTransitionEmitted = true;
+      this.onTransition?.("completed");
+    }
+  }
+
+  snapshot(): ChatGptNetworkTurnState {
+    return {
+      armed: this.armed,
+      conversationKnown: this.conversationId !== undefined,
+      turnKnown: this.turnId !== undefined,
+      completed: this.conversationCreated
+        && this.turnId !== undefined
+        && this.conversationId !== undefined
+        && this.completedConversationIds.has(this.conversationId),
+    };
+  }
+}
+
+class ChatGptNetworkTurnObserver {
+  private session?: CDPSession;
+  private readonly tracker: ChatGptNetworkTurnTracker;
+
+  constructor(onTransition?: (transition: ChatGptNetworkTurnTransition) => void) {
+    this.tracker = new ChatGptNetworkTurnTracker(onTransition);
+  }
+
+  arm(): void {
+    this.tracker.arm();
+  }
+
+  snapshot(): ChatGptNetworkTurnState {
+    return this.tracker.snapshot();
+  }
+
+  isAttached(): boolean {
+    return this.session !== undefined;
+  }
+
+  async attach(page: Page): Promise<void> {
+    await this.detach();
+    const session = await page.context().newCDPSession(page);
+    session.on("Network.webSocketFrameReceived", event => {
+      const response = chatGptNetworkRecord(chatGptNetworkRecord(event)?.response);
+      const payloadData = chatGptNetworkString(response?.payloadData);
+      if (payloadData) this.tracker.observeWebSocketPayload(payloadData);
+    });
+    try {
+      await session.send("Network.enable");
+      this.session = session;
+    } catch (error) {
+      await session.detach().catch(() => {});
+      throw error;
+    }
+  }
+
+  async detach(): Promise<void> {
+    const session = this.session;
+    this.session = undefined;
+    if (session) await session.detach().catch(() => {});
   }
 }
 
@@ -319,90 +406,6 @@ export class ChatGptAdaptivePollScheduler {
   }
 }
 
-/** Detect a missing or empty ChatGPT response without relying on localized UI text. */
-export class ChatGptTurnDomHealthTracker {
-  private sawResponse = false;
-  private missingResponseSince?: number;
-  private pendingMissingResponseFailure?: string;
-  private emptyCompletionSince?: number;
-  private missingCompletionAction?: { text: string; activitySignature?: string; since: number };
-
-  constructor(
-    private readonly missingResponseMs = CHATGPT_RESPONSE_DOM_GRACE_MS,
-    private readonly emptyCompletionMs = CHATGPT_EMPTY_RESPONSE_GRACE_MS,
-    private readonly missingCompletionActionMs = CHATGPT_COMPLETION_ACTION_GRACE_MS,
-  ) {}
-
-  update(state: {
-    responsePresent: boolean;
-    running: boolean;
-    currentText: string;
-    completionActionVisible: boolean;
-    activitySignature?: string;
-  }, now = Date.now()): string | undefined {
-    if (state.responsePresent) {
-      this.sawResponse = true;
-      this.missingResponseSince = undefined;
-      this.pendingMissingResponseFailure = undefined;
-    } else if (state.running) {
-      // ChatGPT may temporarily remove the assistant turn while a connector/tool call is still
-      // running, and deep-reasoning turns can legitimately remain in that state without any DOM
-      // change for an unbounded amount of time. Do not infer a failed turn from elapsed time alone;
-      // lifecycle abort/turn timeout and explicit terminal UI remain the authoritative bounds.
-      this.missingResponseSince = undefined;
-      this.pendingMissingResponseFailure = undefined;
-    } else {
-      this.missingResponseSince ??= now;
-      if (now - this.missingResponseSince >= this.missingResponseMs) {
-        const failure = this.sawResponse
-          ? "ChatGPT response DOM disappeared while the browser turn was active"
-          : "ChatGPT did not create a response DOM after the message was sent";
-        // Reaching the grace boundary is only a failure candidate. ChatGPT can commit a React
-        // replacement/final answer immediately after an idle poll; in that race the diagnostic
-        // frame already shows a healthy terminal response even though the previous snapshot was
-        // absent. Require the normal next poll to confirm the same failure state instead of
-        // throwing from a stale observation. This adds no new timeout or grace period.
-        if (this.pendingMissingResponseFailure === failure) return failure;
-        this.pendingMissingResponseFailure = failure;
-      } else {
-        this.pendingMissingResponseFailure = undefined;
-      }
-    }
-
-    const emptyCompletion = state.responsePresent
-      && state.currentText.length === 0
-      && state.completionActionVisible;
-    if (!emptyCompletion) {
-      this.emptyCompletionSince = undefined;
-    } else {
-      this.emptyCompletionSince ??= now;
-      if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
-        return "ChatGPT browser turn completed without a final answer";
-      }
-    }
-
-    const missingCompletionAction = state.responsePresent
-      && !state.running
-      && state.currentText.length > 0
-      && !state.completionActionVisible;
-    if (!missingCompletionAction) {
-      this.missingCompletionAction = undefined;
-    } else if (this.missingCompletionAction?.text !== state.currentText
-      || this.missingCompletionAction.activitySignature !== state.activitySignature) {
-      // A connector/tool turn can temporarily expose answer-looking Markdown while more tool
-      // activity is still changing the assistant turn. The completion-action watchdog must age
-      // only from the last observed turn activity, not from the first answer-looking snapshot.
-      this.missingCompletionAction = {
-        text: state.currentText,
-        activitySignature: state.activitySignature,
-        since: now,
-      };
-    } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
-      return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
-    }
-    return undefined;
-  }
-}
 
 export interface ChatGptVisibleTraceBlock {
   kind: "answer" | "commentary" | "status";
@@ -423,7 +426,6 @@ interface ChatGptResponseDomSnapshot {
   visibleText: string;
   fullHtml: string;
   markdownSegments: ChatGptMarkdownSegment[];
-  hasUnstructuredMarkdown: boolean;
   completionActionVisible: boolean;
   traceBlocks: ChatGptVisibleTraceBlock[];
 }
@@ -433,17 +435,9 @@ const absentResponseDomSnapshot = (): ChatGptResponseDomSnapshot => ({
   visibleText: "",
   fullHtml: "",
   markdownSegments: [],
-  hasUnstructuredMarkdown: false,
   completionActionVisible: false,
   traceBlocks: [],
 });
-
-export function chatGptResponseHasStructuredMarkdown(state: {
-  markdownSegments: ChatGptMarkdownSegment[];
-  hasUnstructuredMarkdown: boolean;
-}): boolean {
-  return state.markdownSegments.length > 0 && !state.hasUnstructuredMarkdown;
-}
 
 interface ChatGptTraceStreamingOptions {
   tailGuardChars?: number;
@@ -1213,33 +1207,18 @@ export class ChatGptBrowserWorker {
   }
 
   private async waitForSubmissionAccepted(
-    page: Page,
-    userTurns: Locator,
-    responseTurns: Locator,
-    responseTurn: Locator,
-    initialUserTurnCount: number,
-    initialResponseTurnCount: number,
+    networkObserver: ChatGptNetworkTurnObserver,
     signal?: AbortSignal,
   ): Promise<ChatGptSubmissionEvidence> {
     if (signal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
-    const visibleStopButtons = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).filter({ visible: true });
     for (;;) {
       if (signal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
-      await throwIfChatGptSessionFailureAlert(page);
-      await throwIfChatGptTerminalErrorAlert(responseTurn);
-      const [userTurnCount, assistantTurnCount, visibleStopButtonCount] = await Promise.all([
-        userTurns.count(),
-        responseTurns.count(),
-        visibleStopButtons.count(),
-      ]);
-      const evidence = chatGptSubmissionEvidence({
-        initialUserTurnCount,
-        userTurnCount,
-        initialAssistantTurnCount: initialResponseTurnCount,
-        assistantTurnCount,
-        generationRunning: visibleStopButtonCount > 0,
-      });
-      if (evidence) return evidence;
+      if (!networkObserver.isAttached()) {
+        throw new Error("ChatGPT network lifecycle observer detached before submission was accepted");
+      }
+      const networkState = networkObserver.snapshot();
+      if (networkState.turnKnown) return "network_turn";
+      if (networkState.conversationKnown) return "network_conversation";
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
   }
@@ -1663,7 +1642,6 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
-      let hasUnstructuredMarkdown = false;
       const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) => {
         const rootIsComplete = rootIndex < renderedRoots.length - 1;
         const hasDirectText = [...markdownRoot.childNodes].some(node => (
@@ -1671,7 +1649,6 @@ export class ChatGptBrowserWorker {
         ));
         const children = [...markdownRoot.children] as HTMLElement[];
         if (hasDirectText || children.length === 0) {
-          if (markdownRoot.innerHTML.trim()) hasUnstructuredMarkdown = true;
           return markdownRoot.innerHTML.trim() ? [{
             key: `${rootIndex}:root`,
             html: markdownRoot.innerHTML,
@@ -1719,7 +1696,6 @@ export class ChatGptBrowserWorker {
         visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
         fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
         markdownSegments,
-        hasUnstructuredMarkdown,
         completionActionVisible: completionAction !== undefined || terminalActionGroup !== undefined,
         traceBlocks,
       };
@@ -1836,6 +1812,20 @@ export class ChatGptBrowserWorker {
       throw error;
     });
     const diagnostics = new ChatGptBrowserDiagnostics(turn.traceId);
+    let networkArmedAt: number | undefined;
+    const networkObserver = new ChatGptNetworkTurnObserver(transition => {
+      const event = transition === "created"
+        ? "lca_codex.network_turn_created"
+        : transition === "streaming"
+          ? "lca_codex.network_turn_streaming"
+          : "lca_codex.network_turn_completed";
+      logLcaCodexActivity(event, {
+        traceId: turn.traceId,
+        attempt,
+        elapsedMs: activityDuration(startedAt),
+        ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
+      });
+    });
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
@@ -1913,15 +1903,29 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ), turn.abortSignal);
       await diagnostics.capture(page, "file-attachment-complete");
-      const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
-      const initialResponseTurnCount = await responseTurns.count();
       // ChatGPT can replace/reuse an assistant-turn scaffold while a response is rendering.
       // A positional locator based on the pre-send count can therefore become permanently
       // detached even though the current assistant response is still visible. Track the latest
       // visible assistant turn so Playwright re-resolves the live DOM after React swaps.
-      let responseTurn = responseTurns.filter({ visible: true }).last();
-      const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
-      const initialUserTurnCount = await userTurns.count();
+      let responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last();
+      try {
+        // Network lifecycle is authoritative for browser turns. Attach before Send so the
+        // conversation-created/turn-stream frames cannot race the observer; do not fall back to
+        // DOM lifecycle heuristics when network instrumentation is unavailable.
+        await networkObserver.attach(page);
+      } catch (error) {
+        logLcaCodexActivity("lca_codex.network_observer_unavailable", {
+          traceId: turn.traceId,
+          attempt,
+          elapsedMs: activityDuration(startedAt),
+          status: "initial_attach_failed",
+          reason: error instanceof Error ? error.name : "Error",
+        }, "warning");
+        throw new Error(
+          `ChatGPT network lifecycle observer is unavailable before Send: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async (stageSignal) => {
         const composer = await this.activeComposer(page);
         const sendButton = composer
@@ -1933,16 +1937,10 @@ export class ChatGptBrowserWorker {
         }
         await diagnostics.capture(page, "send-ready");
         await throwIfChatGptSessionFailureAlert(page);
+        networkArmedAt = Date.now();
+        networkObserver.arm();
         await sendButton.press("Enter");
-        const evidence = await this.waitForSubmissionAccepted(
-          page,
-          userTurns,
-          responseTurns,
-          responseTurn,
-          initialUserTurnCount,
-          initialResponseTurnCount,
-          stageSignal,
-        );
+        const evidence = await this.waitForSubmissionAccepted(networkObserver, stageSignal);
         console.info(`[lca-codex] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
       }, turn.abortSignal);
       const sentAt = Date.now();
@@ -1955,7 +1953,6 @@ export class ChatGptBrowserWorker {
 
       let lastHeartbeat = 0;
       let finalText = "";
-      let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
       let firstReasoningLogged = false;
@@ -1966,12 +1963,8 @@ export class ChatGptBrowserWorker {
         CHATGPT_MARKDOWN_BLOCK_STABILITY_MS,
       );
       const pollScheduler = new ChatGptAdaptivePollScheduler();
-      const completionTracker = new ChatGptCompletionTracker();
-      const unstructuredCompletionTracker = new ChatGptCompletionTracker(
-        CHATGPT_UNSTRUCTURED_COMPLETION_SETTLE_MS,
-      );
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
-      let terminalVisibleText: string | undefined;
+      let lastResponseVisibleText = "";
+      let networkCompletionObservedOnPriorPoll = false;
       let previousActivitySignature = "";
       const reattachLauncherSurface = async (): Promise<boolean> => {
         if (!launcherSurfaceId || !turnConnection || turnConnection.isConnected()) return false;
@@ -1979,22 +1972,14 @@ export class ChatGptBrowserWorker {
           throw new DOMException("LCA Codex turn aborted", "AbortError");
         }
         const staleConnection = turnConnection;
+        let connection: Awaited<ReturnType<typeof connectLauncherBrowserHost>>;
         try {
-          const connection = await connectLauncherBrowserHost(
+          connection = await connectLauncherBrowserHost(
             this.config.browserHostDescriptorPath!,
             browserStageTimeouts.browserPage,
             launcherSurfaceId,
             turn.abortSignal,
           );
-          turnConnection = connection.browser;
-          page = connection.page;
-          diagnosticPage = page;
-          responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last();
-          await staleConnection.close().catch(() => {});
-          console.warn(
-            `[lca-codex] browser turn ${turn.traceId} reattached to its launcher surface after a CDP disconnect`,
-          );
-          return true;
         } catch (error) {
           if (turn.abortSignal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
             throw new DOMException("LCA Codex turn aborted", "AbortError");
@@ -2004,6 +1989,38 @@ export class ChatGptBrowserWorker {
           );
           return false;
         }
+        turnConnection = connection.browser;
+        page = connection.page;
+        diagnosticPage = page;
+        responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last();
+        try {
+          await networkObserver.attach(page);
+          logLcaCodexActivity("lca_codex.network_observer_reattached", {
+            traceId: turn.traceId,
+            attempt,
+            elapsedMs: activityDuration(startedAt),
+            ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
+          });
+        } catch (error) {
+          logLcaCodexActivity("lca_codex.network_observer_unavailable", {
+            traceId: turn.traceId,
+            attempt,
+            elapsedMs: activityDuration(startedAt),
+            ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
+            status: "reattach_failed",
+            reason: error instanceof Error ? error.name : "Error",
+          }, "warning");
+          await staleConnection.close().catch(() => {});
+          throw new Error(
+            `ChatGPT network lifecycle observer could not reattach to the active turn: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+        await staleConnection.close().catch(() => {});
+        console.warn(
+          `[lca-codex] browser turn ${turn.traceId} reattached to its launcher surface after a CDP disconnect`,
+        );
+        return true;
       };
       for (;;) {
         if (await reattachLauncherSurface()) continue;
@@ -2022,9 +2039,6 @@ export class ChatGptBrowserWorker {
           turn.onHeartbeat?.();
           lastHeartbeat = Date.now();
         }
-
-        await throwIfChatGptSessionFailureAlert(page);
-        await throwIfChatGptTerminalErrorAlert(responseTurn);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
@@ -2048,11 +2062,17 @@ export class ChatGptBrowserWorker {
           if (await reattachLauncherSurface()) continue;
           throw error;
         }
-        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
-        const running = await stop.isVisible().catch(() => false);
-        if (running) sawRunning = true;
+        if (snapshot.visibleText) lastResponseVisibleText = snapshot.visibleText;
+        const networkState = networkObserver.snapshot();
+        const networkCompletionObserved = networkState.completed;
+        // The websocket terminal frame can win a very small race with React's final DOM commit.
+        // Confirm the latched terminal event on the next ordinary poll before finishing the DOM
+        // serializer. DOM presence is deliberately not part of lifecycle completion: React may
+        // remove/remount the answer without changing the authoritative WS turn state.
+        const networkCompletionReady = networkCompletionObserved
+          && networkCompletionObservedOnPriorPoll;
+        networkCompletionObservedOnPriorPoll = networkCompletionObserved;
         const activitySignature = [
-          running ? "1" : "0",
           snapshot.completionActionVisible ? "1" : "0",
           snapshot.fullHtml,
           ...snapshot.traceBlocks.map(block => `${block.kind}:${block.key ?? ""}:${block.text}`),
@@ -2061,32 +2081,6 @@ export class ChatGptBrowserWorker {
         previousActivitySignature = activitySignature;
         const nextPollMs = pollScheduler.nextDelay(activityChanged);
         const observedAt = Date.now();
-        const completionState = {
-          responsePresent: snapshot.responsePresent,
-          running,
-          currentText: snapshot.visibleText,
-          currentHtml: snapshot.fullHtml,
-          completionActionVisible: snapshot.completionActionVisible,
-        };
-        if (chatGptTurnIsComplete(completionState)) {
-          terminalVisibleText = snapshot.visibleText;
-        } else if (snapshot.responsePresent || running) {
-          // Live contradictory evidence invalidates the latched terminal snapshot. A fully
-          // absent, idle DOM is the one React replacement case where the latch must survive.
-          terminalVisibleText = undefined;
-        }
-        const hasStructuredMarkdown = snapshot.responsePresent
-          ? chatGptResponseHasStructuredMarkdown(snapshot)
-          : false;
-        const completionReady = completionTracker.update({
-          ...completionState,
-          activitySignature,
-          completionActionVisible: completionState.completionActionVisible && hasStructuredMarkdown,
-        }, observedAt) || unstructuredCompletionTracker.update({
-          ...completionState,
-          activitySignature,
-          completionActionVisible: completionState.completionActionVisible && !hasStructuredMarkdown,
-        }, observedAt);
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -2133,16 +2127,6 @@ export class ChatGptBrowserWorker {
               turn.onReasoningSummary?.(trace.text, trace.continuation === true);
             }
           }
-          const domError = domHealthTracker.update({
-            responsePresent: snapshot.responsePresent,
-            running,
-            currentText: snapshot.visibleText,
-            completionActionVisible: snapshot.completionActionVisible,
-            activitySignature,
-          });
-          if (domError) {
-            throw await diagnostics.captureError(page, "response-dom-health-failed", new Error(domError));
-          }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "completion-pending-30s");
@@ -2150,23 +2134,12 @@ export class ChatGptBrowserWorker {
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
             console.warn(
-              `[lca-codex] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+              `[lca-codex] waiting for network turn completion (textChars=${snapshot.visibleText.length}, networkConversationKnown=${networkState.conversationKnown}, networkTurnKnown=${networkState.turnKnown}, networkCompleted=${networkState.completed}, ui=${diagnostic})`,
             );
           }
-        } else {
-          const domError = domHealthTracker.update({
-            responsePresent: false,
-            running,
-            currentText: "",
-            completionActionVisible: false,
-            activitySignature,
-          });
-          if (domError) {
-            throw await diagnostics.captureError(page, "response-dom-health-failed", new Error(domError));
-          }
         }
-        if (completionReady) {
-          const completedVisibleText = terminalVisibleText ?? snapshot.visibleText;
+        if (networkCompletionReady) {
+          const completedVisibleText = snapshot.visibleText || lastResponseVisibleText;
           if (completedVisibleText === "api_tool unavailable") {
             throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
           }
@@ -2191,6 +2164,7 @@ export class ChatGptBrowserWorker {
         attempt,
         durationMs: activityDuration(startedAt),
         responseChars: finalText.length,
+        completionSource: "network",
       });
       console.info(`[lca-codex] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;
@@ -2206,14 +2180,12 @@ export class ChatGptBrowserWorker {
       if (diagnosticPage
         && !diagnosticPage.isClosed()
         && !surfacedError.message.includes("Browser diagnostic screenshot:")) {
-        // Capture once at the failure boundary and return that artifact in this same error. Do not
-        // take a second full screenshot after an exact DOM-health capture: it delays error delivery
-        // and can observe a different UI after React has already remounted the turn.
         surfacedError = await diagnostics.captureError(diagnosticPage, "turn-failed", surfacedError);
       }
       throw surfacedError;
     } finally {
       prepared.release();
+      await networkObserver.detach();
       if (turnConnection) {
         await turnConnection.close().catch(error => {
           console.error(

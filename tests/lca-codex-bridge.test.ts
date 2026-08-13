@@ -5,7 +5,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
-import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/lca-codex/browser-worker";
+import { chatGptImageFilePayloads, chatGptPromptFilePayloads } from "../src/adapters/lca-codex/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
 import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
 import { waitForCodexToolGatewayRoutes } from "../src/adapters/lca-codex/codex-tool-health";
@@ -1062,36 +1062,6 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(stageAborted).toBe(true);
-  });
-
-  test("accepts completion only from the response-scoped final answer action", () => {
-    const state = {
-      responsePresent: true,
-      running: false,
-      currentText: "new answer",
-      completionActionVisible: true,
-    };
-    expect(chatGptTurnIsComplete(state)).toBe(true);
-    expect(chatGptTurnIsComplete({ ...state, responsePresent: false })).toBe(false);
-    expect(chatGptTurnIsComplete({ ...state, completionActionVisible: false })).toBe(false);
-  });
-
-  test("requires completed-turn evidence to remain unchanged before accepting it", () => {
-    const state = {
-      responsePresent: true,
-      running: false,
-      currentText: "final answer",
-      completionActionVisible: true,
-    };
-    const tracker = new ChatGptCompletionTracker(2_000);
-    expect(tracker.update(state, 1_000)).toBe(false);
-    expect(tracker.update(state, 2_999)).toBe(false);
-    expect(tracker.update(state, 3_000)).toBe(true);
-    expect(tracker.update({ ...state, currentText: "final answer updated" }, 3_100)).toBe(false);
-    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p>" }, 4_000)).toBe(false);
-    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p><p>hydrated</p>" }, 6_000)).toBe(false);
-    expect(tracker.update({ ...state, currentHtml: "<p>final answer</p><p>hydrated</p>" }, 8_000)).toBe(true);
-    expect(tracker.update({ ...state, running: true }, 8_100)).toBe(false);
   });
 
   test("preserves GFM formatting while streaming only completed stable DOM blocks", () => {
