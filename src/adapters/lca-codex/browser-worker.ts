@@ -208,7 +208,7 @@ export interface ResolvedBrowserConfig {
   autoApproveToolCalls: boolean;
 }
 
-export type ChatGptSubmissionEvidence = "network_conversation" | "network_turn";
+export type ChatGptSubmissionEvidence = "network_turn";
 
 export interface ChatGptNetworkTurnState {
   armed: boolean;
@@ -232,19 +232,18 @@ const chatGptNetworkString = (value: unknown): string | undefined => (
 );
 
 /**
- * Tracks the lifecycle of the single ChatGPT conversation created by one browser send.
+ * Tracks network lifecycle signals observed after one browser send.
  *
  * The public DOM can disappear or remount while React is rendering a turn. ChatGPT's websocket
  * independently exposes `conversation-created`, `conversation-turn-stream`, and
- * `conversation-turn-complete` events. Keep only opaque IDs in memory so the worker can correlate
- * those events without logging response content or browser credentials.
+ * `conversation-turn-complete` events. Their arrival order is not a state machine: created/stream are
+ * progress only, while a valid completion observed after arm is terminal.
  */
 export class ChatGptNetworkTurnTracker {
   private armed = false;
-  private conversationId?: string;
-  private turnId?: string;
-  private readonly createdConversationIds = new Set<string>();
-  private readonly completedConversationIds = new Set<string>();
+  private conversationKnown = false;
+  private turnKnown = false;
+  private completed = false;
   private createdTransitionEmitted = false;
   private streamingTransitionEmitted = false;
   private completedTransitionEmitted = false;
@@ -253,10 +252,9 @@ export class ChatGptNetworkTurnTracker {
 
   arm(): void {
     this.armed = true;
-    this.conversationId = undefined;
-    this.turnId = undefined;
-    this.createdConversationIds.clear();
-    this.completedConversationIds.clear();
+    this.conversationKnown = false;
+    this.turnKnown = false;
+    this.completed = false;
     this.createdTransitionEmitted = false;
     this.streamingTransitionEmitted = false;
     this.completedTransitionEmitted = false;
@@ -283,8 +281,8 @@ export class ChatGptNetworkTurnTracker {
       if (topicId === "conversations" && eventType === "conversation-created") {
         const conversationId = chatGptNetworkString(payload.conversation_id);
         if (!conversationId) continue;
-        this.createdConversationIds.add(conversationId);
-        this.emitTransitions();
+        this.conversationKnown = true;
+        this.emitTransition("created");
         continue;
       }
 
@@ -293,40 +291,34 @@ export class ChatGptNetworkTurnTracker {
         const turnId = chatGptNetworkString(payload.turn_id)
           ?? chatGptNetworkString(topicId.slice("conversation-turn-".length));
         if (!conversationId || !turnId) continue;
-        if (!this.conversationId || this.conversationId === conversationId) {
-          this.conversationId = conversationId;
-          this.turnId = turnId;
-        } else {
-          const currentCreated = this.createdConversationIds.has(this.conversationId);
-          const replacementCreated = this.createdConversationIds.has(conversationId);
-          if (currentCreated || !replacementCreated) continue;
-          this.conversationId = conversationId;
-          this.turnId = turnId;
-        }
-        this.emitTransitions();
+        this.conversationKnown = true;
+        this.turnKnown = true;
+        this.emitTransition("streaming");
         continue;
       }
 
       if (topicId === "conversations" && eventType === "conversation-turn-complete") {
         const conversationId = chatGptNetworkString(payload.conversation_id);
-        if (conversationId) this.completedConversationIds.add(conversationId);
-        this.emitTransitions();
+        if (!conversationId) continue;
+        this.conversationKnown = true;
+        this.completed = true;
+        this.emitTransition("completed");
       }
     }
   }
 
-  private emitTransitions(): void {
-    const ownedConversationCreated = this.conversationId !== undefined
-      && this.createdConversationIds.has(this.conversationId);
-    if (ownedConversationCreated && !this.createdTransitionEmitted) {
+  private emitTransition(transition: ChatGptNetworkTurnTransition): void {
+    if (transition === "created" && !this.createdTransitionEmitted) {
       this.createdTransitionEmitted = true;
       this.onTransition?.("created");
+      return;
     }
-    if (ownedConversationCreated && this.turnId !== undefined && !this.streamingTransitionEmitted) {
+    if (transition === "streaming" && !this.streamingTransitionEmitted) {
       this.streamingTransitionEmitted = true;
       this.onTransition?.("streaming");
+      return;
     }
-    if (this.snapshot().completed && !this.completedTransitionEmitted) {
+    if (transition === "completed" && !this.completedTransitionEmitted) {
       this.completedTransitionEmitted = true;
       this.onTransition?.("completed");
     }
@@ -335,12 +327,9 @@ export class ChatGptNetworkTurnTracker {
   snapshot(): ChatGptNetworkTurnState {
     return {
       armed: this.armed,
-      conversationKnown: this.conversationId !== undefined,
-      turnKnown: this.turnId !== undefined,
-      completed: this.turnId !== undefined
-        && this.conversationId !== undefined
-        && this.createdConversationIds.has(this.conversationId)
-        && this.completedConversationIds.has(this.conversationId),
+      conversationKnown: this.conversationKnown,
+      turnKnown: this.turnKnown,
+      completed: this.completed,
     };
   }
 }
@@ -1220,8 +1209,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT network lifecycle observer detached before submission was accepted");
       }
       const networkState = networkObserver.snapshot();
-      if (networkState.turnKnown) return "network_turn";
-      if (networkState.conversationKnown) return "network_conversation";
+      if (networkState.turnKnown || networkState.completed) return "network_turn";
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
   }

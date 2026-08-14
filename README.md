@@ -121,21 +121,22 @@ modes use the same bounded active bootstrap and retrieve older context lazily. D
 uses the same frozen lazy snapshot without projecting the recent working set inline.
 
 Browser-turn lifecycle comes from ChatGPT's page-scoped WebSocket traffic, not from response UI. The
-worker attaches its network observer before Send and treats `conversation-created`,
-`conversation-turn-stream`, and `conversation-turn-complete` as order-independent evidence: raw turn
-stream frames may arrive before the conversation-created frame. The stream event carries both
-`conversation_id` and `turn_id` and anchors ownership; creation confirms that conversation, and only a
-matching completion normally terminates it. Response DOM, Stop/Copy controls, and React remounts do
-not normally decide whether a turn is running or finished.
+worker attaches its network observer before Send and does not interpret
+`conversation-created`/`conversation-turn-stream`/`conversation-turn-complete` arrival order as a
+protocol state machine. Creation and stream frames are useful progress/diagnostic signals, but they do
+not gate terminal lifecycle. A valid `conversation-turn-complete` observed after the tracker is armed
+is the authoritative terminal signal even when the server reports `conversation-created` later.
+Response DOM, Stop/Copy controls, and React remounts do not normally decide whether a turn is running
+or finished.
 
 Rendering is intentionally hybrid rather than a ChatGPT-WS text passthrough. WebSocket traffic owns
-lifecycle/correlation, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
+terminal lifecycle, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
 local bridge encodes those deltas as Responses SSE back to Codex. Markdown inside ChatGPT's
 `[data-streaming-response-status]` container is treated as intermediate commentary; structurally
 complete, byte-stable top-level answer blocks stream incrementally for both tool-capable and read-only
 turns, then terminal completion flushes the remaining tail. After a normal matching network completion,
-one ordinary poll lets the final React render commit. If CDP disconnects after the turn was already
-correlated, the same surface and tracker are reattached; only that proven observer-gap case may use a
+one ordinary poll lets the final React render commit. If CDP disconnects after stream progress was
+already observed, the same surface and tracker are reattached; only that proven observer-gap case may use a
 guarded stable-DOM recovery when the terminal WebSocket frame was missed. Initial observer attachment
 still fails closed before Send, and DOM is never a general completion fallback.
 

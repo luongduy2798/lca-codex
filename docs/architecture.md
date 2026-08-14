@@ -40,21 +40,21 @@ current Codex task.
 ### Browser response transport
 
 The ChatGPT-to-Codex return path is deliberately hybrid. ChatGPT WebSocket traffic is used only for
-page-scoped lifecycle and correlation; it is not the text transport. The worker separately polls the
+page-scoped lifecycle signals; it is not the text transport. The worker separately polls the
 public assistant DOM for visible reasoning/commentary and semantic Markdown, then the Responses bridge
 encodes those append-only deltas as SSE/JSON for Codex. In compact form:
 
 ```text
-ChatGPT WebSocket ── lifecycle / conversation + turn correlation ──┐
-                                                                  ├─ browser worker ── Responses SSE/JSON ──▶ Codex
-ChatGPT DOM polling ── visible trace + semantic Markdown ──────────┘
+ChatGPT WebSocket ── lifecycle signals / terminal completion ──┐
+                                                               ├─ browser worker ── Responses SSE/JSON ──▶ Codex
+ChatGPT DOM polling ── visible trace + semantic Markdown ───────┘
 ```
 
 The three relevant network event types are `conversation-created`, `conversation-turn-stream`, and
-`conversation-turn-complete`, but their raw arrival order is not a protocol state machine. In live
-traffic a stream frame can arrive before the creation frame. The tracker therefore stores independent
-evidence, uses the stream frame's `conversation_id + turn_id` as the strongest ownership signal, and
-normalizes Activity milestones only after the owned conversation has enough evidence.
+`conversation-turn-complete`, but their raw arrival order is not a protocol state machine. Creation and
+stream frames are observational progress signals only; they do not gate lifecycle completion. Once the
+tracker is armed for the Send, a valid `conversation-turn-complete` frame is the terminal authority even
+if `conversation-created` is delivered later.
 
 The reversible Codex integration deliberately installs a Web-compatibility profile:
 `multi_agent = true` preserves routed subagent turns, `multi_agent_v2 = false` keeps their payloads
@@ -126,7 +126,7 @@ flowchart TD
         direction TB
         S08["<b>STEP 08 · Prepare task-bound browser surface</b><br/><b>Owner:</b> Electron tab / browser worker<br/><b>Action:</b> lease tab, attach prompt/images<br/><b>Critical:</b> attach CDP WebSocket observer BEFORE Send<br/><b>Receive:</b> armed network tracker"]:::card
         S09["<b>STEP 09 · Submit prompt to ChatGPT Web</b><br/><b>Route:</b> browser worker → ChatGPT Web<br/><b>Send:</b> text, images[], selected model/reasoning mode<br/><b>Receive:</b> page-scoped lifecycle frames<br/><b>Ordering:</b> stream and created may arrive in either order"]:::card
-        S10["<b>STEP 10 · Correlate the submitted turn</b><br/><b>Route:</b> ChatGPT Web → browser worker<br/><b>Stream evidence:</b> conversation_id + turn_id establishes ownership<br/><b>Created evidence:</b> confirms that owned conversation<br/><b>Rule:</b> submission is accepted only after correlated network evidence"]:::card
+        S10["<b>STEP 10 · Observe the submitted turn</b><br/><b>Route:</b> ChatGPT Web → browser worker<br/><b>Progress:</b> stream/created may arrive in any order<br/><b>Terminal:</b> conversation-turn-complete is authoritative<br/><b>Rule:</b> created is never required to advance lifecycle"]:::card
         S11["<b>STEP 11 · Stream visible model progress</b><br/><b>Route:</b> browser worker → adapter<br/><b>Receive:</b> reasoning summary, commentary, Markdown deltas<br/><b>Callbacks:</b> onReasoningSummary, onCommentary, onTextDelta"]:::card
         Q11{"<b>Does this generation need connector access?</b>"}:::decision
         D11["<b>DIRECT PATH · No connector call</b><br/><b>Result:</b> ChatGPT answers from active_context only<br/><b>Important:</b> turn_token is never bound<br/><b>Next:</b> wait for authoritative network completion"]:::success
@@ -230,7 +230,7 @@ flowchart TD
     subgraph PG["Phase G · Authoritative completion and Responses encoding"]
         direction TB
         Q24{"<b>How does the browser turn terminate?</b>"}:::decision
-        S24["<b>STEP 24 · Resolve terminal lifecycle</b><br/><b>Normal:</b> matching conversation-turn-complete for the owned turn<br/><b>Gap recovery:</b> only after a known CDP observer gap + correlated turn + stable terminal DOM evidence<br/><b>Rule:</b> DOM is never a general completion source"]:::card
+        S24["<b>STEP 24 · Resolve terminal lifecycle</b><br/><b>Normal:</b> conversation-turn-complete observed after arm<br/><b>Gap recovery:</b> only after a known CDP observer gap + prior stream progress + stable terminal DOM evidence<br/><b>Rule:</b> DOM is never a general completion source"]:::card
         S25["<b>STEP 25 · Flush final browser outcome</b><br/><b>Owner:</b> browser worker / adapter<br/><b>During generation:</b> stable top-level Markdown blocks may already be streamed<br/><b>Terminal:</b> one normal React poll, then flush the remaining mutable Markdown tail"]:::card
         S26["<b>STEP 26 · Revoke turn capability</b><br/><b>Route:</b> adapter → turn broker<br/><b>Action:</b> retire turn_token + binding_id<br/><b>Result:</b> reject later or still-pending connector use"]:::card
         S27["<b>STEP 27 · Encode final Responses result</b><br/><b>Route:</b> adapter → daemon → Codex<br/><b>If stream=true:</b> SSE reasoning/text/output_item events,<br/>then response.completed with output + usage<br/><b>If stream=false:</b> completed JSON Responses object"]:::success
@@ -256,10 +256,10 @@ approval policy attached to the active turn. When Codex posts the tool result ba
 browser response resumes; LCA Codex does not start a second planner or a replacement ChatGPT turn for
 the tool round-trip.
 
-Normal completion is network-authoritative. The browser worker accepts the correlated
-`conversation-turn-complete` evidence for the owned conversation, confirms that latched terminal state
+Normal completion is network-authoritative. The browser worker accepts a valid
+`conversation-turn-complete` observed after the tracker was armed, confirms that latched terminal state
 on the next ordinary poll, flushes the remaining Markdown tail, and finishes the Responses stream.
-A second terminal source exists only for a proven CDP observer gap: if ownership was already established
+A second terminal source exists only for a proven CDP observer gap: if stream progress was already observed
 but the terminal frame may have been lost while disconnected, recovery requires a visible response,
 terminal action evidence, no Stop control, at least 1.5 seconds of stable activity, and a confirming
 subsequent poll. This narrow recovery does not restore the old DOM-lifecycle model. For a completed
@@ -286,14 +286,12 @@ controls.
 
 Within an open tab, normal generation lifecycle is network-scoped rather than DOM-scoped. Before Send,
 the worker attaches a page CDP WebSocket observer and arms it for the new submission. The tracker does
-not assume `created → stream → complete` arrival order: `conversation-turn-stream` may arrive first and
-is the strongest ownership evidence because it carries both `conversation_id` and `turn_id`.
-`conversation-created` is stored independently and confirms the owned conversation; a completion is
-normal-terminal only when the owned conversation has matching created, stream/turn, and complete
-evidence. Frames seen before arming are ignored, unrelated completions are rejected, and a provisional
-stale stream can be replaced by a later stream only when the replacement conversation has matching
-creation evidence. Submission acceptance likewise requires correlated network conversation/turn
-evidence.
+not infer a state machine from `conversation-created` and `conversation-turn-stream`; either can be
+delivered before or after the other, and creation can be reported after terminal completion. Those
+frames are retained only as progress/diagnostic evidence. The authoritative terminal signal is a valid
+`conversation-turn-complete` observed after arming, and it does not wait for matching creation or stream
+evidence. Frames seen before arming are ignored. Submission acceptance may proceed on stream evidence or
+on completion itself when completion is the first usable network evidence.
 
 The public ChatGPT DOM is deliberately not the normal liveness/completion authority. Assistant nodes
 may be removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or
@@ -306,10 +304,10 @@ confirmation are also DOM-derived; Stop is pressed only for an explicit abort.
 
 The network observer is required infrastructure, not optional telemetry. Initial attachment must
 succeed before Send. If the launcher-owned CDP transport drops, the worker reconnects to the same
-surface without replaying the ChatGPT generation, keeps the existing correlation tracker, marks that a
+surface without replaying the ChatGPT generation, keeps the existing network tracker, marks that a
 network-observer gap occurred, and reattaches a fresh CDP session. A failed reattachment is terminal.
-Normally, matching network completion is latched across the next poll so React can commit its final
-DOM tail. Only when a known observer gap occurred and the turn was already correlated may the guarded
+Normally, network completion is latched across the next poll so React can commit its final DOM tail.
+Only when a known observer gap occurred and stream progress was already observed may the guarded
 `network_gap_dom_recovery` path resolve a missed terminal frame from stable terminal DOM evidence; this
 requires no visible Stop control, a visible response/action footer, 1.5 seconds of unchanged activity,
 and confirmation on another poll. Activity logs expose normalized one-shot `created`, `streaming`, and
