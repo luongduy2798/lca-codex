@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.3] - Released
+## [1.0.4] - Released
 
 ### Fixed
 
