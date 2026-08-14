@@ -126,6 +126,10 @@ export interface RuntimeStatus {
     healthy: boolean;
     acceptingTurns: boolean | null;
   };
+  broker: {
+    path: string;
+    ready: boolean;
+  } | null;
   tunnel: {
     pid: number | null;
     state: string | null;

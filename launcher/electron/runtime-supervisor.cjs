@@ -419,6 +419,7 @@ class RuntimeSupervisor {
         mode: null,
         detail: errorMessage(error),
         daemon: { pid: null, healthy: false, acceptingTurns: null },
+        broker: null,
         tunnel: null,
         port: { host: "127.0.0.1", port: null, occupied: false, identity: "none" },
       };
@@ -435,6 +436,7 @@ class RuntimeSupervisor {
         mode: config?.mode ?? null,
         detail: errorMessage(error),
         daemon: { pid: null, healthy: false, acceptingTurns: null },
+        broker: config ? { path: config.brokerSocketPath, ready: false } : null,
         tunnel: { pid: null, state: null, ready: false },
         port: {
           host: config?.host ?? "127.0.0.1",
@@ -461,6 +463,7 @@ class RuntimeSupervisor {
           healthy: false,
           acceptingTurns: null,
         },
+        broker: null,
         tunnel: stateTunnelRunning
           ? { pid: ownershipState.tunnelPid, state: "unknown", ready: false }
           : null,
@@ -526,9 +529,11 @@ class RuntimeSupervisor {
         lifecycle = "stale";
         detail = "Previous LCA Codex runtime detected";
       } else if (currentDaemonPid || daemonMatchesConfig) {
+        const brokerReady = health?.broker_ready === true;
         const daemonReady = daemonMatchesConfig
           && health?.status === "ok"
-          && health?.accepting_turns !== false;
+          && health?.accepting_turns === true
+          && brokerReady;
         const tunnelReady = tunnelHealth?.ready === true;
         lifecycle = daemonReady && tunnelReady ? "ready" : "degraded";
         if (lifecycle === "degraded") {
@@ -555,6 +560,10 @@ class RuntimeSupervisor {
         pid: daemonPid,
         healthy: daemonMatchesConfig && health?.status === "ok",
         acceptingTurns: typeof health?.accepting_turns === "boolean" ? health.accepting_turns : null,
+      },
+      broker: {
+        path: config.brokerSocketPath,
+        ready: health?.broker_ready === true,
       },
       tunnel: {
         pid: tunnelHealth?.pid ?? null,
@@ -759,7 +768,7 @@ class RuntimeSupervisor {
       && body?.mode === config.mode
       && body?.version === config.releaseVersion
       && (expectedPid === undefined || body?.pid === expectedPid)
-      && (!requireAccepting || body?.accepting_turns === true);
+      && (!requireAccepting || (body?.accepting_turns === true && body?.broker_ready === true));
   }
 
   async waitForProxy(config, timeoutMs = 20_000) {

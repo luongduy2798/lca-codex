@@ -119,7 +119,10 @@ test("closing the launcher page is an immediate terminal turn error", async () =
 });
 
 test("a transient launcher CDP disconnect reattaches the same browser surface instead of replaying the turn", () => {
-  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const workerSource = readFileSync(
+    new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
   expect(workerSource).toContain("const reattachLauncherSurface = async (): Promise<boolean> => {");
   expect(workerSource).toContain("!turnConnection || turnConnection.isConnected()");
   expect(workerSource).toContain("launcherSurfaceId,\n            turn.abortSignal,");

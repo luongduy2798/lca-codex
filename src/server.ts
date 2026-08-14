@@ -428,7 +428,8 @@ export function startServer(
   dependencies: { fetchUpstream?: NativeFetch } = {},
 ): ReturnType<typeof Bun.serve> {
   const startedAt = Date.now();
-  void TurnBroker.forSocket(config.brokerSocketPath).listen().catch(error => {
+  const turnBroker = TurnBroker.forSocket(config.brokerSocketPath);
+  void turnBroker.listen().catch(error => {
     console.error(
       `[lca-codex] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -438,6 +439,8 @@ export function startServer(
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
   const httpTurns = new HttpTurnCounter();
+  const brokerReady = () => turnBroker.isListening();
+  const acceptingTurns = () => !draining && brokerReady();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount(),
@@ -463,7 +466,8 @@ export function startServer(
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: acceptingTurns(),
+          broker_ready: brokerReady(),
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
           ...activity(),
@@ -472,7 +476,7 @@ export function startServer(
       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         draining = url.pathname === "/admin/drain";
-        return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
+        return Response.json({ status: "ok", accepting_turns: acceptingTurns(), broker_ready: brokerReady(), ...activity() });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-browser-turns") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });

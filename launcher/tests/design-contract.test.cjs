@@ -179,13 +179,15 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*0;/);
 });
 
-test("runtime details omit mode switching and always expose tunnel state", () => {
+test("runtime details omit mode switching and expose broker and tunnel state", () => {
   assert.doesNotMatch(appSource, /runtime\.mode|runtime-mode-suggestion|switchToCodexMode|chatgptMode/);
   assert.match(i18nSource, /mcpTitle: "MCP"/);
   assert.match(i18nSource, /configureMcp: "Configure MCP"/);
   assert.match(i18nSource, /connect: "Configure MCP"/);
   assert.match(i18nSource, /reconnect: "Apply MCP settings"/);
   assert.match(styles, /\.runtime-detail-row\.has-description\s*\{/);
+  assert.match(i18nSource, /runtimeBroker: "Turn broker"/);
+  assert.match(appSource, /runtime\.broker\.path[\s\S]*?runtime\.broker\.ready \? copy\.runtimeReady : copy\.needsAttention/);
   assert.match(appSource, /runtime\.tunnel\?\.ready[\s\S]*?runtime\.tunnel\.pid \? `PID \$\{runtime\.tunnel\.pid\} · ` : ""[\s\S]*?copy\.runtimeReady/);
   assert.match(appSource, /runtime\.tunnel\?\.state && runtime\.tunnel\.state !== "stopped"/);
   assert.doesNotMatch(appSource, /value=\{runtime\.tunnel\?\.pid[\s\S]*?: copy\.runtimeStopped\}/);

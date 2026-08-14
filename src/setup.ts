@@ -141,7 +141,8 @@ export function setupProxyIsReady(
     && health.status === "ok"
     && health.mode === config.mode
     && health.version === config.releaseVersion
-    && health.accepting_turns === true;
+    && health.accepting_turns === true
+    && health.broker_ready === true;
 }
 
 async function waitForProxy(config: AppConfig, timeoutMs = 10_000): Promise<void> {

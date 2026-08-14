@@ -7,7 +7,7 @@ import { get_encoding, type Tiktoken } from "tiktoken";
  * of the same length. Count with the tokenizer used by the GPT-5 generation instead.
  */
 
-const TOKENIZER_CHUNK_CHARS = 4_096;
+const TOKENIZER_CHUNK_CHARS = 1_024;
 let tokenizer: Tiktoken | undefined;
 
 function chatGptTokenizer(): Tiktoken {
@@ -17,8 +17,9 @@ function chatGptTokenizer(): Tiktoken {
 
 /**
  * Count ordinary text conservatively without handing pathological multi-megabyte runs to one
- * tokenizer call. Independent chunks can only lose cross-boundary merges, so their sum may
- * over-count slightly but cannot under-count because of a missed boundary token.
+ * tokenizer call. Smaller chunks also keep repeated-token BPE work bounded on slower CI hosts.
+ * Independent chunks can only lose cross-boundary merges, so their sum may over-count slightly
+ * but cannot under-count because of a missed boundary token.
  */
 export function estimateTokens(text: string, modelId?: string): number {
   void modelId;

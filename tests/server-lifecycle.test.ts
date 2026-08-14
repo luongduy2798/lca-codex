@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/lca-codex/turn-execution";
@@ -212,6 +212,32 @@ test("the bridge runtime exposes its broker endpoint before any turn registers",
       await Bun.sleep(20);
     }
     expect(message).toContain("turn token is invalid");
+    expect(await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json()).toMatchObject({
+      accepting_turns: true,
+      broker_ready: true,
+    });
+  } finally {
+    await server.stop(true);
+    await closeTurnBrokers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("health does not advertise turn readiness when the broker endpoint cannot listen", async () => {
+  if (process.platform === "win32") return;
+
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-not-ready-"));
+  const brokerSocketPath = defaultBrokerEndpoint(root);
+  mkdirSync(join(root, "runtime"), { recursive: true });
+  writeFileSync(brokerSocketPath, "not-a-socket");
+  const config = { ...defaultConfig(), port: 0, brokerSocketPath };
+  const server = startServer(config);
+  try {
+    expect(await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).json()).toMatchObject({
+      status: "ok",
+      accepting_turns: false,
+      broker_ready: false,
+    });
   } finally {
     await server.stop(true);
     await closeTurnBrokers();

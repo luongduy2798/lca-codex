@@ -175,6 +175,10 @@ export class TurnBroker {
     await this.start();
   }
 
+  isListening(): boolean {
+    return this.server?.listening === true;
+  }
+
   async register(
     environment: ChatGptTurnEnvironment,
     ttlMs?: number,

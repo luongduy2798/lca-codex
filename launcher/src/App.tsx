@@ -1761,6 +1761,12 @@ function RuntimeServiceSurface({
         <RuntimeDetail label={copy.runtimeEndpoint} value={endpoint} />
         <RuntimeDetail label={copy.runtimeResponses} value={runtime.daemon.pid ? `PID ${runtime.daemon.pid} · ${runtime.daemon.healthy ? copy.healthy : copy.needsAttention}` : copy.runtimeStopped} />
         <RuntimeDetail
+          label={copy.runtimeBroker}
+          value={runtime.broker
+            ? `${runtime.broker.path} · ${runtime.broker.ready ? copy.runtimeReady : copy.needsAttention}`
+            : copy.runtimeStopped}
+        />
+        <RuntimeDetail
           label={copy.runtimeTunnel}
           value={runtime.tunnel?.ready
             ? `${runtime.tunnel.pid ? `PID ${runtime.tunnel.pid} · ` : ""}${copy.runtimeReady}`

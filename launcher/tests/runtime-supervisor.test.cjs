@@ -1002,6 +1002,76 @@ test("runtime observation reports a foreign port without claiming launcher owner
   }
 });
 
+test("runtime observation stays degraded until the turn broker is ready", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-broker-readiness-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.daemon = { pid: process.pid, exitCode: null, signalCode: null };
+  supervisor.readConfig = () => config;
+  supervisor.readState = () => null;
+  supervisor.proxyHealthPayload = async () => ({
+    status: "ok",
+    service: "lca-codex",
+    mode: config.mode,
+    version: config.releaseVersion,
+    pid: process.pid,
+    accepting_turns: true,
+    broker_ready: false,
+  });
+  supervisor.observeTunnelForMonitor = async () => ({
+    pid: process.pid,
+    state: "ready",
+    ready: true,
+    processRunning: true,
+    detail: null,
+  });
+  try {
+    const status = await supervisor.observeRuntime();
+    assert.equal(status.lifecycle, "degraded");
+    assert.equal(status.owner, "current-launcher");
+    assert.deepEqual(status.broker, { path: config.brokerSocketPath, ready: false });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup readiness waits for both accepting turns and broker readiness", async () => {
+  const descriptorPath = path.join(os.tmpdir(), "launcher.json");
+  const config = launcherConfig(descriptorPath);
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: descriptorPath,
+  });
+  const child = { pid: 123_456_789, exitCode: null, signalCode: null };
+  let probes = 0;
+  supervisor.daemon = child;
+  supervisor.proxyHealthPayload = async () => {
+    probes += 1;
+    return {
+      status: "ok",
+      service: "lca-codex",
+      mode: config.mode,
+      version: config.releaseVersion,
+      pid: child.pid,
+      accepting_turns: true,
+      broker_ready: probes > 1,
+    };
+  };
+
+  await supervisor.waitForProxy(config, 1_000);
+  assert.equal(probes, 2);
+});
+
 test("manual start cleans a stale runtime before starting a fresh owned runtime", async () => {
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -1746,6 +1816,7 @@ const server = http.createServer((request, response) => {
       version: config.releaseVersion,
       pid: process.pid,
       accepting_turns: !draining,
+      broker_ready: true,
     }));
     return;
   }
@@ -1845,6 +1916,7 @@ const server = http.createServer((request, response) => {
       version: config.releaseVersion,
       pid: process.pid,
       accepting_turns: !draining,
+      broker_ready: true,
     }));
     return;
   }

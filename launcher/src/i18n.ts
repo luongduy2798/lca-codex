@@ -107,6 +107,7 @@ export const copy = {
   runtimeDetails: "Runtime details",
   runtimeEndpoint: "Responses endpoint",
   runtimeResponses: "Responses service",
+  runtimeBroker: "Turn broker",
   runtimeTunnel: "Tunnel",
   runtimeOwner: "Process owner",
   runtimeBehavior: "Runtime behavior",
