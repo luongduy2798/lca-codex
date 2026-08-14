@@ -131,7 +131,7 @@ test("a transient launcher CDP disconnect reattaches the same browser surface in
   expect(workerSource).toContain("rather than replaying the\n          // ChatGPT turn");
 });
 
-test("browser network lifecycle treats completion as terminal regardless of created/stream ordering", () => {
+test("browser network lifecycle correlates completion regardless of created/stream ordering", () => {
   const transitions: string[] = [];
   const tracker = new ChatGptNetworkTurnTracker(transition => transitions.push(transition));
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
@@ -145,25 +145,48 @@ test("browser network lifecycle treats completion as terminal regardless of crea
   }));
   expect(tracker.snapshot()).toEqual({
     armed: false,
+    submissionKnown: false,
     conversationKnown: false,
     turnKnown: false,
     completed: false,
   });
 
   tracker.arm();
-  tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
-    type: "heartbeat",
-    turn_id: "turn-1",
-    conversation_id: "conversation-1",
-  }));
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
     conversation_id: "conversation-1",
   }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
+    submissionKnown: true,
+    conversationKnown: false,
+    turnKnown: false,
+    completed: false,
+  });
+
+  tracker.observeWebSocketPayload(frame("conversation-turn-turn-1", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "turn-1",
+    conversation_id: "conversation-1",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    submissionKnown: true,
+    conversationKnown: false,
+    turnKnown: false,
+    completed: false,
+  });
+
+  tracker.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/conversation-1/stream_status",
+  );
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    submissionKnown: true,
     conversationKnown: true,
     turnKnown: true,
-    completed: true,
+    completed: false,
   });
 
   tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
@@ -171,27 +194,101 @@ test("browser network lifecycle treats completion as terminal regardless of crea
   }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
+    submissionKnown: true,
     conversationKnown: true,
     turnKnown: true,
     completed: true,
   });
 
-  const completionBeforeStream = new ChatGptNetworkTurnTracker();
-  completionBeforeStream.arm();
-  completionBeforeStream.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
-    conversation_id: "conversation-without-stream",
+  const exactCompletionBeforeStream = new ChatGptNetworkTurnTracker();
+  exactCompletionBeforeStream.arm();
+  exactCompletionBeforeStream.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  exactCompletionBeforeStream.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "conversation-exact",
+    turn_id: "turn-exact",
   }));
-  expect(completionBeforeStream.snapshot()).toEqual({
+  exactCompletionBeforeStream.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/conversation-exact/stream_status",
+  );
+  exactCompletionBeforeStream.observeWebSocketPayload(frame("conversation-turn-turn-exact", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "turn-exact",
+    conversation_id: "conversation-exact",
+  }));
+  expect(exactCompletionBeforeStream.snapshot()).toEqual({
     armed: true,
+    submissionKnown: true,
+    conversationKnown: true,
+    turnKnown: true,
+    completed: true,
+  });
+
+  expect(transitions).toEqual(["streaming", "created", "completed"]);
+});
+
+test("page-scoped conversation ownership isolates Instant turns without turn-stream frames", () => {
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+  const first = new ChatGptNetworkTurnTracker();
+  const second = new ChatGptNetworkTurnTracker();
+  const trackers = [first, second];
+
+  trackers.forEach(tracker => {
+    tracker.arm();
+    tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  });
+
+  for (const tracker of trackers) {
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+      conversation_id: "conversation-first",
+    }));
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+      conversation_id: "conversation-first",
+    }));
+  }
+  second.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/conversation-second/stream_status",
+  );
+  expect(first.snapshot().completed).toBe(false);
+  expect(second.snapshot().completed).toBe(false);
+
+  first.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/conversation-first/stream_status?source=web",
+  );
+  expect(first.snapshot()).toEqual({
+    armed: true,
+    submissionKnown: true,
     conversationKnown: true,
     turnKnown: false,
     completed: true,
   });
+  expect(second.snapshot().completed).toBe(false);
 
-  expect(transitions).toEqual(["streaming", "completed", "created"]);
+  for (const tracker of trackers) {
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+      conversation_id: "conversation-second",
+    }));
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+      conversation_id: "conversation-second",
+    }));
+  }
+  expect(first.snapshot().completed).toBe(true);
+  expect(second.snapshot()).toEqual({
+    armed: true,
+    submissionKnown: true,
+    conversationKnown: true,
+    turnKnown: false,
+    completed: true,
+  });
 });
 
-test("browser network lifecycle does not require conversation-created before completion", () => {
+test("browser network lifecycle ignores unrelated conversation evidence", () => {
   const tracker = new ChatGptNetworkTurnTracker();
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
     type: "message",
@@ -200,37 +297,121 @@ test("browser network lifecycle does not require conversation-created before com
   }]);
 
   tracker.arm();
-  tracker.observeWebSocketPayload(frame("conversation-turn-old-turn", "conversation-turn-stream", {
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  tracker.observeWebSocketPayload(frame("conversation-turn-other-turn", "conversation-turn-stream", {
     type: "heartbeat",
-    turn_id: "old-turn",
-    conversation_id: "old-conversation",
+    turn_id: "other-turn",
+    conversation_id: "other-conversation",
   }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "other-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "other-conversation",
+  }));
+  tracker.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/owned-conversation/stream_status",
+  );
   expect(tracker.snapshot()).toEqual({
     armed: true,
+    submissionKnown: true,
     conversationKnown: true,
-    turnKnown: true,
+    turnKnown: false,
     completed: false,
   });
 
+  tracker.observeWebSocketPayload(frame("conversation-turn-owned-turn", "conversation-turn-stream", {
+    type: "heartbeat",
+    turn_id: "owned-turn",
+    conversation_id: "owned-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "owned-conversation",
+  }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
-    conversation_id: "fresh-conversation",
+    conversation_id: "owned-conversation",
   }));
   expect(tracker.snapshot()).toEqual({
     armed: true,
+    submissionKnown: true,
     conversationKnown: true,
     turnKnown: true,
     completed: true,
+  });
+});
+
+test("browser network lifecycle rejects a completion for another turn in the owned conversation", () => {
+  const tracker = new ChatGptNetworkTurnTracker();
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+
+  tracker.arm();
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  tracker.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/owned-conversation/stream_status",
+  );
+  tracker.observeWebSocketPayload(frame("conversation-turn-owned-turn", "conversation-turn-stream", {
+    turn_id: "owned-turn",
+    conversation_id: "owned-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "owned-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "owned-conversation",
+    turn_id: "other-turn",
+  }));
+  expect(tracker.snapshot().completed).toBe(false);
+
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "owned-conversation",
+    turn_id: "owned-turn",
+  }));
+  expect(tracker.snapshot().completed).toBe(true);
+});
+
+test("five browser turn trackers keep terminal state isolated", () => {
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+  const trackers = Array.from({ length: 5 }, () => new ChatGptNetworkTurnTracker());
+  trackers.forEach((tracker, index) => {
+    const conversationId = `conversation-${index}`;
+    const turnId = `turn-${index}`;
+    tracker.arm();
+    tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+    tracker.observePageRequest(
+      "GET",
+      `https://chatgpt.com/backend-api/conversation/${conversationId}/stream_status`,
+    );
+    tracker.observeWebSocketPayload(frame(`conversation-turn-${turnId}`, "conversation-turn-stream", {
+      turn_id: turnId,
+      conversation_id: conversationId,
+    }));
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
+      conversation_id: conversationId,
+    }));
   });
 
-  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
-    conversation_id: "fresh-conversation",
+  trackers[2]!.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "conversation-2",
   }));
-  expect(tracker.snapshot()).toEqual({
-    armed: true,
-    conversationKnown: true,
-    turnKnown: true,
-    completed: true,
-  });
+  expect(trackers.map(tracker => tracker.snapshot().completed)).toEqual([false, false, true, false, false]);
+
+  for (const [index, tracker] of trackers.entries()) {
+    if (index === 2) continue;
+    tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+      conversation_id: "conversation-2",
+    }));
+  }
+  expect(trackers.map(tracker => tracker.snapshot().completed)).toEqual([false, false, true, false, false]);
 });
 
 test("browser network lifecycle is mandatory before Send and after launcher reattachment", () => {
@@ -241,6 +422,11 @@ test("browser network lifecycle is mandatory before Send and after launcher reat
   expect(attach).toBeGreaterThan(-1);
   expect(arm).toBeGreaterThan(attach);
   expect(send).toBeGreaterThan(arm);
+  expect(workerSource).toContain("page.context().newCDPSession(page)");
+  expect(workerSource).toContain('session.on("Network.requestWillBeSent"');
+  expect(workerSource).toContain('url.pathname === "/backend-api/f/conversation"');
+  expect(workerSource).toContain("stream_status$/.exec(url.pathname)");
+  expect(workerSource).toContain("this.tracker.arm()");
   expect(workerSource.match(/await networkObserver\.attach\(page\);/g)?.length).toBe(2);
   expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_reattached"');
   expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_unavailable"');
@@ -1012,6 +1198,7 @@ test("terminal resolution finalizes the DOM-backed Markdown serializer", () => {
   expect(workerSource).not.toContain("chatGptResponseHasStructuredMarkdown");
   expect(workerSource).not.toContain("markdownBuffer.flush()");
   expect(workerSource).toContain("const markdownBuffer = new ChatGptMarkdownBuffer(");
+  expect(workerSource).toContain("ChatGPT completed without a renderable final answer");
 });
 
 test("network completion remains authoritative when the assistant DOM is absent on the terminal poll", () => {
@@ -1283,7 +1470,9 @@ test("browser submission acceptance uses only network lifecycle evidence", () =>
   const start = workerSource.indexOf("private async waitForSubmissionAccepted(");
   const end = workerSource.indexOf("private async attachedPromptText", start);
   const submissionSource = workerSource.slice(start, end);
-  expect(submissionSource).toContain('if (networkState.turnKnown || networkState.completed) return "network_turn";');
+  expect(submissionSource).toContain(
+    'if (networkState.submissionKnown || networkState.turnKnown || networkState.completed) return "network_turn";',
+  );
   expect(submissionSource).not.toContain('return "network_conversation";');
   expect(submissionSource).toContain("networkObserver.isAttached()");
   expect(submissionSource).not.toContain("userTurnCount");

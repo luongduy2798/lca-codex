@@ -8,7 +8,7 @@ import { buildResponseJSON } from "../src/bridge";
 import { chatGptImageFilePayloads, chatGptPromptFilePayloads } from "../src/adapters/lca-codex/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/lca-codex/browser-worker";
 import { LcaCodexAdapterError } from "../src/adapters/lca-codex/adapter-error";
-import { waitForCodexToolGatewayRoutes } from "../src/adapters/lca-codex/codex-tool-health";
+import { declaredCodexToolHealthRoutes, waitForCodexToolGatewayRoutes } from "../src/adapters/lca-codex/codex-tool-health";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
 import {
   createLcaCodexAdapter,
@@ -145,6 +145,51 @@ function gatewayRegistryResult(availability: Record<string, boolean>): BrokerToo
 }
 
 describe("LCA Codex ChatGPT Web bridge v3", () => {
+  test("recovers the Codex exec gateway nested in an additional_tools namespace", () => {
+    const gatewayDescription = [
+      "Run JavaScript code to orchestrate tools.",
+      "### `exec_command`",
+      "### `write_stdin`",
+      "### `apply_patch`",
+      "### `view_image`",
+    ].join("\n");
+    const request = parseRequest({
+      model: "lca-codex",
+      stream: true,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{
+            type: "namespace",
+            name: "functions",
+            description: "",
+            tools: [
+              { type: "custom", name: "exec", description: gatewayDescription, format: { type: "text" } },
+              { type: "function", name: "wait", description: "Wait for exec", parameters: { type: "object" }, strict: false },
+            ],
+          }],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the project" }] },
+      ],
+    });
+
+    const gateway = request.context.tools?.find(tool => tool.name === "exec");
+    expect(gateway).toMatchObject({ name: "exec", freeform: true, description: gatewayDescription });
+    expect(gateway?.namespace).toBeUndefined();
+    expect(request.context.tools?.find(tool => tool.name === "wait")).toMatchObject({ namespace: "functions" });
+
+    const health = declaredCodexToolHealthRoutes({
+      cwd: tempRoot,
+      roots: [tempRoot],
+      writableRoots: [],
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      tools: request.context.tools ?? [],
+    });
+    expect(health.gatewayAdvertised).toBe(true);
+    expect([...health.routes]).toEqual(expect.arrayContaining(["exec_command", "write_stdin", "apply_patch", "view_image"]));
+  });
+
   test("nested tool readiness retries a transiently incomplete exec registry", async () => {
     const inspections = [
       gatewayRegistryResult({ apply_patch: false }),

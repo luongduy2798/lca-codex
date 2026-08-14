@@ -39,22 +39,24 @@ current Codex task.
 
 ### Browser response transport
 
-The ChatGPT-to-Codex return path is deliberately hybrid. ChatGPT WebSocket traffic is used only for
-page-scoped lifecycle signals; it is not the text transport. The worker separately polls the
+The ChatGPT-to-Codex return path is deliberately hybrid. Page-scoped ChatGPT HTTP requests establish
+submission and conversation ownership, while matching WebSocket traffic supplies lifecycle signals;
+neither is the text transport. The worker separately polls the
 public assistant DOM for visible reasoning/commentary and semantic Markdown, then the Responses bridge
 encodes those append-only deltas as SSE/JSON for Codex. In compact form:
 
 ```text
-ChatGPT WebSocket ── lifecycle signals / terminal completion ──┐
-                                                               ├─ browser worker ── Responses SSE/JSON ──▶ Codex
+ChatGPT page HTTP ── submission / conversation ownership ──────┐
+ChatGPT WebSocket ── lifecycle / terminal completion ──────────┼─ browser worker ── Responses SSE/JSON ──▶ Codex
 ChatGPT DOM polling ── visible trace + semantic Markdown ───────┘
 ```
 
-The three relevant network event types are `conversation-created`, `conversation-turn-stream`, and
-`conversation-turn-complete`, but their raw arrival order is not a protocol state machine. Creation and
-stream frames are observational progress signals only; they do not gate lifecycle completion. Once the
-tracker is armed for the Send, a valid `conversation-turn-complete` frame is the terminal authority even
-if `conversation-created` is delivered later.
+The page's conversation POST proves that its submission left the composer. The same page's
+`stream_status` request supplies the exact conversation ID, including for Instant mode where no
+`conversation-turn-stream` event is emitted. WebSocket `conversation-created`,
+`conversation-turn-stream`, and `conversation-turn-complete` evidence is buffered until it matches that
+page-owned ID. A completion for an unrelated conversation is ignored. A completion carrying a turn ID
+must match the exact owned turn; matching conversation creation never overrides a conflicting turn ID.
 
 The reversible Codex integration deliberately installs a Web-compatibility profile:
 `multi_agent = true` preserves routed subagent turns, `multi_agent_v2 = false` keeps their payloads
@@ -124,9 +126,9 @@ flowchart TD
 
     subgraph PC["Phase C · Start one Temporary Chat generation"]
         direction TB
-        S08["<b>STEP 08 · Prepare task-bound browser surface</b><br/><b>Owner:</b> Electron tab / browser worker<br/><b>Action:</b> lease tab, attach prompt/images<br/><b>Critical:</b> attach CDP WebSocket observer BEFORE Send<br/><b>Receive:</b> armed network tracker"]:::card
-        S09["<b>STEP 09 · Submit prompt to ChatGPT Web</b><br/><b>Route:</b> browser worker → ChatGPT Web<br/><b>Send:</b> text, images[], selected model/reasoning mode<br/><b>Receive:</b> page-scoped lifecycle frames<br/><b>Ordering:</b> stream and created may arrive in either order"]:::card
-        S10["<b>STEP 10 · Observe the submitted turn</b><br/><b>Route:</b> ChatGPT Web → browser worker<br/><b>Progress:</b> stream/created may arrive in any order<br/><b>Terminal:</b> conversation-turn-complete is authoritative<br/><b>Rule:</b> created is never required to advance lifecycle"]:::card
+        S08["<b>STEP 08 · Prepare task-bound browser surface</b><br/><b>Owner:</b> Electron tab / browser worker<br/><b>Action:</b> lease tab, attach prompt/images<br/><b>Critical:</b> attach page CDP network observer BEFORE Send<br/><b>Receive:</b> armed network tracker"]:::card
+        S09["<b>STEP 09 · Submit prompt to ChatGPT Web</b><br/><b>Route:</b> browser worker → ChatGPT Web<br/><b>Send:</b> text, images[], selected model/reasoning mode<br/><b>Receive:</b> page submission + exact conversation ownership"]:::card
+        S10["<b>STEP 10 · Observe the submitted turn</b><br/><b>Route:</b> ChatGPT Web → browser worker<br/><b>Progress:</b> matching WS stream/created evidence<br/><b>Terminal:</b> matching conversation-turn-complete<br/><b>Rule:</b> events for other tabs remain unowned"]:::card
         S11["<b>STEP 11 · Stream visible model progress</b><br/><b>Route:</b> browser worker → adapter<br/><b>Receive:</b> reasoning summary, commentary, Markdown deltas<br/><b>Callbacks:</b> onReasoningSummary, onCommentary, onTextDelta"]:::card
         Q11{"<b>Does this generation need connector access?</b>"}:::decision
         D11["<b>DIRECT PATH · No connector call</b><br/><b>Result:</b> ChatGPT answers from active_context only<br/><b>Important:</b> turn_token is never bound<br/><b>Next:</b> wait for authoritative network completion"]:::success
@@ -285,13 +287,14 @@ turn fails explicitly; the cap avoids excessive parallel traffic that could trig
 controls.
 
 Within an open tab, normal generation lifecycle is network-scoped rather than DOM-scoped. Before Send,
-the worker attaches a page CDP WebSocket observer and arms it for the new submission. The tracker does
-not infer a state machine from `conversation-created` and `conversation-turn-stream`; either can be
-delivered before or after the other, and creation can be reported after terminal completion. Those
-frames are retained only as progress/diagnostic evidence. The authoritative terminal signal is a valid
-`conversation-turn-complete` observed after arming, and it does not wait for matching creation or stream
-evidence. Frames seen before arming are ignored. Submission acceptance may proceed on stream evidence or
-on completion itself when completion is the first usable network evidence.
+the worker attaches a page CDP network observer and arms it for the new submission. The exact page's
+conversation POST proves submission, and its subsequent `stream_status` request fixes the conversation
+owner. This page-local binding is required because WebSocket lifecycle traffic can include other tabs,
+and Instant mode may emit creation/completion without a turn-stream frame. Creation, stream, and
+completion evidence is buffered until ownership is known. Completion is terminal only when its
+conversation matches the page owner and either an ID-less completion has matching creation evidence or
+the completion carries the exact owned turn ID. A conflicting turn ID is always ignored. Requests and
+frames seen before arming are ignored.
 
 The public ChatGPT DOM is deliberately not the normal liveness/completion authority. Assistant nodes
 may be removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or
@@ -299,7 +302,8 @@ absent. DOM instead supplies the visible content stream. `responseDomSnapshot` s
 `[data-streaming-response-status]` as intermediate commentary from top-level answer Markdown. The
 Markdown buffer then appends only structurally complete, byte-stable answer blocks, so both tool-capable
 and read-only turns can stream final-answer text to Codex while ChatGPT is still generating. The final
-mutable block remains buffered until terminal resolution. Visible reasoning/commentary and local-tool
+mutable block remains buffered until terminal resolution. A terminal turn with no renderable Markdown
+fails explicitly instead of returning an empty successful response. Visible reasoning/commentary and local-tool
 confirmation are also DOM-derived; Stop is pressed only for an explicit abort.
 
 The network observer is required infrastructure, not optional telemetry. Initial attachment must

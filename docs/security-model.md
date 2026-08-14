@@ -80,7 +80,9 @@ transport, or returns a fabricated success.
 
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
 outer Codex task owns a fresh Temporary Chat document and an exact launcher surface lease; chats are
-never reused across tasks. Closing a running tab destroys its page and terminates that turn. The
+never reused across tasks. The page-scoped conversation request fixes the exact conversation ID before
+global WebSocket completion evidence can end that turn, so another tab's completion is ignored. Closing
+a running tab destroys its page and terminates that turn. The
 five-tab limit bounds parallel account traffic. Tool calls remain in the same ChatGPT response. The
 bounded local continuation cache is private, expires, and exists only to implement Codex
 `previous_response_id` replay. LCA Codex context compaction runs as a dedicated browser checkpoint

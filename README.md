@@ -120,17 +120,18 @@ longer changes how much conversation history is copied into the browser prompt: 
 modes use the same bounded active bootstrap and retrieve older context lazily. Dedicated compaction
 uses the same frozen lazy snapshot without projecting the recent working set inline.
 
-Browser-turn lifecycle comes from ChatGPT's page-scoped WebSocket traffic, not from response UI. The
-worker attaches its network observer before Send and does not interpret
-`conversation-created`/`conversation-turn-stream`/`conversation-turn-complete` arrival order as a
-protocol state machine. Creation and stream frames are useful progress/diagnostic signals, but they do
-not gate terminal lifecycle. A valid `conversation-turn-complete` observed after the tracker is armed
-is the authoritative terminal signal even when the server reports `conversation-created` later.
+Browser-turn lifecycle comes from ChatGPT's page-scoped network traffic, not from response UI. The
+worker attaches its network observer before Send. The conversation request proves submission, and that
+same tab's `stream_status` request supplies its exact conversation ID even in Instant mode, which emits
+no `conversation-turn-stream` frame. WebSocket creation, stream, and completion evidence is buffered
+until it matches that owned ID. A completion for another tab cannot terminate the turn. If completion
+carries a turn ID, that ID must match the owned turn; a different turn in the same conversation is
+ignored.
 Response DOM, Stop/Copy controls, and React remounts do not normally decide whether a turn is running
 or finished.
 
-Rendering is intentionally hybrid rather than a ChatGPT-WS text passthrough. WebSocket traffic owns
-terminal lifecycle, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
+Rendering is intentionally hybrid rather than a ChatGPT-WS text passthrough. Page-scoped network
+ownership plus matching WebSocket completion owns terminal lifecycle, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
 local bridge encodes those deltas as Responses SSE back to Codex. Markdown inside ChatGPT's
 `[data-streaming-response-status]` container is treated as intermediate commentary; structurally
 complete, byte-stable top-level answer blocks stream incrementally for both tool-capable and read-only
