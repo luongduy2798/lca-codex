@@ -38,17 +38,10 @@ function runtimeInvocation({ app, sourceRoot, installedRuntimeRoot, args }) {
   };
 }
 
-function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
+function embeddedRuntimeInvocation({ app, sourceRoot, installedRuntimeRoot, args }) {
   if (!Array.isArray(args)) throw new Error("Runtime arguments must be an array");
   if (!app.isPackaged) return sourceRuntimeInvocation(sourceRoot, args);
-  const { runtimeRoot, executable, entrypoint } = packagedRuntimePaths(process.resourcesPath);
-  if (!fs.existsSync(executable)) throw new Error(`Embedded Bun runtime is missing: ${executable}`);
-  if (!fs.existsSync(entrypoint)) throw new Error(`Embedded runtime entrypoint is missing: ${entrypoint}`);
-  return {
-    executable,
-    args: [entrypoint, ...args],
-    cwd: runtimeRoot,
-  };
+  return runtimeInvocation({ app, sourceRoot, installedRuntimeRoot, args });
 }
 
 module.exports = {

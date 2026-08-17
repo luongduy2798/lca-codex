@@ -1140,6 +1140,122 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     });
   });
 
+  test("serializes wrapped ChatGPT code blocks without leaking controls or escaping code", () => {
+    const markdown = chatGptHtmlToMarkdown([
+      '<p><strong>Fix</strong> <code>handleRemoteDeparture()</code> first.</p>',
+      '<pre><div class="code-block"><div class="code-header"><span>TypeScript</span><button>Copy</button></div><div class="code-body"><code class="whitespace-pre language-typescript"><span>this.lastRemoteEndedAt = Date.now();</span>\n<span>this.lastRemoteEndReason = "peer_left";</span></code></div></div></pre>',
+      '<ol><li><p>Keep <strong>bold</strong> and <code>inline_code</code> intact.</p></li></ol>',
+    ].join(""));
+
+    expect(markdown).toBe([
+      '**Fix** `handleRemoteDeparture()` first.',
+      '',
+      '```typescript',
+      'this.lastRemoteEndedAt = Date.now();',
+      'this.lastRemoteEndReason = "peer_left";',
+      '```',
+      '',
+      '1. Keep **bold** and `inline_code` intact.',
+    ].join("\n"));
+    expect(markdown).not.toContain("TypeScript\n\n```typescript");
+    expect(markdown).not.toContain("Copy");
+    expect(markdown).not.toContain("\\=");
+    expect(markdown).not.toContain("peer\\_left");
+    expect(markdown).not.toContain("\\*\\*");
+  });
+
+  test("serializes current ChatGPT CodeMirror code blocks as literal fenced source", () => {
+    const markdown = chatGptHtmlToMarkdown([
+      '<p><strong>Before</strong> <code>inline_code</code>.</p>',
+      '<pre class="overflow-visible! px-0!">',
+      '<div class="relative w-full">',
+      '<div class="code-header"><div>TypeScript</div><button aria-label="Copy"></button></div>',
+      '<div class="cm-editor"><div class="cm-scroller">',
+      '<div class="cm-content" role="textbox" aria-multiline="true" aria-readonly="true" aria-label="Edit code" data-language="typescript">',
+      '<div class="cm-line"><span>const</span> peer_left = false;</div>',
+      '<div class="cm-line">const foo_bar = "hello_world";</div>',
+      '<div class="cm-line"><br></div>',
+      '<div class="cm-line"><span>if</span> (peer_left === false) {</div>',
+      '<div class="cm-line">  console.log("**not bold**", foo_bar);</div>',
+      '<div class="cm-line">}</div>',
+      '</div>',
+      '</div></div>',
+      '</div>',
+      '</pre>',
+      '<p>After <code>peer_left = true</code>.</p>',
+    ].join(""));
+
+    expect(markdown).toBe([
+      '**Before** `inline_code`.',
+      '',
+      '```typescript',
+      'const peer_left = false;',
+      'const foo_bar = "hello_world";',
+      '',
+      'if (peer_left === false) {',
+      '  console.log("**not bold**", foo_bar);',
+      '}',
+      '```',
+      '',
+      'After `peer_left = true`.',
+    ].join("\n"));
+    expect(markdown).not.toContain("Copy");
+    expect(markdown).not.toContain("TypeScript\n\n");
+    expect(markdown).not.toContain("peer\\_left");
+    expect(markdown).not.toContain("\\=");
+  });
+
+  test("serializes ChatGPT div block code without escaping literal source", () => {
+    const markdown = chatGptHtmlToMarkdown([
+      '<p><strong>Before</strong> <code>inline_code</code>.</p>',
+      '<div class="contain-inline-size">',
+      '<div class="code-header"><span>TypeScript</span><button>Copy</button></div>',
+      '<div class="overflow-y-auto p-4"><code class="whitespace-pre language-typescript">',
+      'const peer_left = false;\n',
+      'const foo_bar = "hello_world";\n',
+      'if (peer_left === false) {\n  console.log(foo_bar);\n}\n',
+      'const markdown = `**not bold**\n_peer_left_\n1. not a markdown list`;',
+      '</code></div>',
+      '</div>',
+      '<p>After <code>peer_left = true</code>.</p>',
+    ].join(""));
+
+    expect(markdown).toBe([
+      '**Before** `inline_code`.',
+      '',
+      '```typescript',
+      'const peer_left = false;',
+      'const foo_bar = "hello_world";',
+      'if (peer_left === false) {',
+      '  console.log(foo_bar);',
+      '}',
+      'const markdown = `**not bold**',
+      '_peer_left_',
+      '1. not a markdown list`;',
+      '```',
+      '',
+      'After `peer_left = true`.',
+    ].join("\n"));
+    expect(markdown).not.toContain("Copy");
+    expect(markdown).not.toContain("peer\\_left");
+    expect(markdown).not.toContain("\\=");
+  });
+
+  test("serializes standalone block-like code but keeps ordinary code inline", () => {
+    const standalone = chatGptHtmlToMarkdown(
+      '<code class="whitespace-pre language-typescript">const peer_left = true;\nconst x = a === b;</code>',
+    );
+    expect(standalone).toBe([
+      '```typescript',
+      'const peer_left = true;',
+      'const x = a === b;',
+      '```',
+    ].join("\n"));
+
+    expect(chatGptHtmlToMarkdown('<p>Inline <code>peer_left = true</code> stays inline.</p>'))
+      .toBe('Inline `peer_left = true` stays inline.');
+  });
+
   test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
     const plain = "<p>Source</p>";
     const linked = '<p><a href="https://example.com">Source</a></p>';

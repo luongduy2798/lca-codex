@@ -9,6 +9,7 @@ const turndown = new TurndownService({
   emDelimiter: "*",
   strongDelimiter: "**",
   linkStyle: "inlined",
+  preformattedCode: true,
 });
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
@@ -19,6 +20,109 @@ turndown.addRule("removeImages", {
 turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",
+});
+
+function chatGptBlockCode(node: Node): HTMLElement | null {
+  if (node.nodeName === "CODE") {
+    const code = node as HTMLElement;
+    const className = code.getAttribute("class") ?? "";
+    if (/(?:^|\s)(?:language-[^\s]+|whitespace-pre!?)(?:\s|$)/.test(className)
+      || code.hasAttribute("data-language")) {
+      return code;
+    }
+    return null;
+  }
+  const code = (node as HTMLElement).querySelector?.("code") ?? null;
+  return code ? chatGptBlockCode(code) : null;
+}
+
+function chatGptCodeMirrorSource(node: Node): HTMLElement | null {
+  const element = node as HTMLElement;
+  if (element.matches?.('[role="textbox"][aria-label="Edit code"]')) return element;
+  return element.querySelector?.('[role="textbox"][aria-label="Edit code"]') ?? null;
+}
+
+function chatGptCodeSourceText(source: HTMLElement): string {
+  if (source.matches('[role="textbox"][aria-label="Edit code"]')) {
+    const lines = Array.from(source.children)
+      .filter(child => child.classList.contains("cm-line"));
+    if (lines.length > 0) return lines.map(line => line.textContent ?? "").join("\n");
+  }
+  return source.textContent ?? "";
+}
+
+function chatGptCodeWrapper(code: HTMLElement): HTMLElement | null {
+  for (let parent = code.parentElement; parent; parent = parent.parentElement) {
+    if (parent.nodeName === "PRE") return null;
+    if (parent.nodeName !== "DIV") continue;
+
+    const codeChild = Array.from(parent.children).find(child => child.contains(code));
+    if (!codeChild) continue;
+    if (Array.from(parent.children).some(child => child !== codeChild && child.querySelector("button"))) {
+      return parent;
+    }
+  }
+  return null;
+}
+
+function fencedCodeBlock(source: HTMLElement, owner: HTMLElement, options: TurndownService.Options): string {
+  const className = source.getAttribute("class") ?? "";
+  const classLanguage = className.match(/(?:^|\s)language-([^\s]+)/)?.[1];
+  const language = (
+    source.getAttribute("data-language")
+    ?? owner.getAttribute("data-language")
+    ?? classLanguage
+    ?? ""
+  ).trim().split(/\s+/, 1)[0]!.replace(/[^A-Za-z0-9_+#.-]/g, "");
+  const value = chatGptCodeSourceText(source);
+  const fenceChar = options.fence?.charAt(0) || "`";
+  const fencePattern = new RegExp(`^${fenceChar.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}{3,}`, "gm");
+  let fenceSize = 3;
+  for (const match of value.matchAll(fencePattern)) {
+    fenceSize = Math.max(fenceSize, match[0].length + 1);
+  }
+  const fence = fenceChar.repeat(fenceSize);
+  return `\n\n${fence}${language}\n${value.replace(/\n$/, "")}\n${fence}\n\n`;
+}
+
+turndown.addRule("chatGptFencedCodeBlock", {
+  filter: node => node.nodeName === "PRE"
+    && Boolean(node.querySelector("code") || chatGptCodeMirrorSource(node)),
+  replacement: (_content, node, options) => {
+    const pre = node as HTMLElement;
+    const source = pre.querySelector("code") ?? chatGptCodeMirrorSource(pre);
+    if (!source) return "";
+
+    // ChatGPT wraps code in extra header/control DOM inside <pre>. Older renderers use <code>;
+    // current renderers use a read-only CodeMirror textbox with one .cm-line per source line.
+    // Treat the entire <pre> as one code block so labels such as "TypeScript"/"Copy" never become
+    // prose and source text is never passed through Turndown's Markdown escaping.
+    return fencedCodeBlock(source, pre, options);
+  },
+});
+turndown.addRule("chatGptDivWrappedCodeBlock", {
+  filter: node => {
+    if (node.nodeName !== "DIV") return false;
+    const div = node as HTMLElement;
+    const code = chatGptBlockCode(div);
+    if (!code || code.closest("pre")) return false;
+
+    // Current ChatGPT code blocks are often a <div> shell with a language/header row and a
+    // Copy/menu button, followed by a block-like <code>. There is no <pre>, so Turndown otherwise
+    // serializes the language label as prose and treats the source as inline code.
+    return chatGptCodeWrapper(code) === div;
+  },
+  replacement: (_content, node, options) => {
+    const div = node as HTMLElement;
+    const code = chatGptBlockCode(div);
+    return code ? fencedCodeBlock(code, div, options) : "";
+  },
+});
+turndown.addRule("chatGptStandaloneBlockCode", {
+  filter: node => node.nodeName === "CODE"
+    && !node.parentElement?.closest("pre")
+    && Boolean(chatGptBlockCode(node)),
+  replacement: (_content, node, options) => fencedCodeBlock(node as HTMLElement, node as HTMLElement, options),
 });
 turndown.addRule("compactListItem", {
   filter: "li",

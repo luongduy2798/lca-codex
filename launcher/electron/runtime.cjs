@@ -541,8 +541,16 @@ class RuntimeHost {
     if (publishOperation) this.publishOperation?.({ name, status: "running", message: options.message || name });
     this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
     try {
+      if (options.embedded && this.runtimeRootProvider) {
+        this.installedRuntimeRoot = this.runtimeRootProvider();
+      }
       const invocation = options.embedded
-        ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
+        ? embeddedRuntimeInvocation({
+          app: this.app,
+          sourceRoot: this.sourceRoot,
+          installedRuntimeRoot: this.installedRuntimeRoot,
+          args,
+        })
         : this.command(args);
       const result = await new Promise((resolve, reject) => {
         const child = spawn(invocation.executable, invocation.args, {

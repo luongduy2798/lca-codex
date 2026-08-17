@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { runtimeInvocation } = require("../electron/runtime-command.cjs");
+const { embeddedRuntimeInvocation, runtimeInvocation } = require("../electron/runtime-command.cjs");
 const { ensurePackagedRuntime } = require("../electron/runtime-install.cjs");
 
 function runtimeFixture(root, version = "0.2.0", bundleId = "a".repeat(64)) {
@@ -45,6 +45,32 @@ test("packaged runtime is installed once into a durable versioned directory", ()
     assert.equal(invocation.cwd, installed);
     assert.equal(invocation.args[0], path.join(installed, "app", "cli.js"));
     assert.equal(invocation.args[1], "serve");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("embedded launcher operations use the durable runtime after AppImage extraction disappears", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-embedded-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    fs.rmSync(path.join(resourcesPath, "runtime"), { recursive: true, force: true });
+
+    const invocation = embeddedRuntimeInvocation({
+      app,
+      sourceRoot: root,
+      installedRuntimeRoot: installed,
+      args: ["route", "connect"],
+    });
+    assert.equal(
+      invocation.executable,
+      path.join(installed, "runtime", process.platform === "win32" ? "bun.exe" : "bun"),
+    );
+    assert.deepEqual(invocation.args, [path.join(installed, "app", "cli.js"), "route", "connect"]);
+    assert.equal(invocation.cwd, installed);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
