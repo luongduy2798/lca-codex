@@ -65,10 +65,10 @@ export function buildLcaCodexModel(
     throw new Error("LCA Codex model template must be a native Codex model");
   }
   const reasoningModes = availableLcaCodexReasoningModes(config.proAvailable);
-  // Codex exposes context size per model, not per reasoning level. Browser reasoning effort no
-  // longer changes how much native Codex history exists: the outer task owns one 272k lifetime and
-  // compacts at 90%, while browser prompts stay independently bounded by lazy-context projection.
-  const catalogLimits = resolveLcaCodexContextLimits("low");
+  // Codex exposes context size per model, not per reasoning level. Use the native harness's
+  // advertised maximum for the routed outer lifetime and preserve its normal 10% compaction
+  // headroom. Browser prompts stay independently bounded by lazy-context projection.
+  const catalogLimits = resolveLcaCodexContextLimits("low", template.max_context_window);
   const model: JsonObject = {
     ...structuredClone(template),
     slug: LCA_CODEX_MODEL.slug,
@@ -112,9 +112,12 @@ export function augmentNativeModelCatalog(
     catalog.models.filter(model => !isOwnedLcaCodexSlug(slug(model))),
   );
   const template = selectNativeTemplate(nativeModels, config);
+  // Build from the unmodified upstream template so a user's model_context_window override cannot
+  // masquerade as a larger native capability for the routed LCA model.
+  const lcaModel = buildLcaCodexModel(template, config);
   if (contextOverride) {
     // model_context_window is a single top-level Codex setting, not a per-model one. Apply it only
-    // to native models; the routed LCA Codex model owns its conservative shared catalog window.
+    // to native models; the routed LCA Codex model follows the unmodified native-advertised max.
     for (const candidate of nativeModels) {
       const modelSlug = slug(candidate);
       if (!modelSlug) continue;
@@ -131,6 +134,6 @@ export function augmentNativeModelCatalog(
   }
   return {
     ...structuredClone(catalog),
-    models: [...nativeModels, buildLcaCodexModel(template, config)],
+    models: [...nativeModels, lcaModel],
   };
 }

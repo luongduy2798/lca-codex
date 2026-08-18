@@ -54,11 +54,16 @@ describe("single LCA Codex model", () => {
 
   test("uses one outer Codex lifetime across every reasoning mode", () => {
     for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
-      expect(resolveLcaCodexContextLimits(effort)).toEqual({
-        contextWindow: 272_000,
-        autoCompactTokenLimit: 244_800,
+      expect(resolveLcaCodexContextLimits(effort, 872_000)).toEqual({
+        contextWindow: 872_000,
+        autoCompactTokenLimit: 784_800,
       });
     }
+  });
+
+  test("rejects an invalid native maximum context window", () => {
+    expect(() => resolveLcaCodexContextLimits("high", 0))
+      .toThrow("max_context_window must be a positive integer");
   });
 
   test("routes the single model while preserving the selected reasoning mode", () => {

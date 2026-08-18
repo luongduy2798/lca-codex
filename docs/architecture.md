@@ -369,8 +369,10 @@ set inline. Compaction uses a minimal bootstrap with the prior checkpoint and la
 retrieves recent/deep history from the frozen snapshot as needed. There is no full-history JSON
 fallback for compaction.
 
-The appended model advertises one outer Codex lifetime for every reasoning level: 272k tokens, with
-native auto-compaction at 244.8k (90%). Browser reasoning effort changes reasoning only; there are no
+The appended model advertises one outer Codex lifetime for every reasoning level, derived from the
+selected native harness model's `max_context_window`, with auto-compaction at 90% of that maximum.
+For example, a native maximum of 872k yields an 872k LCA lifetime and compaction at 784.8k. Browser
+reasoning effort changes reasoning only; there are no
 per-mode inline context limits. Independently, the ChatGPT Web side keeps
 the active bootstrap bounded to at most four recent exchanges within an 8k-token budget. Effective
 browser input accounting includes fixed platform costs plus a 20k-token safety reserve per attached

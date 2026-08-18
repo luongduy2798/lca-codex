@@ -53,7 +53,7 @@ describe("native /models augmentation", () => {
     expect(models.slice(0, 3)).toEqual(nativeSnapshot.models as Array<Record<string, unknown>>);
     expect(models).toHaveLength(4);
     const routed = models[3]!;
-    const limits = resolveLcaCodexContextLimits("low");
+    const limits = resolveLcaCodexContextLimits("low", 320_000);
     expect(routed).toMatchObject({
       slug: "lca-codex",
       display_name: "LCA-5.6 Sol",
@@ -114,8 +114,8 @@ describe("native /models augmentation", () => {
       { effort: "high", description: "High" },
     ]);
     expect(routed[0]).toMatchObject({
-      context_window: 272_000,
-      auto_compact_token_limit: 244_800,
+      context_window: 320_000,
+      auto_compact_token_limit: 288_000,
     });
     expect(models.some(model => model.slug === "lca-codex/pro")).toBe(false);
   });
@@ -139,10 +139,34 @@ describe("native /models augmentation", () => {
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[3]).toMatchObject({
       slug: "lca-codex",
-      context_window: 272_000,
-      max_context_window: 272_000,
-      auto_compact_token_limit: 244_800,
+      context_window: 320_000,
+      max_context_window: 320_000,
+      auto_compact_token_limit: 288_000,
     });
+  });
+
+  test("derives the LCA lifetime from the native template max_context_window", () => {
+    const native = source();
+    const models = native.models as Array<Record<string, unknown>>;
+    models[1]!.max_context_window = 872_000;
+
+    const result = augmentNativeModelCatalog(native, defaultConfig());
+    const routed = (result.models as Array<Record<string, unknown>>)
+      .find(model => model.slug === "lca-codex");
+
+    expect(routed).toMatchObject({
+      context_window: 872_000,
+      max_context_window: 872_000,
+      auto_compact_token_limit: 784_800,
+    });
+  });
+
+  test("fails closed when the native template does not advertise max_context_window", () => {
+    const native = source();
+    delete (native.models as Array<Record<string, unknown>>)[1]!.max_context_window;
+
+    expect(() => augmentNativeModelCatalog(native, defaultConfig()))
+      .toThrow("max_context_window must be a positive integer");
   });
 
   test("never lowers a native window that already exceeds the Codex context override", () => {
@@ -167,6 +191,7 @@ describe("native /models augmentation", () => {
       tool_mode: "code_mode_only",
       supported_reasoning_levels: [{ effort: "high", description: "High" }],
       shell_type: "shell_command",
+      max_context_window: 872_000,
     });
 
     const result = augmentNativeModelCatalog(native, defaultConfig());

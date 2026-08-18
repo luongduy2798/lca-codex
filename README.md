@@ -127,19 +127,20 @@ no `conversation-turn-stream` frame. WebSocket creation, stream, and completion 
 until it matches that owned ID. A completion for another tab cannot terminate the turn. If completion
 carries a turn ID, that ID must match the owned turn; a different turn in the same conversation is
 ignored.
-Response DOM, Stop/Copy controls, and React remounts do not normally decide whether a turn is running
-or finished.
+Response DOM, Stop/Copy controls, and React remounts do not decide whether a turn is running or
+finished.
 
 Rendering is intentionally hybrid rather than a ChatGPT-WS text passthrough. Page-scoped network
 ownership plus matching WebSocket completion owns terminal lifecycle, DOM polling supplies visible reasoning/commentary and semantic Markdown, and the
 local bridge encodes those deltas as Responses SSE back to Codex. Markdown inside ChatGPT's
 `[data-streaming-response-status]` container is treated as intermediate commentary; structurally
 complete, byte-stable top-level answer blocks stream incrementally for both tool-capable and read-only
-turns, then terminal completion flushes the remaining tail. After a normal matching network completion,
-one ordinary poll lets the final React render commit. If CDP disconnects after stream progress was
-already observed, the same surface and tracker are reattached; only that proven observer-gap case may use a
-guarded stable-DOM recovery when the terminal WebSocket frame was missed. Initial observer attachment
-still fails closed before Send, and DOM is never a general completion fallback.
+turns, then terminal completion flushes the remaining tail. After a matching network completion, the
+worker takes one fresh canonical answer-DOM snapshot at that terminal edge and finalizes without a fixed
+post-network settle delay. If CDP disconnects after Send, the same launcher-owned surface and tracker are
+reattached without replaying the ChatGPT generation. If the replacement observer cannot attach but that
+surface remains live, the generation continues; DOM still cannot substitute for the missing network
+completion signal. Initial observer attachment fails closed before Send.
 
 ## Codex tool bridge
 
@@ -154,6 +155,13 @@ than the bounded recent working set and historical images are lazy too. Binding 
 a trivial request can answer without any connector round trip, while native file/command/MCP work
 still executes through the exact active Codex harness tool registry. The tunnel is outbound: it does
 not expose a public IP, open an inbound port, or require router forwarding.
+
+The routed `lca-codex` model advertises the selected native template's `max_context_window` as its
+outer Codex lifetime and auto-compacts at 90% of that maximum. For example, a native 872k maximum
+yields an 872k outer lifetime with compaction at 784.8k. This does not enlarge the initial ChatGPT Web
+prompt: the active bootstrap remains bounded to four recent exchanges within an 8k-token budget and
+older state stays lazy. A user `model_context_window` override applies to native catalog entries only;
+it cannot make the routed LCA model claim a larger native capability.
 
 1. In the required **Configure Codex tool bridge** setup step, create the Tunnel and a regular API
    key on the same OpenAI account that will use the ChatGPT connector; creating the key is free and

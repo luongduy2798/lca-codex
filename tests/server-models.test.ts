@@ -23,9 +23,10 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
         supported_in_api: true,
         supported_reasoning_levels: [],
         tool_mode: "code_mode_only",
+        max_context_window: 872_000,
       }],
     }, { headers: { etag: "native-etag" } });
-  }, () => ({ model: "gpt-5.6-sol", contextWindow: 371_851 }));
+  }, () => ({ model: "gpt-5.6-sol", contextWindow: 900_000 }));
 
   expect(upstream!.url).toBe("https://chatgpt.com/backend-api/codex/models?client_version=1.2.3");
   expect(upstream!.method).toBe("GET");
@@ -47,9 +48,9 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
     "gpt-5.6-sol",
     "lca-codex",
   ]);
-  expect(body.models[0]!.max_context_window).toBe(371_851);
+  expect(body.models[0]!.max_context_window).toBe(900_000);
   const model = body.models[1]!;
-  const limits = resolveLcaCodexContextLimits("low");
+  const limits = resolveLcaCodexContextLimits("low", 872_000);
   expect(model.context_window).toBe(limits.contextWindow);
   expect(model.max_context_window).toBe(limits.contextWindow);
   expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);

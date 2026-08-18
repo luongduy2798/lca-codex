@@ -7,22 +7,30 @@ export const LCA_CODEX_BASE_MODEL = "gpt-5.6-sol";
 export type LcaCodexCodexEffort = "low" | "medium" | "high" | "xhigh" | "ultra";
 export type LcaCodexAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-/** Native Codex owns one conversation lifetime regardless of the selected browser reasoning effort. */
-export const LCA_CODEX_CONTEXT_WINDOW = 272_000;
-export const LCA_CODEX_AUTO_COMPACT_TOKEN_LIMIT = 244_800;
+/** Keep native Codex's normal 10% compaction headroom when LCA uses its advertised maximum. */
+export const LCA_CODEX_AUTO_COMPACT_RATIO = 0.9;
 
 export interface LcaCodexContextLimits {
   contextWindow: number;
   autoCompactTokenLimit: number;
 }
 
-/** Resolve the outer Codex lifetime limit. Browser reasoning effort does not change history size. */
+/**
+ * Resolve the outer Codex lifetime limit from the native model catalog. Browser reasoning effort
+ * does not change history size; lazy browser projection remains independently bounded.
+ */
 export function resolveLcaCodexContextLimits(
   _effort: LcaCodexAdapterEffort,
+  nativeMaxContextWindow: unknown,
 ): LcaCodexContextLimits {
+  if (typeof nativeMaxContextWindow !== "number"
+    || !Number.isSafeInteger(nativeMaxContextWindow)
+    || nativeMaxContextWindow <= 0) {
+    throw new Error("Native Codex max_context_window must be a positive integer");
+  }
   return {
-    contextWindow: LCA_CODEX_CONTEXT_WINDOW,
-    autoCompactTokenLimit: LCA_CODEX_AUTO_COMPACT_TOKEN_LIMIT,
+    contextWindow: nativeMaxContextWindow,
+    autoCompactTokenLimit: Math.floor(nativeMaxContextWindow * LCA_CODEX_AUTO_COMPACT_RATIO),
   };
 }
 

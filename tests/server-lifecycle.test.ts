@@ -287,6 +287,7 @@ test("health proves that Codex received a successful augmented model catalog", a
         supported_in_api: true,
         supported_reasoning_levels: [],
         tool_mode: "code_mode_only",
+        max_context_window: 872_000,
       }],
     }),
   });

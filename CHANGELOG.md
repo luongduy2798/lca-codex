@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.6]
+
+### Changed
+
+- Make the owned ChatGPT network lifecycle the sole terminal authority. A matching `conversation-turn-complete` now triggers one fresh canonical response-DOM snapshot and immediate finalization; there is no fixed post-network settle timer and no DOM-derived recovery completion path.
+- Keep DOM stability strictly in the rendering path. Final-answer Markdown still waits for structural completeness and the 750 ms byte-stability window, including tool/connector turns, but terminal-looking DOM, footer controls, remounts, or long periods of unchanged content cannot finish a turn.
+- Reconcile streamed answer blocks by semantic content across React removal, reorder, insertion, remount, and rewrite. Already-emitted Responses bytes remain append-only; replacement content may append only after it becomes a new stable candidate, and only the final visible top-level answer root is serialized during overlapping remounts.
+- Preserve an in-flight ChatGPT generation when a post-Send CDP reconnect reaches the same launcher-owned surface but the replacement network observer cannot attach. The worker does not kill or replay the turn; initial observer attachment before Send still fails closed, and a missing network completion signal cannot be replaced by DOM evidence.
+- Derive the routed LCA Codex outer context lifetime from the selected native model template's `max_context_window` instead of a fixed 272k cap. Auto-compaction remains at 90% of that advertised maximum (for example, 872k -> 784.8k), while the ChatGPT Web bootstrap remains independently bounded and lazy.
+- Keep `model_context_window` overrides scoped to native models when augmenting the catalog, so a user override cannot make the routed LCA model advertise a capability larger than the unmodified native template reports.
+
+### Tests
+
+- Added regression coverage for network-only completion, one-shot terminal DOM re-snapshot, absence of DOM recovery completion, and continuation without replay when a replacement observer cannot reattach after Send.
+- Added Markdown-buffer and browser contract coverage for incomplete fenced code, the 750 ms stability gate, canonical-root selection, append-only remount/rewrite reconciliation, and terminal tail flushing.
+- Added model-catalog coverage for native `max_context_window` propagation, 90% auto-compaction, fail-closed handling of a missing/invalid native maximum, and isolation from `model_context_window` overrides.
+
+## [1.0.5] - Released
+
+### Fixed
+
+- Serialize current ChatGPT code-block DOM as literal fenced Markdown without leaking language/copy controls or escaping source characters. Wrapped `<pre>` blocks, CodeMirror renderers, div-wrapped block code, and standalone block-like `<code>` nodes are handled while ordinary inline code remains inline.
+- Make packaged launcher embedded operations execute from the durable installed runtime instead of the temporary packaged resources path, so operations continue to work after an AppImage extraction directory disappears.
+
+### Tests
+
+- Added Markdown serialization coverage for wrapped, CodeMirror, div-wrapped, and standalone ChatGPT code blocks.
+- Added packaged-runtime coverage proving embedded launcher operations survive removal of the original AppImage extraction tree.
+
 ## [1.0.4] - Released
 
 ### Fixed
