@@ -1,7 +1,24 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_PROMPT_INSERT_CHUNK_CHARS, CHATGPT_RESPONSE_IDLE_POLL_MS, CHATGPT_RESPONSE_POLL_MS, ChatGptAdaptivePollScheduler, ChatGptBrowserWorker, ChatGptNetworkTurnTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertLcaCodexInputWithinContextWindow, browserDiagnosticCheckpoint, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert } from "../src/adapters/lca-codex/browser-worker";
+import {
+  CHATGPT_PROMPT_INSERT_CHUNK_CHARS,
+  CHATGPT_RESPONSE_IDLE_POLL_MS,
+  CHATGPT_RESPONSE_POLL_MS,
+  ChatGptAdaptivePollScheduler,
+  ChatGptBrowserWorker,
+  ChatGptNetworkTurnTracker,
+  ChatGptVisibleTraceTracker,
+  MAX_CHATGPT_BROWSER_TABS,
+  assertLcaCodexInputWithinContextWindow,
+  browserDiagnosticCheckpoint,
+  isChatGptTraceControl,
+  redactChatGptUiDiagnostic,
+  resolveBrowserConfig,
+  resolveChatGptToolConfirmation,
+  throwIfChatGptRateLimitDialog,
+  throwIfChatGptSessionFailureAlert,
+} from "../src/adapters/lca-codex/browser-worker";
 import { defaultChromeExecutable } from "../src/config";
 
 test("Codex context uses the owned CDP composer transport, never the operating-system clipboard", () => {
@@ -127,7 +144,9 @@ test("a transient launcher CDP disconnect reattaches the same browser surface in
   expect(workerSource).toContain("!turnConnection || turnConnection.isConnected()");
   expect(workerSource).toContain("launcherSurfaceId,\n            turn.abortSignal,");
   expect(workerSource).toContain("responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last()");
-  expect(workerSource.match(/if \(await reattachLauncherSurface\(\)\) continue;/g)?.length).toBe(2);
+  // Initial polling, the network-terminal re-snapshot, and the loop liveness check all recover
+  // the same launcher-owned surface instead of replaying the submitted ChatGPT generation.
+  expect(workerSource.match(/if \(await reattachLauncherSurface\(\)\) continue;/g)?.length).toBe(3);
   expect(workerSource).toContain("rather than replaying the\n          // ChatGPT turn");
 });
 
@@ -434,15 +453,36 @@ test("browser network lifecycle is mandatory before Send and after launcher reat
   expect(workerSource).toContain('"lca_codex.network_turn_streaming"');
   expect(workerSource).toContain('"lca_codex.network_turn_completed"');
   expect(workerSource).toContain('completionSource: "network"');
-  expect(workerSource).toContain("let networkCompletionObservedOnPriorPoll = false;");
-  expect(workerSource).toContain("const networkCompletionReady = networkCompletionObserved");
-  expect(workerSource).toContain("networkCompletionObservedOnPriorPoll = networkCompletionObserved;");
-  expect(workerSource).toContain("if (networkCompletionReady || recoveredCompletionReady) {");
+  expect(workerSource).toContain("const networkCompletionReady = networkState.completed;");
+  expect(workerSource).toContain("if (networkCompletionReady) {");
+  expect(workerSource).not.toContain("CHATGPT_TERMINAL_DOM_SETTLE_MS");
+  expect(workerSource).not.toContain("ChatGptTerminalCompletionTracker");
+  expect(workerSource).not.toContain("recoveredCompletionReady");
+  expect(workerSource).not.toContain("network_gap_dom_recovery");
+  expect(workerSource).not.toContain("terminal_dom_recovery");
   expect(workerSource).not.toContain("turnCompletionReady");
   expect(workerSource).not.toContain("completionTracker");
   expect(workerSource).toContain("ChatGPT network lifecycle observer is unavailable before Send");
-  expect(workerSource).toContain("ChatGPT network lifecycle observer could not reattach to the active turn");
+  expect(workerSource).toContain("continuing generation after network observer reattach failed; network completion remains authoritative");
+  expect(workerSource).not.toContain("ChatGPT network lifecycle observer could not reattach to the active turn");
   expect(workerSource).not.toContain('payloadData.includes("[DONE]")');
+});
+
+test("network completion re-snapshots the final DOM and completes without a fixed settle timer", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const networkSnapshot = workerSource.indexOf("const networkState = networkObserver.snapshot();");
+  const terminalBranch = workerSource.indexOf("if (networkState.completed) {", networkSnapshot);
+  const terminalSnapshot = workerSource.indexOf("snapshot = await this.responseDomSnapshot(responseTurn);", terminalBranch);
+  const networkReady = workerSource.indexOf("const networkCompletionReady = networkState.completed;", terminalSnapshot);
+  const finalization = workerSource.indexOf("if (networkCompletionReady) {", networkReady);
+
+  expect(networkSnapshot).toBeGreaterThan(-1);
+  expect(terminalBranch).toBeGreaterThan(networkSnapshot);
+  expect(terminalSnapshot).toBeGreaterThan(terminalBranch);
+  expect(networkReady).toBeGreaterThan(terminalSnapshot);
+  expect(finalization).toBeGreaterThan(networkReady);
+  expect(workerSource.slice(terminalBranch, finalization)).not.toContain("1_500");
+  expect(workerSource.slice(terminalBranch, finalization)).not.toContain("terminalSettle");
 });
 
 test("connector verification and real tool turns share one Playwright selector", () => {
@@ -765,6 +805,62 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     "escape", "clear", "focus", "type:@", "menu:12",
     "activate", "selected",
   ]);
+});
+
+test("connector selection retries when an exact row disappears after becoming visible", async () => {
+  const calls: string[] = [];
+  let selected = false;
+  let exactCountCalls = 0;
+  const selectedConnector = {
+    first() { return this; },
+    waitFor: async () => { calls.push("selected"); },
+    count: async () => 1,
+  };
+  const appResult = {
+    first() { return this; },
+    waitFor: async () => { calls.push("visible"); },
+    count: async () => {
+      exactCountCalls += 1;
+      calls.push(`count:${exactCountCalls}`);
+      return exactCountCalls === 1 ? 0 : 1;
+    },
+    dispatchEvent: async () => {
+      selected = true;
+      calls.push("activate");
+    },
+  };
+  const selectedComposer = {
+    locator: () => ({ filter: () => selectedConnector }),
+  };
+  const initialComposer = {
+    fill: async () => { calls.push("clear"); },
+    focus: async () => { calls.push("focus"); },
+  };
+  const page = {
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => selector.includes("__menu-item")
+      ? { filter: () => ({ filter: () => appResult }) }
+      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
+    keyboard: {
+      press: async () => { calls.push("escape"); },
+      type: async (value: string) => { calls.push(`type:${value}`); },
+    },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  const resolved = await selectConnector.call({
+    config: { appName: "lca-codex" },
+    connectorIsSelected: async () => selected,
+    selectedConnectorControl: () => selectedConnector,
+    activeComposer: async () => selected ? selectedComposer : initialComposer,
+  }, page);
+
+  expect(resolved).toBe(selectedComposer);
+  expect(calls).toContain("count:1");
+  expect(calls).toContain("count:2");
+  expect(calls).toContain("activate");
 });
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
@@ -1187,13 +1283,15 @@ test("response polling balances visible latency with weak-machine efficiency", (
 
 test("terminal resolution finalizes the DOM-backed Markdown serializer", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const networkCompletion = workerSource.indexOf("if (networkCompletionReady || recoveredCompletionReady) {");
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {");
   const finalSnapshot = workerSource.indexOf("const final = markdownBuffer.finish()", networkCompletion);
   const finalEmission = workerSource.indexOf("turn.onTextDelta(final.delta)", finalSnapshot);
   expect(networkCompletion).toBeGreaterThan(-1);
   expect(finalSnapshot).toBeGreaterThan(networkCompletion);
   expect(finalEmission).toBeGreaterThan(finalSnapshot);
-  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) =>");
+  expect(workerSource).toContain("const markdownSegments = answerRoots.flatMap((markdownRoot, rootIndex) =>");
+  expect(workerSource).toContain("snapshot = await this.responseDomSnapshot(responseTurn);");
+  expect(workerSource).toContain("const networkCompletionReady = networkState.completed;");
   expect(workerSource).not.toContain("ChatGptCompletionTracker");
   expect(workerSource).not.toContain("chatGptResponseHasStructuredMarkdown");
   expect(workerSource).not.toContain("markdownBuffer.flush()");
@@ -1204,7 +1302,7 @@ test("terminal resolution finalizes the DOM-backed Markdown serializer", () => {
 test("network completion remains authoritative when the assistant DOM is absent on the terminal poll", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const responsePresentBranch = workerSource.indexOf("if (snapshot.responsePresent) {");
-  const networkCompletion = workerSource.indexOf("if (networkCompletionReady || recoveredCompletionReady) {", responsePresentBranch);
+  const networkCompletion = workerSource.indexOf("if (networkCompletionReady) {", responsePresentBranch);
   expect(responsePresentBranch).toBeGreaterThan(-1);
   expect(networkCompletion).toBeGreaterThan(responsePresentBranch);
   expect(workerSource.slice(responsePresentBranch, networkCompletion)).toContain("}");
@@ -1363,11 +1461,13 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
-  expect(workerSource).toContain("const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) =>");
+  expect(workerSource).toContain("const rendered = renderedRoots.at(-1);");
+  expect(workerSource).toContain("const answerRoots = rendered ? [rendered] : [];");
+  expect(workerSource).toContain("const markdownSegments = answerRoots.flatMap((markdownRoot, rootIndex) =>");
   expect(workerSource).toContain("text: child.innerText.trim()");
   expect(workerSource).toContain("streamable: childIsComplete");
   expect(workerSource).toContain("group,");
-  expect(workerSource).toContain("fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(\"\")");
+  expect(workerSource).toContain("fullHtml: answerRoots.map(candidate => candidate.innerHTML).join(\"\")");
   expect(workerSource).not.toContain("!mode.localTools");
   expect(workerSource).toContain("markdownBuffer.observe(");
   expect(workerSource).toContain("const final = markdownBuffer.finish()");

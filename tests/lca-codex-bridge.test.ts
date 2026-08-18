@@ -1140,6 +1140,26 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     });
   });
 
+  test("holds an unfinished code block until structural completion and the stability window", () => {
+    const code = '<pre><code class="language-typescript">const value = 1;</code></pre>';
+    const expected = chatGptHtmlToMarkdown(code);
+    expect(expected).toStartWith("`".repeat(3));
+
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 750);
+    const inProgress = [
+      { key: "code", html: code, text: "const value = 1;", streamable: false },
+    ];
+    expect(buffer.observe(inProgress, 0)).toBe("");
+    expect(buffer.observe(inProgress, 5_000)).toBe("");
+
+    const complete = [
+      { key: "code", html: code, text: "const value = 1;", streamable: true },
+    ];
+    expect(buffer.observe(complete, 5_000)).toBe("");
+    expect(buffer.observe(complete, 5_749)).toBe("");
+    expect(buffer.observe(complete, 5_750)).toBe(expected);
+  });
+
   test("serializes wrapped ChatGPT code blocks without leaking controls or escaping code", () => {
     const markdown = chatGptHtmlToMarkdown([
       '<p><strong>Fix</strong> <code>handleRemoteDeparture()</code> first.</p>',
@@ -1256,7 +1276,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       .toBe('Inline `peer_left = true` stays inline.');
   });
 
-  test("buffers citation hydration, tolerates later markup-only rewrites, and rejects text rewrites", () => {
+  test("buffers citation hydration and tolerates rewrites after a block has already streamed", () => {
     const plain = "<p>Source</p>";
     const linked = '<p><a href="https://example.com">Source</a></p>';
     const hydrated = new ChatGptMarkdownBuffer(markdown => markdown, 100);
@@ -1277,27 +1297,63 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     const source = [{ key: "source", html: plain, text: "Source", streamable: true }];
     expect(rewritten.observe(source, 0)).toBe("");
     expect(rewritten.observe(source, 100)).toBe("Source");
-    expect(() => rewritten.observe([
+    expect(rewritten.observe([
       { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
-    ], 200)).toThrow("completed text block");
+      { key: "next", html: "<p>Continue</p>", text: "Continue", streamable: true },
+    ], 200)).toBe("");
+    expect(rewritten.observe([
+      { key: "source", html: "<p>Different</p>", text: "Different", streamable: true },
+      { key: "next", html: "<p>Continue</p>", text: "Continue", streamable: true },
+    ], 300)).toBe("\n\nDifferent\n\nContinue");
+    expect(rewritten.finish()).toEqual({
+      delta: "",
+      markdown: "Source\n\nDifferent\n\nContinue",
+    });
   });
 
-  test("defers mutable connector Markdown until completion so replaced blocks are never retracted", () => {
+  test("keeps append-only Markdown alive across block removal, reorder, insertion, and React remount", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+    expect(buffer.observe([
+      { key: "old-a", html: "<p>Alpha</p>", text: "Alpha", streamable: true },
+      { key: "old-b", html: "<p>Beta</p>", text: "Beta", streamable: true },
+    ], 1_000)).toBe("Alpha\n\nBeta");
+
+    // React removes Alpha, remounts Beta under a different positional key, and inserts Gamma.
+    expect(buffer.observe([
+      { key: "new-b", html: "<p>Beta</p>", text: "Beta", streamable: true },
+      { key: "new-g", html: "<p>Gamma</p>", text: "Gamma", streamable: true },
+    ], 1_100)).toBe("\n\nGamma");
+
+    // A later remount reorders the already-emitted blocks and adds one genuinely novel block.
+    expect(buffer.observe([
+      { key: "latest-g", html: "<p>Gamma</p>", text: "Gamma", streamable: true },
+      { key: "latest-a", html: "<p>Alpha</p>", text: "Alpha", streamable: true },
+      { key: "latest-b", html: "<p>Beta</p>", text: "Beta", streamable: true },
+      { key: "latest-d", html: "<p>Delta</p>", text: "Delta", streamable: true },
+    ], 1_200)).toBe("\n\nDelta");
+
+    expect(buffer.finish()).toEqual({
+      delta: "",
+      markdown: "Alpha\n\nBeta\n\nGamma\n\nDelta",
+    });
+  });
+
+  test("streams stable connector Markdown and appends later rewrites without retracting emitted bytes", () => {
     const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
     const preliminary = [
       { key: "0:0:p", html: "<p>I’ll inspect it.</p>", text: "I’ll inspect it.", streamable: true },
       { key: "0:1:p", html: "<p>Running tool…</p>", text: "Running tool…", streamable: false },
     ];
-    expect(buffer.observe(preliminary, 0, false)).toBe("");
-    expect(buffer.observe(preliminary, 5_000, false)).toBe("");
+    expect(buffer.observe(preliminary, 0)).toBe("");
+    expect(buffer.observe(preliminary, 100)).toBe("I’ll inspect it.");
 
     const final = [
       { key: "0:0:p", html: "<p>Tool finished successfully.</p>", text: "Tool finished successfully.", streamable: false },
     ];
-    expect(buffer.observe(final, 6_000, false)).toBe("");
+    expect(buffer.observe(final, 200)).toBe("");
     expect(buffer.finish()).toEqual({
-      delta: "Tool finished successfully.",
-      markdown: "Tool finished successfully.",
+      delta: "\n\nTool finished successfully.",
+      markdown: "I’ll inspect it.\n\nTool finished successfully.",
     });
   });
 

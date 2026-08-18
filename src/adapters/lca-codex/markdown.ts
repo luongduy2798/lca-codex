@@ -159,8 +159,7 @@ interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
 }
 
 interface CommittedChatGptMarkdownSegment {
-  key: string;
-  text: string;
+  matchKey: string;
 }
 
 /**
@@ -169,11 +168,12 @@ interface CommittedChatGptMarkdownSegment {
  * ChatGPT can rewrite old HTML while hydrating citations and controls, so a character prefix is
  * not a safe commit boundary. The browser supplies semantic blocks and marks a block streamable
  * only after a following block exists. Each completed block must then remain byte-stable for the
- * configured window. Once committed, presentation-only HTML rewrites are harmless; changing its
- * visible text is an explicit protocol error because Responses deltas cannot be retracted.
+ * configured window. Once committed, presentation-only HTML rewrites are harmless. If ChatGPT
+ * later rewrites a committed block, keep the already-streamed bytes as-is and continue from the
+ * next uncommitted position because Responses deltas cannot be retracted.
  */
 export class ChatGptMarkdownBuffer {
-  private readonly candidates = new Map<number, ChatGptMarkdownCandidate>();
+  private readonly candidates = new Map<string, ChatGptMarkdownCandidate>();
   private readonly committed: CommittedChatGptMarkdownSegment[] = [];
   private latest: ChatGptMarkdownSegment[] = [];
   private markdown = "";
@@ -188,19 +188,24 @@ export class ChatGptMarkdownBuffer {
     }
   }
 
-  observe(segments: ChatGptMarkdownSegment[], now = Date.now(), allowCommit = true): string {
-    this.assertCommittedPrefix(segments);
+  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
     this.latest = segments.map(segment => ({ ...segment }));
+    const pending = this.pendingSegments(segments);
+    const activeCandidateKeys = new Set<string>();
+    const candidateOccurrences = new Map<string, number>();
 
-    for (let index = this.committed.length; index < segments.length; index += 1) {
-      const segment = segments[index]!;
-      const previous = this.candidates.get(index);
+    for (const segment of pending) {
+      const matchKey = this.matchKey(segment);
+      const occurrence = candidateOccurrences.get(matchKey) ?? 0;
+      candidateOccurrences.set(matchKey, occurrence + 1);
+      const candidateKey = `${matchKey}\u0000${occurrence}`;
+      activeCandidateKeys.add(candidateKey);
+      const previous = this.candidates.get(candidateKey);
       const unchanged = previous
-        && previous.key === segment.key
         && previous.html === segment.html
         && previous.text === segment.text
-        && previous.group === segment.group;
-      this.candidates.set(index, {
+        && previous.streamable === segment.streamable;
+      this.candidates.set(candidateKey, {
         ...segment,
         changedAt: unchanged ? previous.changedAt : now,
         ...(segment.streamable ? {
@@ -210,48 +215,63 @@ export class ChatGptMarkdownBuffer {
         } : {}),
       });
     }
-    for (const index of this.candidates.keys()) {
-      if (index >= segments.length) this.candidates.delete(index);
+    for (const candidateKey of this.candidates.keys()) {
+      if (!activeCandidateKeys.has(candidateKey)) this.candidates.delete(candidateKey);
     }
 
-    if (!allowCommit) return "";
-
     let delta = "";
-    while (this.committed.length < segments.length) {
-      const index = this.committed.length;
-      const candidate = this.candidates.get(index);
+    candidateOccurrences.clear();
+    for (const segment of pending) {
+      const matchKey = this.matchKey(segment);
+      const occurrence = candidateOccurrences.get(matchKey) ?? 0;
+      candidateOccurrences.set(matchKey, occurrence + 1);
+      const candidateKey = `${matchKey}\u0000${occurrence}`;
+      const candidate = this.candidates.get(candidateKey);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
       delta += this.commit(candidate);
-      this.committed.push({ key: candidate.key, text: candidate.text });
-      this.candidates.delete(index);
+      this.committed.push({ matchKey: this.matchKey(candidate) });
+      this.candidates.delete(candidateKey);
     }
     return delta;
   }
 
   finish(): { markdown: string; delta: string } {
-    this.assertCommittedPrefix(this.latest);
     let delta = "";
-    for (let index = this.committed.length; index < this.latest.length; index += 1) {
-      const segment = this.latest[index]!;
+    for (const segment of this.pendingSegments(this.latest)) {
       delta += this.commit(segment);
-      this.committed.push({ key: segment.key, text: segment.text });
+      this.committed.push({ matchKey: this.matchKey(segment) });
     }
     this.candidates.clear();
     return { markdown: this.markdown, delta };
   }
 
-  private assertCommittedPrefix(segments: ChatGptMarkdownSegment[]): void {
-    if (segments.length < this.committed.length) {
-      throw new Error("ChatGPT removed a completed text block that was already streamed to Codex");
+  /**
+   * Reconcile the current React snapshot against bytes that have already escaped to Codex.
+   *
+   * DOM keys are positional and therefore not identities: React can remove, insert, reorder, or
+   * remount blocks while a response is still alive. Responses deltas cannot be retracted, so
+   * already-emitted semantic blocks are consumed as a multiset and only genuinely novel current
+   * blocks remain candidates for append-only emission. A rewritten committed block therefore
+   * becomes a new append candidate instead of invalidating the stream.
+   */
+  private pendingSegments(segments: ChatGptMarkdownSegment[]): ChatGptMarkdownSegment[] {
+    const remainingCommitted = new Map<string, number>();
+    for (const segment of this.committed) {
+      remainingCommitted.set(segment.matchKey, (remainingCommitted.get(segment.matchKey) ?? 0) + 1);
     }
-    for (let index = 0; index < this.committed.length; index += 1) {
-      const previous = this.committed[index]!;
-      const current = segments[index]!;
-      if (current.key !== previous.key || current.text !== previous.text) {
-        throw new Error("ChatGPT changed a completed text block that was already streamed to Codex");
-      }
-    }
+    return segments.filter(segment => {
+      const matchKey = this.matchKey(segment);
+      const remaining = remainingCommitted.get(matchKey) ?? 0;
+      if (remaining <= 0) return true;
+      if (remaining === 1) remainingCommitted.delete(matchKey);
+      else remainingCommitted.set(matchKey, remaining - 1);
+      return false;
+    });
+  }
+
+  private matchKey(segment: ChatGptMarkdownSegment): string {
+    return segment.text ? `text:${segment.text}` : `markdown:${chatGptHtmlToMarkdown(segment.html)}`;
   }
 
   private commit(segment: ChatGptMarkdownSegment): string {

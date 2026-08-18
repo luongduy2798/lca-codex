@@ -50,7 +50,6 @@ export const CHATGPT_MARKDOWN_BLOCK_STABILITY_MS = 750;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const CHATGPT_RESPONSE_POLL_MS = 250;
 export const CHATGPT_RESPONSE_IDLE_POLL_MS = 500;
-const CHATGPT_NETWORK_GAP_RECOVERY_STABILITY_MS = 1_500;
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -1471,12 +1470,17 @@ export class ChatGptBrowserWorker {
         .catch(() => false);
       if (fastReady) {
         const exactCount = await exactResult.count();
-        if (exactCount !== 1) {
+        if (exactCount > 1) {
           throw new Error(`ChatGPT connector popover exposed ${exactCount} exact ${JSON.stringify(this.config.appName)} rows`);
         }
-        appResult = exactResult;
-        await captureDiagnostic?.("connector-menu-visible");
-        break;
+        // The connector row can be replaced by React between waitFor() resolving and count().
+        // A transient zero is therefore not a protocol error: retry/fall back to the normal
+        // hydration path instead of failing the whole turn.
+        if (exactCount === 1) {
+          appResult = exactResult;
+          await captureDiagnostic?.("connector-menu-visible");
+          break;
+        }
       }
       if (await this.connectorIsSelected(composer)) {
         await captureDiagnostic?.("connector-selected-during-filter");
@@ -1634,6 +1638,11 @@ export class ChatGptBrowserWorker {
         candidate.closest("[data-streaming-response-status]") === null
       ));
       const rendered = renderedRoots.at(-1);
+      // During a React remount ChatGPT can leave both the old and replacement `.markdown` roots
+      // visible for a short interval. The response footer is already scoped to the last root, so
+      // use that same canonical root for answer serialization instead of concatenating both DOM
+      // generations and duplicating already-visible answer text.
+      const answerRoots = rendered ? [rendered] : [];
       const followsRendered = (candidate: HTMLElement): boolean => Boolean(rendered
         && !rendered.contains(candidate)
         && (rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING));
@@ -1662,9 +1671,9 @@ export class ChatGptBrowserWorker {
         ...(terminalActionGroup ? [terminalActionGroup] : []),
       ]);
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
-      renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));
+      answerRoots.forEach(candidate => candidates.set(candidate, "answer"));
       commentaryRoots.forEach(candidate => candidates.set(candidate, "commentary"));
-      const overlapsRenderedAnswer = (candidate: HTMLElement): boolean => renderedRoots.some(rendered => (
+      const overlapsRenderedAnswer = (candidate: HTMLElement): boolean => answerRoots.some(rendered => (
         candidate.contains(rendered) || rendered.contains(candidate)
       ));
       const overlapsCommentary = (candidate: HTMLElement): boolean => commentaryRoots.some(commentary => (
@@ -1741,8 +1750,8 @@ export class ChatGptBrowserWorker {
         ...block,
         ...(block.kind === "commentary" ? { complete: index < blocks.length - 1 } : {}),
       }));
-      const markdownSegments = renderedRoots.flatMap((markdownRoot, rootIndex) => {
-        const rootIsComplete = rootIndex < renderedRoots.length - 1;
+      const markdownSegments = answerRoots.flatMap((markdownRoot, rootIndex) => {
+        const rootIsComplete = rootIndex < answerRoots.length - 1;
         const hasDirectText = [...markdownRoot.childNodes].some(node => (
           node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())
         ));
@@ -1792,8 +1801,8 @@ export class ChatGptBrowserWorker {
       });
       return {
         responsePresent: true,
-        visibleText: renderedRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
-        fullHtml: renderedRoots.map(candidate => candidate.innerHTML).join(""),
+        visibleText: answerRoots.map(candidate => candidate.innerText.trim()).filter(Boolean).join("\n\n"),
+        fullHtml: answerRoots.map(candidate => candidate.innerHTML).join(""),
         markdownSegments,
         completionActionVisible: completionAction !== undefined || terminalActionGroup !== undefined,
         traceBlocks,
@@ -2063,20 +2072,12 @@ export class ChatGptBrowserWorker {
       );
       const pollScheduler = new ChatGptAdaptivePollScheduler();
       let lastResponseVisibleText = "";
-      let networkCompletionObservedOnPriorPoll = false;
-      let networkObserverGapObserved = false;
-      let recoveredCompletionStableSince: number | undefined;
-      let recoveredCompletionObservedOnPriorPoll = false;
-      let completionSource: "network" | "network_gap_dom_recovery" = "network";
       let previousActivitySignature = "";
       const reattachLauncherSurface = async (): Promise<boolean> => {
         if (!launcherSurfaceId || !turnConnection || turnConnection.isConnected()) return false;
         if (turn.abortSignal?.aborted) {
           throw new DOMException("LCA Codex turn aborted", "AbortError");
         }
-        networkObserverGapObserved = true;
-        recoveredCompletionStableSince = undefined;
-        recoveredCompletionObservedOnPriorPoll = false;
         const staleConnection = turnConnection;
         let connection: Awaited<ReturnType<typeof connectLauncherBrowserHost>>;
         try {
@@ -2116,10 +2117,12 @@ export class ChatGptBrowserWorker {
             status: "reattach_failed",
             reason: error instanceof Error ? error.name : "Error",
           }, "warning");
-          await staleConnection.close().catch(() => {});
-          throw new Error(
-            `ChatGPT network lifecycle observer could not reattach to the active turn: ${error instanceof Error ? error.message : String(error)}`,
-            { cause: error },
+          // The browser surface itself is live, so do not kill or replay the in-flight generation
+          // merely because its replacement CDP network session could not attach. Preserve the
+          // existing tracker state and keep rendering this exact page; DOM state never substitutes
+          // for the missing network lifecycle completion signal.
+          console.warn(
+            `[lca-codex] browser turn ${turn.traceId} continuing generation after network observer reattach failed; network completion remains authoritative`,
           );
         }
         await staleConnection.close().catch(() => {});
@@ -2168,16 +2171,20 @@ export class ChatGptBrowserWorker {
           if (await reattachLauncherSurface()) continue;
           throw error;
         }
-        if (snapshot.visibleText) lastResponseVisibleText = snapshot.visibleText;
         const networkState = networkObserver.snapshot();
-        const networkCompletionObserved = networkState.completed;
-        // The websocket terminal frame can win a very small race with React's final DOM commit.
-        // Confirm the latched terminal event on the next ordinary poll before finishing the DOM
-        // serializer. DOM presence is deliberately not part of lifecycle completion: React may
-        // remove/remount the answer without changing the authoritative WS turn state.
-        const networkCompletionReady = networkCompletionObserved
-          && networkCompletionObservedOnPriorPoll;
-        networkCompletionObservedOnPriorPoll = networkCompletionObserved;
+        if (networkState.completed) {
+          // Probe data shows the owned conversation-turn-complete arrives after the final answer
+          // has rendered. Re-read the DOM once at that authoritative terminal edge so finish()
+          // serializes the newest canonical root without imposing a fixed post-network delay.
+          // DOM still cannot create completion; this read only protects the final render tail.
+          try {
+            snapshot = await this.responseDomSnapshot(responseTurn);
+          } catch (error) {
+            if (await reattachLauncherSurface()) continue;
+            throw error;
+          }
+        }
+        if (snapshot.visibleText) lastResponseVisibleText = snapshot.visibleText;
         const activitySignature = [
           snapshot.completionActionVisible ? "1" : "0",
           snapshot.fullHtml,
@@ -2187,29 +2194,7 @@ export class ChatGptBrowserWorker {
         previousActivitySignature = activitySignature;
         const nextPollMs = pollScheduler.nextDelay(activityChanged);
         const observedAt = Date.now();
-
-        let recoveredCompletionObserved = false;
-        if (networkObserverGapObserved
-          && networkState.turnKnown
-          && !networkState.completed
-          && snapshot.responsePresent
-          && snapshot.completionActionVisible) {
-          const stopVisible = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
-          if (!stopVisible) {
-            if (activityChanged || recoveredCompletionStableSince === undefined) {
-              recoveredCompletionStableSince = observedAt;
-            }
-            recoveredCompletionObserved = observedAt - recoveredCompletionStableSince
-              >= CHATGPT_NETWORK_GAP_RECOVERY_STABILITY_MS;
-          } else {
-            recoveredCompletionStableSince = undefined;
-          }
-        } else {
-          recoveredCompletionStableSince = undefined;
-        }
-        const recoveredCompletionReady = recoveredCompletionObserved
-          && recoveredCompletionObservedOnPriorPoll;
-        recoveredCompletionObservedOnPriorPoll = recoveredCompletionObserved;
+        const networkCompletionReady = networkState.completed;
 
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
@@ -2223,8 +2208,10 @@ export class ChatGptBrowserWorker {
             await diagnostics.capture(page, "response-visible");
           }
           // responseDomSnapshot already separates intermediate commentary from top-level answer
-          // Markdown. Stream only semantic blocks that are structurally complete and byte-stable;
-          // websocket lifecycle remains the terminal authority and finish() flushes the final tail.
+          // Markdown. Stream every semantic block only after it is structurally complete and
+          // byte-stable. This applies to connector/tool turns too: if ChatGPT later rewrites a
+          // committed block, Responses deltas stay append-only and the replacement can append as
+          // a new stable block. finish() flushes only the remaining canonical final-answer tail.
           const markdownDelta = markdownBuffer.observe(
             snapshot.markdownSegments,
             observedAt,
@@ -2266,13 +2253,7 @@ export class ChatGptBrowserWorker {
             );
           }
         }
-        if (networkCompletionReady || recoveredCompletionReady) {
-          if (recoveredCompletionReady && !networkCompletionReady) {
-            completionSource = "network_gap_dom_recovery";
-            console.warn(
-              `[lca-codex] browser turn ${turn.traceId} recovered completion after a CDP observer gap`,
-            );
-          }
+        if (networkCompletionReady) {
           const completedVisibleText = snapshot.visibleText || lastResponseVisibleText;
           if (completedVisibleText === "api_tool unavailable") {
             throw new Error(`ChatGPT selected mode rejected the ${JSON.stringify(this.config.appName)} connector (api_tool unavailable)`);
@@ -2300,7 +2281,7 @@ export class ChatGptBrowserWorker {
         attempt,
         durationMs: activityDuration(startedAt),
         responseChars: finalText.length,
-        completionSource,
+        completionSource: "network",
       });
       console.info(`[lca-codex] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;

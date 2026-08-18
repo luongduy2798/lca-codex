@@ -232,15 +232,15 @@ flowchart TD
     subgraph PG["Phase G · Authoritative completion and Responses encoding"]
         direction TB
         Q24{"<b>How does the browser turn terminate?</b>"}:::decision
-        S24["<b>STEP 24 · Resolve terminal lifecycle</b><br/><b>Normal:</b> conversation-turn-complete observed after arm<br/><b>Gap recovery:</b> only after a known CDP observer gap + prior stream progress + stable terminal DOM evidence<br/><b>Rule:</b> DOM is never a general completion source"]:::card
-        S25["<b>STEP 25 · Flush final browser outcome</b><br/><b>Owner:</b> browser worker / adapter<br/><b>During generation:</b> stable top-level Markdown blocks may already be streamed<br/><b>Terminal:</b> one normal React poll, then flush the remaining mutable Markdown tail"]:::card
+        S24["<b>STEP 24 · Resolve terminal lifecycle</b><br/><b>Authority:</b> owned conversation-turn-complete only<br/><b>Terminal render read:</b> re-snapshot the canonical answer DOM once at the network terminal edge<br/><b>Rule:</b> no fixed post-network settle timer; DOM never creates completion"]:::card
+        S25["<b>STEP 25 · Flush final browser outcome</b><br/><b>Owner:</b> browser worker / adapter<br/><b>All turns:</b> append structurally complete, stable semantic answer blocks during generation<br/><b>Terminal:</b> flush only the remaining canonical Markdown tail"]:::card
         S26["<b>STEP 26 · Revoke turn capability</b><br/><b>Route:</b> adapter → turn broker<br/><b>Action:</b> retire turn_token + binding_id<br/><b>Result:</b> reject later or still-pending connector use"]:::card
         S27["<b>STEP 27 · Encode final Responses result</b><br/><b>Route:</b> adapter → daemon → Codex<br/><b>If stream=true:</b> SSE reasoning/text/output_item events,<br/>then response.completed with output + usage<br/><b>If stream=false:</b> completed JSON Responses object"]:::success
         S28["<b>STEP 28 · Remember bounded continuation state</b><br/><b>Route:</b> daemon → Responses state<br/><b>Send:</b> raw request + completed response<br/><b>Result:</b> future previous_response_id can restore this turn"]:::card
         E24["<b>TERMINAL ERROR / INCOMPLETE</b><br/><b>Route:</b> adapter / daemon → Codex<br/><b>Return:</b> response.failed or response.incomplete<br/><b>Cleanup:</b> active turn capability is still revoked"]:::error
     end
 
-    Q24 -- "network completion or guarded gap recovery" --> S24 --> S25 --> S26 --> S27 --> S28
+    Q24 -- "network lifecycle completion" --> S24 --> S25 --> S26 --> S27 --> S28
     Q24 -- "failure or incomplete" --> E24
 ```
 
@@ -259,15 +259,14 @@ browser response resumes; LCA Codex does not start a second planner or a replace
 the tool round-trip.
 
 Normal completion is network-authoritative. The browser worker accepts a valid
-`conversation-turn-complete` observed after the tracker was armed, confirms that latched terminal state
-on the next ordinary poll, flushes the remaining Markdown tail, and finishes the Responses stream.
-A second terminal source exists only for a proven CDP observer gap: if stream progress was already observed
-but the terminal frame may have been lost while disconnected, recovery requires a visible response,
-terminal action evidence, no Stop control, at least 1.5 seconds of stable activity, and a confirming
-subsequent poll. This narrow recovery does not restore the old DOM-lifecycle model. For a completed
-response the daemon records bounded continuation state for `previous_response_id`; the turn broker
-revokes the turn token/binding and rejects any later use of that capability. The Electron tab may remain
-visible for inspection, but its completed capability is not reusable by another Codex turn.
+`conversation-turn-complete` observed after the tracker was armed and does not add a fixed terminal
+settle delay. At that network terminal edge it re-reads the canonical response DOM once before finalizing
+the Markdown buffer so the newest rendered tail is included. That terminal DOM read is render protection,
+not a second lifecycle source: without network completion, terminal-looking DOM, footer controls, remounts,
+or long periods of unchanged content cannot finish the Codex turn. For a completed response the daemon
+records bounded continuation state for `previous_response_id`; the turn
+broker revokes the turn token/binding and rejects any later use of that capability. The Electron tab may
+remain visible for inspection, but its completed capability is not reusable by another Codex turn.
 
 Compaction is a separate end-to-end path rather than a variation of the normal tool loop. A Codex
 compaction request starts a dedicated browser checkpoint turn over a frozen broker snapshot. Normal
@@ -299,24 +298,38 @@ frames seen before arming are ignored.
 The public ChatGPT DOM is deliberately not the normal liveness/completion authority. Assistant nodes
 may be removed, replaced, or remounted by React; global Stop/Copy/action controls may also be stale or
 absent. DOM instead supplies the visible content stream. `responseDomSnapshot` separates Markdown inside
-`[data-streaming-response-status]` as intermediate commentary from top-level answer Markdown. The
-Markdown buffer then appends only structurally complete, byte-stable answer blocks, so both tool-capable
-and read-only turns can stream final-answer text to Codex while ChatGPT is still generating. The final
-mutable block remains buffered until terminal resolution. A terminal turn with no renderable Markdown
-fails explicitly instead of returning an empty successful response. Visible reasoning/commentary and local-tool
-confirmation are also DOM-derived; Stop is pressed only for an explicit abort.
+`[data-streaming-response-status]` as intermediate commentary from top-level answer Markdown. During a
+React remount multiple visible answer roots can overlap briefly, so serialization uses only the final
+visible top-level answer root instead of concatenating old and replacement roots. The Markdown buffer
+reconciles already-emitted blocks by semantic content rather than positional DOM keys; removal, reorder,
+insertion, or remount therefore cannot retract bytes or terminate the stream. A later rewrite of a block
+whose bytes already escaped becomes a new append candidate instead of a protocol failure.
+
+All turns, including tool/connector turns, may append structurally complete, byte-stable answer blocks
+while ChatGPT is still generating. If React later removes, reorders, remounts, or rewrites an already
+committed block, the escaped Responses bytes are never retracted; genuinely new replacement content can
+append after it becomes structurally complete and stable. The final mutable block is flushed from the
+latest canonical answer root. A terminal turn with no renderable Markdown fails explicitly instead of
+returning an empty successful response. Visible reasoning/commentary and local-tool confirmation are also
+DOM-derived; Stop is pressed only for an explicit abort.
 
 The network observer is required infrastructure, not optional telemetry. Initial attachment must
 succeed before Send. If the launcher-owned CDP transport drops, the worker reconnects to the same
-surface without replaying the ChatGPT generation, keeps the existing network tracker, marks that a
-network-observer gap occurred, and reattaches a fresh CDP session. A failed reattachment is terminal.
-Normally, network completion is latched across the next poll so React can commit its final DOM tail.
-Only when a known observer gap occurred and stream progress was already observed may the guarded
-`network_gap_dom_recovery` path resolve a missed terminal frame from stable terminal DOM evidence; this
-requires no visible Stop control, a visible response/action footer, 1.5 seconds of unchanged activity,
-and confirmation on another poll. Activity logs expose normalized one-shot `created`, `streaming`, and
-`completed` milestones plus `network` versus `network_gap_dom_recovery` completion source; they never
-log raw WebSocket payloads, response content, credentials, or opaque conversation/turn identifiers.
+surface without replaying the ChatGPT generation, keeps the existing network tracker, and attempts
+to attach a fresh CDP session. If replacement observer
+attachment fails but the launcher surface itself is still live, the in-flight ChatGPT generation is not
+killed or replayed. The worker records the observer failure, preserves the existing tracker state, and
+continues rendering that same page. DOM state does not substitute for the missing network lifecycle
+signal, so a footer/remount/stable terminal-looking tree cannot complete the turn on its own. Initial
+attachment before Send still fails closed because no page-local lifecycle ownership has been established yet.
+
+Network lifecycle completion is the sole terminal authority. Once it has been observed, the worker takes
+one fresh canonical response-DOM snapshot and immediately finalizes from that render; there is no fixed
+post-network 1.5-second settle window. Independently, each streamable Markdown block must remain byte-stable
+for the normal 750 ms block-stability window before it is emitted, so partially generated structures such
+as fenced code are not serialized prematurely. Activity logs expose normalized one-shot `created`, `streaming`, and
+`completed` milestones with `completionSource: "network"`; they never log raw WebSocket payloads,
+response content, credentials, or opaque conversation/turn identifiers.
 
 Normal tool-capable turns do not replay the entire accumulated Codex history through the
 visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
