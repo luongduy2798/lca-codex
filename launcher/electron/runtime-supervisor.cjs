@@ -994,7 +994,7 @@ class RuntimeSupervisor {
     const deadline = Date.now() + timeoutMs;
     let lastDetail = "tunnel status has not been observed";
     let lastPublishedDetail;
-    while (Date.now() < deadline) {
+    do {
       if (this.cancelStartRequested) throw new Error("Runtime start was cancelled");
       const health = await this.readTunnelHealth(config);
       if (health.pid) {
@@ -1030,7 +1030,7 @@ class RuntimeSupervisor {
         });
       }
       await sleep(TUNNEL_HEALTH_POLL_INTERVAL_MS);
-    }
+    } while (Date.now() < deadline);
     throw new Error(
       `Tunnel runtime did not become healthy and ready within ${timeoutMs}ms: ${lastDetail}`,
     );

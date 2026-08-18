@@ -319,12 +319,11 @@ function LauncherShell({
                   active={surface === "browser"}
                   badge={needsBrowser
                     ? <ActionDot pulse tone="required" />
-                    : browser?.status === "error"
-                      ? <ActionDot tone="error" />
-                      : null}
+                    : <StateDot state={browserTone(browser)} />}
                   icon="browser"
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
+                  subtitle={`${copy.browserTabMax} ${browser?.maxTabs ?? 5}`}
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
@@ -440,6 +439,10 @@ function LauncherShell({
               <McpSurface
                 copy={copy}
                 onDone={() => setSurface("setup")}
+                openConnectors={async () => {
+                  await activateBrowser();
+                  await api!.openChatGptConnectors();
+                }}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -581,6 +584,7 @@ function SidebarItem({
   icon,
   label,
   onClick,
+  subtitle,
   tone,
 }: {
   active: boolean;
@@ -589,18 +593,22 @@ function SidebarItem({
   icon: IconName;
   label: string;
   onClick: () => void;
+  subtitle?: string;
   tone?: "update";
 }) {
   return (
     <button
       aria-current={active ? "page" : undefined}
-      className={`sidebar-item${active ? " is-active" : ""}${tone === "update" ? " is-update" : ""}`}
+      className={`sidebar-item${active ? " is-active" : ""}${subtitle ? " has-subtitle" : ""}${tone === "update" ? " is-update" : ""}`}
       disabled={disabled}
       onClick={onClick}
       type="button"
     >
       <Icon name={icon} />
-      <span>{label}</span>
+      <span className="sidebar-item-copy">
+        <span>{label}</span>
+        {subtitle ? <small>{subtitle}</small> : null}
+      </span>
       {badge ? <i className="sidebar-item-badge">{badge}</i> : null}
     </button>
   );
@@ -1451,6 +1459,7 @@ function VsCodeAdvancedSurface({
 function McpSurface({
   copy,
   onDone,
+  openConnectors,
   operation,
   setError,
   snapshot,
@@ -1458,6 +1467,7 @@ function McpSurface({
 }: {
   copy: Copy;
   onDone: () => void;
+  openConnectors: () => Promise<void>;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -1668,11 +1678,11 @@ function McpSurface({
                 </div>
                 <div className="inline-actions">
                   <SecondaryButton
-                    icon="external"
+                    icon="browser"
                     onClick={() => void (async () => {
                       setError(null);
                       try {
-                        await api!.openExternal(snapshot.urls.connectors);
+                        await openConnectors();
                       } catch (cause) {
                         setError(messageOf(cause));
                       }
@@ -2199,27 +2209,13 @@ function SettingsSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [activeAction, setActiveAction] = useState<"doctor" | "cancel" | "upsell" | "uninstall" | null>(null);
+  const [activeAction, setActiveAction] = useState<"doctor" | "factory-reset" | "upsell" | null>(null);
   const busy = activeAction !== null;
-  const [turnsCancelled, setTurnsCancelled] = useState(false);
-  const [integrationRemoved, setIntegrationRemoved] = useState(false);
 
   const runDoctor = async () => {
     setActiveAction("doctor");
     try {
       setDoctor(await api!.doctor());
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setActiveAction(null);
-    }
-  };
-  const cancelTurns = async () => {
-    setActiveAction("cancel");
-    setError(null);
-    try {
-      await api!.cancelTurns();
-      setTurnsCancelled(true);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -2238,22 +2234,17 @@ function SettingsSurface({
       setActiveAction(null);
     }
   };
-  const uninstallIntegration = async () => {
-    setActiveAction("uninstall");
+  const factoryReset = async () => {
+    setActiveAction("factory-reset");
     setError(null);
     try {
-      const result = await api!.uninstallIntegration();
-      if (!result.cancelled) {
-        updateState(result.state);
-        setIntegrationRemoved(true);
-      }
+      const result = await api!.factoryReset();
+      if (result.cancelled) setActiveAction(null);
     } catch (cause) {
       setError(messageOf(cause));
-    } finally {
       setActiveAction(null);
     }
   };
-
   return (
     <ContentSurface narrow title={copy.settingsTitle}>
       <SectionHeading label={copy.general} />
@@ -2311,23 +2302,15 @@ function SettingsSurface({
         </span>
         {activeAction === "doctor" ? <ButtonSpinner /> : <Icon name="chevron" />}
       </button>
-      <button className="diagnostic-row" disabled={busy} onClick={() => void cancelTurns()} type="button">
-        <Icon name="close" />
-        <span>
-          <strong>{copy.cancelTurns}</strong>
-          <small>{turnsCancelled ? copy.turnsCancelled : copy.cancelTurnsBody}</small>
-        </span>
-        {activeAction === "cancel" ? <ButtonSpinner /> : <Icon name="chevron" />}
-      </button>
-      <button className="diagnostic-row" disabled={busy} onClick={() => void uninstallIntegration()} type="button">
-        <Icon name="close" />
-        <span>
-          <strong>{copy.uninstallIntegration}</strong>
-          <small>{integrationRemoved ? copy.integrationRemoved : copy.uninstallIntegrationBody}</small>
-        </span>
-        {activeAction === "uninstall" ? <ButtonSpinner /> : <Icon name="chevron" />}
-      </button>
       {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
+      <button className="diagnostic-row" disabled={busy} onClick={() => void factoryReset()} type="button">
+        <Icon name="trash" />
+        <span>
+          <strong>{copy.factoryReset}</strong>
+          <small>{copy.factoryResetBody}</small>
+        </span>
+        {activeAction === "factory-reset" ? <ButtonSpinner /> : <Icon name="chevron" />}
+      </button>
 
       <div className="about-row">
         <BrandMark small />

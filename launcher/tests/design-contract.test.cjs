@@ -179,6 +179,14 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*0;/);
 });
 
+test("browser sidebar exposes the five-tab limit and mirrors live browser status color", () => {
+  assert.match(i18nSource, /browserTabMax: "Max"/);
+  assert.match(appSource, /subtitle=\{`\$\{copy\.browserTabMax\} \$\{browser\?\.maxTabs \?\? 5\}`\}/);
+  assert.match(appSource, /badge=\{needsBrowser[\s\S]*?<ActionDot pulse tone="required" \/>[\s\S]*?: <StateDot state=\{browserTone\(browser\)\} \/>\}/);
+  assert.match(styles, /\.sidebar-item\.has-subtitle\s*\{[^}]*height:\s*42px/s);
+  assert.match(styles, /\.sidebar-item-copy > small\s*\{[^}]*font-size:\s*10px[^}]*line-height:\s*12px/s);
+});
+
 test("runtime details omit mode switching and expose broker and tunnel state", () => {
   assert.doesNotMatch(appSource, /runtime\.mode|runtime-mode-suggestion|switchToCodexMode|chatgptMode/);
   assert.match(i18nSource, /mcpTitle: "MCP"/);
@@ -368,8 +376,15 @@ test("runtime lifecycle owns the Codex bridge without exposing a separate switch
 
 test("long-running diagnostics expose action-local progress", () => {
   assert.match(appSource, /activeAction === "doctor" \? <ButtonSpinner \/> : <Icon name="chevron" \/>/);
-  assert.match(appSource, /activeAction === "cancel" \? <ButtonSpinner \/> : <Icon name="chevron" \/>/);
-  assert.match(appSource, /activeAction === "uninstall" \? <ButtonSpinner \/> : <Icon name="chevron" \/>/);
+  assert.match(appSource, /activeAction === "factory-reset" \? <ButtonSpinner \/> : <Icon name="chevron" \/>/);
+  assert.match(appSource, /copy\.factoryResetBody/);
+  assert.match(preloadSource, /factoryReset: \(\) => ipcRenderer\.invoke\("launcher:factory-reset"\)/);
+  assert.match(electronMain, /handle\("launcher:factory-reset"[\s\S]*?requestQuit\(\{[\s\S]*?beforeCommit: async \(\) => \{[\s\S]*?codexUsageUpsellPatcher\?\.reset\(\)[\s\S]*?runtimeHost\.removeVsCodeAdvanced\(\)[\s\S]*?runtimeHost\.uninstallIntegration\(\)/);
+  assert.match(electronMain, /const commit = async \(\) => \{[\s\S]*?beforeCommit[\s\S]*?runtimeLifecycle\.quit\(\{ commit \}\)/);
+  assert.match(electronMain, /factoryResetRelaunchArgs\(process\.argv\)/);
+  assert.match(i18nSource, /factoryReset: "Restore factory settings"/);
+  assert.doesNotMatch(appSource, /copy\.cancelTurns|copy\.uninstallIntegration/);
+  assert.doesNotMatch(i18nSource, /Cancel retained browser turn|Remove Codex integration/);
 });
 
 test("doctor summary never hides failed checks behind trailing healthy checks", () => {
@@ -443,6 +458,15 @@ test("MCP verification has one primary action and exposes live progress", () => 
     browserHostSource,
     /querySelectorAll\('\[role="group"\], \[role="option"\], \[role="menuitem"\]'\)/,
   );
+});
+
+test("MCP connector setup stays in the launcher's private ChatGPT session and verification refreshes it", () => {
+  assert.match(appSource, /openConnectors=\{async \(\) => \{[\s\S]*?activateBrowser\(\)[\s\S]*?api!\.openChatGptConnectors\(\)/);
+  assert.doesNotMatch(appSource, /api!\.openExternal\(snapshot\.urls\.connectors\)/);
+  assert.match(preloadSource, /openChatGptConnectors:[\s\S]*?launcher:browser-connectors/);
+  assert.match(electronMain, /launcher:browser-connectors[\s\S]*?browserHost\.openConnectorSettings\(\)/);
+  assert.match(browserHostSource, /CONNECTOR_SETTINGS_HASH = "#settings\/Connectors"[\s\S]*?openConnectorSettings[\s\S]*?loadURL\(TEMPORARY_CHAT_URL\)[\s\S]*?CONNECTOR_SETTINGS_HASH/);
+  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?loadURL\(TEMPORARY_CHAT_URL\)[\s\S]*?verifyConnectorWithBrowserHelper/);
 });
 
 test("launcher refreshes persisted ChatGPT authentication before presenting setup", () => {

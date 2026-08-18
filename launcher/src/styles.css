@@ -451,6 +451,10 @@ code {
     background var(--duration-micro) ease;
 }
 
+.sidebar-item.has-subtitle {
+  height: 42px;
+}
+
 .sidebar-item:hover {
   background: var(--color-background-control-hover);
   color: var(--color-text-primary);
@@ -488,10 +492,26 @@ code {
   color: var(--color-icon-secondary);
 }
 
-.sidebar-item > span {
+.sidebar-item-copy {
+  display: flex;
   min-width: 0;
   flex: 1;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.sidebar-item-copy > span {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-item-copy > small {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

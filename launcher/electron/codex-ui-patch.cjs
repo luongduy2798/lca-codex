@@ -204,6 +204,16 @@ class CodexUsageUpsellPatcher {
     this.logger.info("codex.ui_usage_upsell_restored", { version: status.version });
     return { ...next, mutated: true };
   }
+
+  reset() {
+    const before = this.inspect();
+    const restored = before.state === "applied" ? this.restore() : { ...before, mutated: false };
+    const bundlePath = restored.bundlePath ?? before.bundlePath;
+    const backupPath = bundlePath ? safeBackupFor(bundlePath) : null;
+    if (backupPath) fs.rmSync(backupPath, { force: true });
+    if (backupPath) this.logger.info("codex.ui_usage_upsell_backup_removed", { version: restored.version });
+    return { ...restored, backupAvailable: false, mutated: restored.mutated || Boolean(backupPath) };
+  }
 }
 
 module.exports = {

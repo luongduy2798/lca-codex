@@ -30,11 +30,14 @@ test("the public source workflow is Electron-first without terminal lifecycle al
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.lcacodex.launcher");
   assert.equal(manifest.build.productName, "LCA Codex");
+  assert.equal(manifest.desktopName, "lca-codex.desktop");
   assert.equal(manifest.build.artifactName, "lca-codex-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
   assert.equal(manifest.build.win.icon, "assets/icon.ico");
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
+  assert.equal(manifest.build.linux.executableName, "lca-codex");
+  assert.equal(manifest.build.linux.syncDesktopName, true);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
   assert.equal(manifest.build.nsis.perMachine, false);
@@ -74,6 +77,10 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /PLATFORM="linux"/);
   assert.match(shellInstaller, /lca-codex\.desktop/);
   assert.match(shellInstaller, /--appimage-extract/);
+  assert.match(shellInstaller, /ICON_SOURCE="\$EXTRACT_DIR\/squashfs-root\/\.DirIcon"/);
+  assert.doesNotMatch(shellInstaller, /find .*\*\.png/);
+  assert.match(shellInstaller, /Name=LCA Codex/);
+  assert.match(shellInstaller, /StartupWMClass=lca-codex/);
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /process\.execPath/);
   assert.match(packager, /electron-builder\/out\/cli\/cli\.js/);

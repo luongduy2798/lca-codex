@@ -12,6 +12,7 @@ const {
   allowedAuthUrl,
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
+  googleAccountChooserUrl,
   initialBrowserBounds,
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
@@ -257,6 +258,20 @@ test("authentication windows stay in the owned browser surface", () => {
   const source = require("node:fs").readFileSync(require.resolve("../electron/browser-host.cjs"), "utf8");
   assert.match(source, /createWindow:\s*\(options\)\s*=>\s*this\.createAuthView\(options\)/);
   assert.doesNotMatch(source, /overrideBrowserWindowOptions/);
+});
+
+test("Google OAuth always asks which account to use", () => {
+  const rewritten = googleAccountChooserUrl(
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=openai&prompt=login&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fauth%2Fcallback",
+  );
+  assert.ok(rewritten);
+  const parsed = new URL(rewritten);
+  assert.equal(parsed.searchParams.get("prompt"), "login select_account");
+  assert.equal(parsed.searchParams.get("client_id"), "openai");
+  assert.equal(parsed.searchParams.get("redirect_uri"), "https://chatgpt.com/auth/callback");
+  assert.equal(googleAccountChooserUrl(rewritten), null);
+  assert.equal(googleAccountChooserUrl("https://accounts.google.com/ServiceLogin"), null);
+  assert.equal(googleAccountChooserUrl("https://chatgpt.com/auth/login"), null);
 });
 
 test("concurrent login requests share one authentication operation", async () => {
@@ -956,8 +971,8 @@ test("a replacement helper takes over only after the previous owner exited", () 
   assert.equal(warnings[0][1].previousHelperPid, deadPid);
 });
 
-test("connector verification preserves an already hydrated Temporary Chat page", async () => {
-  let loaded = false;
+test("connector verification refreshes an already hydrated Temporary Chat page", async () => {
+  const loaded = [];
   const fixture = {
     visible: true,
     surfaceActive: true,
@@ -975,7 +990,7 @@ test("connector verification preserves an already hydrated Temporary Chat page",
     view: {
       webContents: {
         getURL: () => "https://chatgpt.com/?temporary-chat=true",
-        loadURL: async () => { loaded = true; },
+        loadURL: async (url) => { loaded.push(url); },
         setBackgroundThrottling() {},
       },
     },
@@ -983,9 +998,38 @@ test("connector verification preserves an already hydrated Temporary Chat page",
 
   await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
 
-  assert.equal(loaded, false);
+  assert.deepEqual(loaded, ["https://chatgpt.com/?temporary-chat=true"]);
   assert.equal(fixture.visible, true);
   assert.equal(fixture.surfaceActive, true);
+});
+
+test("connector setup opens ChatGPT Plugins in the owned private browser session", async () => {
+  const calls = [];
+  const fixture = {
+    withManualOperation: async (name, action) => {
+      calls.push(["operation", name]);
+      return await action();
+    },
+    show: () => calls.push(["show"]),
+    waitForAuthenticated: async (timeoutMs) => calls.push(["authenticated", timeoutMs]),
+    setState: (patch) => calls.push(["state", patch]),
+    snapshot: () => ({ authenticated: true }),
+    view: {
+      webContents: {
+        loadURL: async (url) => calls.push(["load", url]),
+        executeJavaScript: async (script) => calls.push(["script", script]),
+        getURL: () => "https://chatgpt.com/?temporary-chat=true#settings/Connectors",
+      },
+    },
+  };
+
+  const result = await BrowserHost.prototype.openConnectorSettings.call(fixture);
+
+  assert.deepEqual(result, { authenticated: true });
+  assert.deepEqual(calls.slice(0, 4).map(([name]) => name), ["operation", "show", "load", "authenticated"]);
+  assert.equal(calls[2][1], "https://chatgpt.com/?temporary-chat=true");
+  assert.match(calls[4][1], /#settings\/Connectors/);
+  assert.equal(calls[5][1].authenticated, true);
 });
 
 test("launcher session refresh resolves persisted authentication before setup actions", async () => {

@@ -19,6 +19,7 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
+const CONNECTOR_SETTINGS_HASH = "#settings/Connectors";
 const IDLE_BROWSER_URL = "about:blank#lca-codex-browser-host";
 const SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const SMOKE_EXPECTED = "CODEX WEB GPT READY";
@@ -30,6 +31,7 @@ const MAX_BROWSER_TABS = 5;
 const DEFAULT_BACKGROUND_BROWSER_SIZE = Object.freeze({ width: 1024, height: 720 });
 const CHATGPT_PARTITION = "persist:lca-codex-chatgpt";
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
+const GOOGLE_OAUTH_REQUEST_FILTER = { urls: ["https://accounts.google.com/o/oauth2/*"] };
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
 const COMPOSER_SELECTOR = [
@@ -122,6 +124,24 @@ function allowedAuthUrl(value) {
     || parsed.hostname === "login.microsoftonline.com"
     || parsed.hostname.endsWith(".apple.com")
   );
+}
+
+function googleAccountChooserUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== "accounts.google.com") return null;
+  if (!/^\/o\/oauth2\/(?:v2\/)?auth\/?$/.test(parsed.pathname)) return null;
+  const prompts = (parsed.searchParams.get("prompt") || "").split(/\s+/).filter(Boolean);
+  if (prompts.includes("select_account")) return null;
+  parsed.searchParams.set(
+    "prompt",
+    prompts.includes("none") ? "select_account" : [...prompts, "select_account"].join(" "),
+  );
+  return parsed.toString();
 }
 
 function isTemporaryChatUrl(value) {
@@ -228,6 +248,7 @@ class BrowserHost {
     this.view.setBounds(this.bounds);
     this.view.setVisible(false);
     this.bindChatGptBackendRecovery();
+    this.bindGoogleAccountChooser();
     this.bindWebContents();
     void this.view.webContents.loadURL(IDLE_BROWSER_URL).catch((error) => {
       const currentUrl = this.view.webContents.getURL();
@@ -436,6 +457,20 @@ class BrowserHost {
     this.view.webContents.session.webRequest.onCompleted(
       CHATGPT_BACKEND_REQUEST_FILTER,
       details => this.handleChatGptBackendResponse(details),
+    );
+  }
+
+  bindGoogleAccountChooser() {
+    this.view.webContents.session.webRequest.onBeforeRequest(
+      GOOGLE_OAUTH_REQUEST_FILTER,
+      (details, callback) => {
+        if (details.resourceType !== "mainFrame") {
+          callback({});
+          return;
+        }
+        const redirectURL = googleAccountChooserUrl(details.url);
+        callback(redirectURL ? { redirectURL } : {});
+      },
     );
   }
 
@@ -764,6 +799,29 @@ class BrowserHost {
       await this.probeAuthentication();
     }
     return this.snapshot();
+  }
+
+  async openConnectorSettings() {
+    return await this.withManualOperation("connector setup", async () => {
+      const contents = this.view.webContents;
+      this.show();
+      // Always hydrate a fresh Temporary Chat first. This keeps connector setup on the exact
+      // private ChatGPT session used by Codex and gives the settings hash a known authenticated
+      // app shell instead of delegating to the user's default browser/session.
+      await contents.loadURL(TEMPORARY_CHAT_URL);
+      await this.waitForAuthenticated(60_000);
+      await contents.executeJavaScript(
+        `location.hash = ${JSON.stringify(CONNECTOR_SETTINGS_HASH)}; location.href`,
+        true,
+      );
+      this.setState({
+        status: "ready",
+        message: "ChatGPT connector settings opened",
+        authenticated: true,
+        url: contents.getURL(),
+      });
+      return this.snapshot();
+    });
   }
 
   hide() {
@@ -1557,9 +1615,9 @@ class BrowserHost {
     contents.setBackgroundThrottling(false);
     const restoreVerificationSurface = this.beginConnectorVerificationSurface();
     try {
-      if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
-      }
+      // Connector discovery is hydrated into the ChatGPT page. Reload even when we are already
+      // on Temporary Chat so a connector created moments ago cannot be hidden by stale page state.
+      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
       await this.waitForAuthenticated(60_000);
       await this.waitForVisibleComposer();
       const result = await this.verifyConnectorWithBrowserHelper({
@@ -1689,6 +1747,7 @@ module.exports = {
   allowedAuthUrl,
   BrowserHost,
   CHATGPT_VIEWPORT_CSS,
+  googleAccountChooserUrl,
   IDLE_BROWSER_URL,
   initializationNavigationWasSuperseded,
   initialBrowserBounds,

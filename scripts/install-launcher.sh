@@ -125,11 +125,8 @@ chmod 0755 "$TEMP_DIR/$ASSET"
   cd "$EXTRACT_DIR"
   "$TEMP_DIR/$ASSET" --appimage-extract >/dev/null
 )
-ICON_SOURCE="$(find "$EXTRACT_DIR/squashfs-root" -type f -path '*/512x512/*' -name '*.png' | sort | head -n 1)"
-if [ -z "$ICON_SOURCE" ]; then
-  ICON_SOURCE="$(find "$EXTRACT_DIR/squashfs-root" -type f -name '*.png' | sort | head -n 1)"
-fi
-if [ -z "$ICON_SOURCE" ]; then
+ICON_SOURCE="$EXTRACT_DIR/squashfs-root/.DirIcon"
+if [ ! -f "$ICON_SOURCE" ]; then
   echo "Launcher AppImage does not contain a PNG application icon" >&2
   exit 1
 fi
@@ -172,7 +169,7 @@ cat > "$APPLICATIONS_DIR/lca-codex.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=lca-codex
+Name=LCA Codex
 Comment=LCA Codex models inside the native Codex harness
 Exec="$DESKTOP_WRAPPER"
 Icon=lca-codex

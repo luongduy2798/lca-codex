@@ -33,6 +33,11 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const { CodexUsageUpsellPatcher } = require("./codex-ui-patch.cjs");
 const {
+  FACTORY_RESET_CLEANUP_ARG,
+  cleanupFactoryResetPaths,
+  factoryResetRelaunchArgs,
+} = require("./factory-reset.cjs");
+const {
   createStateStore,
   nextSessionRefreshReminderAt,
   validateSidebarState,
@@ -77,9 +82,17 @@ const configuredUserData = process.env.LCA_CODEX_LAUNCHER_DATA_DIR?.trim();
 const launcherUserData = configuredUserData
   ? resolveUserPath(configuredUserData)
   : path.join(app.getPath("appData"), "lca-codex");
+app.setPath("userData", launcherUserData);
+let factoryResetCleanupError = null;
+if (process.argv.includes(FACTORY_RESET_CLEANUP_ARG)) {
+  try {
+    cleanupFactoryResetPaths([CORE_HOME, launcherUserData, app.getPath("logs")]);
+  } catch (error) {
+    factoryResetCleanupError = error instanceof Error ? error : new Error(String(error));
+  }
+}
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
-app.setPath("userData", launcherUserData);
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
 });
@@ -700,6 +713,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
   handle("launcher:browser-show", () => browserHost.reveal());
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
+  handle("launcher:browser-connectors", () => browserHost.openConnectorSettings());
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
@@ -840,6 +854,37 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
+  });
+  handle("launcher:factory-reset", async () => {
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Cancel", "Restore factory settings"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Restore factory settings",
+      message: "Erase all local LCA Codex data and return this app to first-run state?",
+      detail: "This signs out the launcher-owned ChatGPT session, removes LCA Codex runtime/config/state/logs, disables launch at login, and restores Codex/VS Code changes managed by LCA Codex. Unrelated Codex settings and files are preserved. The app will restart.",
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { cancelled: true };
+    if (runtimeHost.currentOperation()) {
+      throw new Error(`Another launcher operation is active: ${runtimeHost.currentOperation()}`);
+    }
+
+    const result = await requestQuit({
+      relaunchArgs: factoryResetRelaunchArgs(process.argv),
+      beforeCommit: async () => {
+        // runtimeLifecycle.quit() has already stopped the runtime and restored the native
+        // Codex route before this callback runs. Keep the LCA-owned journals intact until
+        // then so every external change can be restored before private data is removed.
+        setAutostart(app, false);
+        codexUsageUpsellPatcher?.reset();
+        runtimeHost.removeVsCodeAdvanced();
+        await runtimeHost.uninstallIntegration();
+      },
+    });
+    if (!result.ok) throw new Error(result.message);
+    return { cancelled: false };
   });
   handle("launcher:setup-core", async () => {
     const beforeState = stateStore.read();
@@ -1017,7 +1062,7 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+async function requestQuit({ relaunchArgs = null, beforeCommit = null } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -1028,12 +1073,14 @@ async function requestQuit() {
       loggerForQuit()?.warn?.("launcher.quit_during_operation", { operation: activeOperation });
     }
     const commit = async () => {
+      if (typeof beforeCommit === "function") await beforeCommit();
       stopCatalogVerificationMonitor();
       stopRuntimeStatusMonitor();
       stopCodexUsageUpsellMonitor();
       quitting = true;
       browserHost?.destroy();
       await browserControl?.close().catch(() => {});
+      if (Array.isArray(relaunchArgs)) app.relaunch({ args: relaunchArgs });
       exitCommitted = true;
       app.quit();
     };
@@ -1075,6 +1122,9 @@ async function start() {
   }
   app.on("second-instance", () => showMainWindow());
   await app.whenReady();
+  if (factoryResetCleanupError) {
+    throw new Error(`Factory reset cleanup failed: ${factoryResetCleanupError.message}`);
+  }
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
   const runtimeRootProvider = () => {

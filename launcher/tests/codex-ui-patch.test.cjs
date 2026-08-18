@@ -49,6 +49,21 @@ test("Codex usage-limit patch hides only the reached-limit upsell UI and restore
   }
 });
 
+test("factory reset restores the Codex UI bundle and removes the LCA-owned backup", () => {
+  const fx = fixture();
+  try {
+    const patcher = patcherFor(fx.extensions);
+    patcher.apply();
+    const reset = patcher.reset();
+    assert.equal(reset.state, "available");
+    assert.equal(reset.backupAvailable, false);
+    assert.equal(fs.readFileSync(fx.bundle, "utf8").includes(PATCH_MARKER), false);
+    assert.equal(fs.existsSync(`${fx.bundle}${BACKUP_SUFFIX}`), false);
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
 test("Codex usage-limit patch fails closed when a new extension build changes the known renderer signature", () => {
   const fx = fixture("26.6000.1", "prefix;function renamed(e){return 'codex.upsellBanner.general.title'};suffix");
   try {

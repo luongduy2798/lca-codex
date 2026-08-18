@@ -228,6 +228,7 @@ export interface LauncherApi {
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
+  openChatGptConnectors(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
@@ -247,6 +248,7 @@ export interface LauncherApi {
   saveCodexConfig(content: string): Promise<{ config: CodexConfigSnapshot; state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
+  factoryReset(): Promise<{ cancelled: boolean }>;
   restoreNativeCodex(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {
