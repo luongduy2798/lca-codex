@@ -12,6 +12,7 @@ const DEFAULT_STATE = Object.freeze({
   keepRunningOnClose: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
+  reviewCodexChangesPerFile: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
@@ -52,6 +53,7 @@ function readState(filePath) {
       "keepRunningOnClose",
       "showBrowserDuringTurns",
       "hideCodexUsageUpsell",
+      "reviewCodexChangesPerFile",
       "browserSmokePassed",
       "sidebarOpen",
     ]) {

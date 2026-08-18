@@ -5,10 +5,19 @@ const { renameAtomicFile } = require("./atomic-file.cjs");
 
 const EXTENSION_PREFIX = "openai.chatgpt-";
 const TARGET_FUNCTION = "function fjt(e){";
+const TARGET_FUNCTIONS = [TARGET_FUNCTION, "function c8n(e){"];
 const TARGET_PROOF = "codex.upsellBanner.general.title";
 const PATCH_MARKER = "/* lca-codex-hide-codex-usage-upsell */";
 const BACKUP_SUFFIX = ".lca-codex-usage-upsell.bak";
 const PATCH_BODY = `${PATCH_MARKER}if((e?.rateLimitStatus?.rate_limit?.limit_reached===!0||e?.rateLimitStatus?.rate_limit?.allowed===!1)&&e?.rateLimitWarningThreshold==null)return null;`;
+
+const REVIEW_BUNDLE_PATTERN = /^subagent-activity-chip-group-.*\.js$/;
+const REVIEW_TARGET_PROOF = "codex.unifiedDiff.reviewChangedFiles";
+const REVIEW_TARGET = "re=e=>{Ed(),Tc.dispatchMessage(`show-diff`,{unifiedDiff:n.unifiedDiff,conversationId:a,cwd:o??null})}";
+const REVIEW_PATCH_MARKER = "/* lca-codex-review-changes-per-file */";
+const REVIEW_BACKUP_SUFFIX = ".lca-codex-per-file-review.bak";
+const REVIEW_REPLACEMENT = `re=e=>{Ed();${REVIEW_PATCH_MARKER}let t=n.unifiedDiff;if(e!=null){let r=d.files.findIndex(t=>t.path===e),i=t.split(/(?=^diff --git )/m);i.length===d.files.length&&r>=0&&r<i.length&&(t=i[r])}Tc.dispatchMessage(\`show-diff\`,{unifiedDiff:t,conversationId:a,cwd:o??null})}`;
+const REVIEW_PROOF_DISTANCE = 30_000;
 
 function versionParts(version) {
   return String(version ?? "")
@@ -90,8 +99,44 @@ function bundleCandidates(extensionPath) {
     .map((name) => path.join(assets, name));
 }
 
+function reviewBundleCandidates(extensionPath) {
+  const assets = path.join(extensionPath, "webview", "assets");
+  let names = [];
+  try {
+    names = fs.readdirSync(assets);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => REVIEW_BUNDLE_PATTERN.test(name))
+    .map((name) => path.join(assets, name));
+}
+
 function hasPatchMarker(content) {
   return content.includes(PATCH_MARKER);
+}
+
+function usageTargetFunction(content) {
+  const matches = TARGET_FUNCTIONS.filter((candidate) => {
+    const first = content.indexOf(candidate);
+    if (first === -1) return false;
+    const second = content.indexOf(candidate, first + candidate.length);
+    const proof = content.indexOf(TARGET_PROOF, first);
+    return second === -1 && proof !== -1 && proof - first < 45_000;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function hasReviewPatchMarker(content) {
+  return content.includes(REVIEW_PATCH_MARKER);
+}
+
+function reviewTargetAvailable(content) {
+  const first = content.indexOf(REVIEW_TARGET);
+  if (first === -1) return false;
+  const second = content.indexOf(REVIEW_TARGET, first + REVIEW_TARGET.length);
+  const proof = content.indexOf(REVIEW_TARGET_PROOF, first);
+  return second === -1 && proof !== -1 && proof - first < REVIEW_PROOF_DISTANCE;
 }
 
 function replaceFileAtomicPreservingMode(filePath, content) {
@@ -110,9 +155,17 @@ function safeBackupFor(bundlePath) {
   const candidate = `${bundlePath}${BACKUP_SUFFIX}`;
   if (!fs.existsSync(candidate)) return null;
   const content = fs.readFileSync(candidate, "utf8");
-  if (!hasPatchMarker(content) && content.includes(TARGET_FUNCTION) && content.includes(TARGET_PROOF)) {
+  if (!hasPatchMarker(content) && usageTargetFunction(content) !== null) {
     return candidate;
   }
+  return null;
+}
+
+function safeReviewBackupFor(bundlePath) {
+  const candidate = `${bundlePath}${REVIEW_BACKUP_SUFFIX}`;
+  if (!fs.existsSync(candidate)) return null;
+  const content = fs.readFileSync(candidate, "utf8");
+  if (!hasReviewPatchMarker(content) && reviewTargetAvailable(content)) return candidate;
   return null;
 }
 
@@ -152,10 +205,7 @@ class CodexUsageUpsellPatcher {
       } catch {
         continue;
       }
-      const first = content.indexOf(TARGET_FUNCTION);
-      const second = first === -1 ? -1 : content.indexOf(TARGET_FUNCTION, first + TARGET_FUNCTION.length);
-      const proof = first === -1 ? -1 : content.indexOf(TARGET_PROOF, first);
-      if (first !== -1 && second === -1 && proof !== -1 && proof - first < 45_000) {
+      if (usageTargetFunction(content) !== null) {
         return {
           state: "available",
           version: extension.version,
@@ -178,9 +228,11 @@ class CodexUsageUpsellPatcher {
     const status = this.inspect();
     if (status.state !== "available") return { ...status, mutated: false };
     const content = fs.readFileSync(status.bundlePath, "utf8");
+    const targetFunction = usageTargetFunction(content);
+    if (!targetFunction) throw new Error("Codex usage-limit upsell renderer signature changed before patching");
     const backupPath = `${status.bundlePath}${BACKUP_SUFFIX}`;
     if (!fs.existsSync(backupPath)) fs.copyFileSync(status.bundlePath, backupPath, fs.constants.COPYFILE_EXCL);
-    const patched = content.replace(TARGET_FUNCTION, `${TARGET_FUNCTION}${PATCH_BODY}`);
+    const patched = content.replace(targetFunction, `${targetFunction}${PATCH_BODY}`);
     if (patched === content || !patched.includes(PATCH_MARKER)) {
       throw new Error("Codex usage-limit upsell patch could not be applied safely");
     }
@@ -216,11 +268,115 @@ class CodexUsageUpsellPatcher {
   }
 }
 
+class CodexPerFileReviewPatcher {
+  constructor({ extensionRoots, home = os.homedir(), logger } = {}) {
+    this.extensionRoots = extensionRoots ?? defaultExtensionRoots(home);
+    this.logger = logger ?? { info() {}, warn() {}, error() {} };
+  }
+
+  inspect() {
+    const extension = extensionCandidates(this.extensionRoots)[0];
+    if (!extension) {
+      return { state: "not-found", version: null, extensionPath: null, bundlePath: null, backupAvailable: false };
+    }
+    const bundles = reviewBundleCandidates(extension.extensionPath);
+    for (const bundlePath of bundles) {
+      let content;
+      try {
+        content = fs.readFileSync(bundlePath, "utf8");
+      } catch {
+        continue;
+      }
+      if (hasReviewPatchMarker(content)) {
+        return {
+          state: "applied",
+          version: extension.version,
+          extensionPath: extension.extensionPath,
+          bundlePath,
+          backupAvailable: safeReviewBackupFor(bundlePath) !== null,
+        };
+      }
+    }
+    for (const bundlePath of bundles) {
+      let content;
+      try {
+        content = fs.readFileSync(bundlePath, "utf8");
+      } catch {
+        continue;
+      }
+      if (reviewTargetAvailable(content)) {
+        return {
+          state: "available",
+          version: extension.version,
+          extensionPath: extension.extensionPath,
+          bundlePath,
+          backupAvailable: safeReviewBackupFor(bundlePath) !== null,
+        };
+      }
+    }
+    return {
+      state: "unsupported",
+      version: extension.version,
+      extensionPath: extension.extensionPath,
+      bundlePath: bundles[0] ?? null,
+      backupAvailable: false,
+    };
+  }
+
+  apply() {
+    const status = this.inspect();
+    if (status.state !== "available") return { ...status, mutated: false };
+    const content = fs.readFileSync(status.bundlePath, "utf8");
+    if (!reviewTargetAvailable(content)) throw new Error("Codex per-file review signature changed before patching");
+    const backupPath = `${status.bundlePath}${REVIEW_BACKUP_SUFFIX}`;
+    if (!fs.existsSync(backupPath)) fs.copyFileSync(status.bundlePath, backupPath, fs.constants.COPYFILE_EXCL);
+    const patched = content.replace(REVIEW_TARGET, REVIEW_REPLACEMENT);
+    if (patched === content || !patched.includes(REVIEW_PATCH_MARKER)) {
+      throw new Error("Codex per-file review patch could not be applied safely");
+    }
+    replaceFileAtomicPreservingMode(status.bundlePath, patched);
+    const next = this.inspect();
+    if (next.state !== "applied") throw new Error("Codex per-file review patch did not verify after writing");
+    this.logger.info("codex.ui_per_file_review_enabled", { version: next.version });
+    return { ...next, mutated: true };
+  }
+
+  restore() {
+    const status = this.inspect();
+    if (status.state !== "applied") return { ...status, mutated: false };
+    const backupPath = safeReviewBackupFor(status.bundlePath);
+    if (!backupPath) {
+      throw new Error("Codex per-file review patch cannot be restored because its clean backup is missing");
+    }
+    replaceFileAtomicPreservingMode(status.bundlePath, fs.readFileSync(backupPath, "utf8"));
+    const next = this.inspect();
+    if (next.state === "applied") throw new Error("Codex per-file review patch remained active after restore");
+    this.logger.info("codex.ui_per_file_review_restored", { version: status.version });
+    return { ...next, mutated: true };
+  }
+
+  reset() {
+    const before = this.inspect();
+    const restored = before.state === "applied" ? this.restore() : { ...before, mutated: false };
+    const bundlePath = restored.bundlePath ?? before.bundlePath;
+    const backupPath = bundlePath ? safeReviewBackupFor(bundlePath) : null;
+    if (backupPath) fs.rmSync(backupPath, { force: true });
+    if (backupPath) this.logger.info("codex.ui_per_file_review_backup_removed", { version: restored.version });
+    return { ...restored, backupAvailable: false, mutated: restored.mutated || Boolean(backupPath) };
+  }
+}
+
 module.exports = {
   BACKUP_SUFFIX,
+  CodexPerFileReviewPatcher,
   CodexUsageUpsellPatcher,
   PATCH_MARKER,
+  REVIEW_BACKUP_SUFFIX,
+  REVIEW_PATCH_MARKER,
+  REVIEW_TARGET,
+  REVIEW_TARGET_PROOF,
   TARGET_FUNCTION,
+  TARGET_FUNCTIONS,
   TARGET_PROOF,
   defaultExtensionRoots,
 };

@@ -180,8 +180,11 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
 });
 
 test("browser sidebar exposes the five-tab limit and mirrors live browser status color", () => {
-  assert.match(i18nSource, /browserTabMax: "Max"/);
-  assert.match(appSource, /subtitle=\{`\$\{copy\.browserTabMax\} \$\{browser\?\.maxTabs \?\? 5\}`\}/);
+  assert.match(i18nSource, /browserTabMax: "max"/);
+  assert.match(
+    appSource,
+    /subtitle=\{`\$\{browser\?\.tabs\.filter\(\(tab\) => tab\.traceId !== null\)\.length \?\? 0\} \/ \$\{browser\?\.maxTabs \?\? 5\} \$\{copy\.browserTabMax\}`\}/,
+  );
   assert.match(appSource, /badge=\{needsBrowser[\s\S]*?<ActionDot pulse tone="required" \/>[\s\S]*?: <StateDot state=\{browserTone\(browser\)\} \/>\}/);
   assert.match(styles, /\.sidebar-item\.has-subtitle\s*\{[^}]*height:\s*42px/s);
   assert.match(styles, /\.sidebar-item-copy > small\s*\{[^}]*font-size:\s*10px[^}]*line-height:\s*12px/s);
@@ -343,7 +346,10 @@ test("settings expose a reversible UI-only Codex usage upsell toggle", () => {
   assert.match(preloadSource, /onCodexUsageUpsellState:[\s\S]*?launcher:codex-usage-upsell-state/);
   assert.match(electronMain, /new CodexUsageUpsellPatcher\(\{ logger \}\)/);
   assert.match(electronMain, /hideCodexUsageUpsell === true[\s\S]*?syncCodexUsageUpsellPatch/);
-  assert.match(i18nSource, /hideCodexUsageUpsell: "Hide Codex usage-limit upsell"/);
+  assert.match(i18nSource, /hideCodexUsageUpsell: "VS Code · Hide Codex usage-limit upsell"/);
+  assert.match(i18nSource, /codexPerFileReview: "VS Code · Review Codex changes per file"/);
+  assert.match(i18nSource, /VS Code only — hide only the ‘You’re out of Codex messages’ upgrade card/);
+  assert.match(i18nSource, /VS Code only — when you click a changed file in a completed Codex turn/);
   assert.match(i18nSource, /Usage limits, credits and API behavior are unchanged/);
   assert.match(i18nSource, /official extension remains updateable through VS Code/);
 });

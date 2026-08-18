@@ -2,7 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.6]
+## [1.0.7] - Released
+
+### Added
+
+- Add a guarded **Restore factory settings** flow in the launcher. Before deleting LCA Codex-owned local data, it disables launch-at-login, restores LCA-managed Codex/VS Code changes, uninstalls the private integration, and then relaunches into cleanup. Cleanup refuses filesystem roots, the user home directory, ordinary personal folders, and symlinked paths that resolve outside LCA-owned locations.
+- Add an in-app ChatGPT connector setup path that opens ChatGPT Plugins/Connectors inside the launcher's private authenticated ChatGPT session instead of the user's default external browser session.
+- Add a VS Code-only **Review Codex changes per file** option. Clicking a changed file in a completed Codex turn can open Review Changes for that file only, while the main Review action continues to open the complete diff. The extension patch uses an exact known signature, clean backup/restore, atomic replacement, monitoring, persisted state, and fail-closed behavior on unsupported builds.
+
+### Changed
+
+- Make Google OAuth login in the launcher-owned ChatGPT browser explicitly request account selection, so signing in with Google can choose a different account instead of silently reusing the previous one.
+- Refresh Temporary Chat before connector verification so connectors created moments earlier are discovered from fresh ChatGPT page state rather than a stale hydrated page.
+- Show Browser capacity in the sidebar as the current Codex chat-tab count over the configured maximum (for example, `2 / 5 max`), excluding the main Home/ChatGPT tab, and mirror the live browser state with its sidebar status indicator.
+- Harden the existing VS Code-only Codex usage-limit upsell patch for newer supported renderer signatures, preserve its fail-closed checks, make the Settings title/body explicitly say it is VS Code-only, and include restore/backup removal in factory reset. This remains a UI-only change and does not alter Codex quota, credits, API/provider limits, or entitlements.
+- Make tunnel startup health checking perform an initial probe before applying the timeout boundary, while preserving cancellation and failure reporting.
+- Stabilize Linux launcher integration by publishing the expected desktop filename and executable name, synchronizing the desktop entry name, installing the AppImage `.DirIcon` directly, and using `LCA Codex` as the desktop display name.
+
+### Tests
+
+- Add factory-reset coverage for owned-data cleanup, unsafe path rejection, symlink escape rejection, relaunch arguments, restoration of managed Codex UI changes, and removal of LCA-owned backups.
+- Add browser-host coverage for forced Google account selection, private-session connector setup, and mandatory Temporary Chat refresh before connector verification.
+- Add launcher/design/state coverage for Browser tab-count/status UI, VS Code-only settings copy, per-file Review Changes persistence and IPC wiring, and Codex UI patch apply/restore/fail-closed behavior.
+- Add Linux packaging contracts for the stable desktop filename, executable name, `.DirIcon` installation, desktop display name, and startup window-class metadata.
+
+## [1.0.6] - Released
 
 ### Changed
 

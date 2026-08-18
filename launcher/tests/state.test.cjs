@@ -18,6 +18,7 @@ const DEFAULT_EXPECTED = {
   keepRunningOnClose: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
+  reviewCodexChangesPerFile: false,
   browserSmokePassed: false,
   browserSmokeVersion: null,
   sidebarOpen: true,

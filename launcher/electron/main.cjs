@@ -31,7 +31,7 @@ const { ensurePackagedRuntime } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
-const { CodexUsageUpsellPatcher } = require("./codex-ui-patch.cjs");
+const { CodexPerFileReviewPatcher, CodexUsageUpsellPatcher } = require("./codex-ui-patch.cjs");
 const {
   FACTORY_RESET_CLEANUP_ARG,
   cleanupFactoryResetPaths,
@@ -125,6 +125,12 @@ let codexUsageUpsellInFlight = false;
 let codexUsageUpsellReloadRequired = false;
 let codexUsageUpsellLastError = null;
 let lastCodexUsageUpsellStatus = null;
+let codexPerFileReviewPatcher = null;
+let codexPerFileReviewTimer = null;
+let codexPerFileReviewInFlight = false;
+let codexPerFileReviewReloadRequired = false;
+let codexPerFileReviewLastError = null;
+let lastCodexPerFileReviewStatus = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -243,6 +249,101 @@ function startCodexUsageUpsellMonitor({ logger, stateStore }) {
 function stopCodexUsageUpsellMonitor() {
   if (codexUsageUpsellTimer) clearInterval(codexUsageUpsellTimer);
   codexUsageUpsellTimer = null;
+}
+
+function codexPerFileReviewStatus() {
+  if (codexPerFileReviewLastError) {
+    return {
+      state: "error",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexPerFileReviewReloadRequired,
+      message: codexPerFileReviewLastError,
+    };
+  }
+  if (!codexPerFileReviewPatcher) {
+    return {
+      state: "not-found",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexPerFileReviewReloadRequired,
+      message: null,
+    };
+  }
+  try {
+    return {
+      ...codexPerFileReviewPatcher.inspect(),
+      reloadRequired: codexPerFileReviewReloadRequired,
+      message: null,
+    };
+  } catch (error) {
+    return {
+      state: "error",
+      version: null,
+      extensionPath: null,
+      bundlePath: null,
+      backupAvailable: false,
+      reloadRequired: codexPerFileReviewReloadRequired,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function publishCodexPerFileReviewStatus(status = codexPerFileReviewStatus()) {
+  const serialized = JSON.stringify(status);
+  if (serialized !== lastCodexPerFileReviewStatus) {
+    lastCodexPerFileReviewStatus = serialized;
+    send("launcher:codex-per-file-review-state", status);
+  }
+  return status;
+}
+
+function syncCodexPerFileReviewPatch({ logger, stateStore } = {}) {
+  if (!codexPerFileReviewPatcher || codexPerFileReviewInFlight) return codexPerFileReviewStatus();
+  codexPerFileReviewInFlight = true;
+  try {
+    let status = codexPerFileReviewPatcher.inspect();
+    const state = stateStore.read();
+    if (state.reviewCodexChangesPerFile === true && status.state !== "applied") {
+      const result = codexPerFileReviewPatcher.apply();
+      if (result.mutated) codexPerFileReviewReloadRequired = true;
+      status = result;
+    }
+    codexPerFileReviewLastError = null;
+    const { mutated: _mutated, ...statusResult } = status;
+    return publishCodexPerFileReviewStatus({
+      ...statusResult,
+      reloadRequired: codexPerFileReviewReloadRequired,
+      message: null,
+    });
+  } catch (error) {
+    codexPerFileReviewLastError = error instanceof Error ? error.message : String(error);
+    logger.warn("codex.ui_per_file_review_sync_failed", { message: codexPerFileReviewLastError });
+    return publishCodexPerFileReviewStatus(codexPerFileReviewStatus());
+  } finally {
+    codexPerFileReviewInFlight = false;
+  }
+}
+
+function startCodexPerFileReviewMonitor({ logger, stateStore }) {
+  if (codexPerFileReviewTimer) clearInterval(codexPerFileReviewTimer);
+  codexPerFileReviewTimer = setInterval(() => {
+    if (stateStore.read().reviewCodexChangesPerFile === true) {
+      syncCodexPerFileReviewPatch({ logger, stateStore });
+    } else {
+      publishCodexPerFileReviewStatus();
+    }
+  }, 60_000);
+  codexPerFileReviewTimer.unref?.();
+}
+
+function stopCodexPerFileReviewMonitor() {
+  if (codexPerFileReviewTimer) clearInterval(codexPerFileReviewTimer);
+  codexPerFileReviewTimer = null;
 }
 
 async function publishRuntimeStatus() {
@@ -693,6 +794,7 @@ function registerIpc({ logger, stateStore }) {
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
     codexUsageUpsell: codexUsageUpsellStatus(),
+    codexPerFileReview: codexPerFileReviewStatus(),
   }));
 
   handle("launcher:runtime-status", () => publishRuntimeStatus());
@@ -879,6 +981,7 @@ function registerIpc({ logger, stateStore }) {
         // then so every external change can be restored before private data is removed.
         setAutostart(app, false);
         codexUsageUpsellPatcher?.reset();
+        codexPerFileReviewPatcher?.reset();
         runtimeHost.removeVsCodeAdvanced();
         await runtimeHost.uninstallIntegration();
       },
@@ -1011,6 +1114,31 @@ function registerIpc({ logger, stateStore }) {
       throw error;
     }
   });
+  handle("launcher:codex-per-file-review-enabled", async (_event, enabled) => {
+    const desired = enabled === true;
+    let state = stateStore.update({ reviewCodexChangesPerFile: desired });
+    send("launcher:state-changed", state);
+    try {
+      const result = desired ? codexPerFileReviewPatcher.apply() : codexPerFileReviewPatcher.restore();
+      if (result.mutated) codexPerFileReviewReloadRequired = true;
+      codexPerFileReviewLastError = null;
+      const { mutated: _mutated, ...statusResult } = result;
+      const status = publishCodexPerFileReviewStatus({
+        ...statusResult,
+        reloadRequired: codexPerFileReviewReloadRequired,
+        message: null,
+      });
+      return { state, status };
+    } catch (error) {
+      codexPerFileReviewLastError = error instanceof Error ? error.message : String(error);
+      if (!desired) {
+        state = stateStore.update({ reviewCodexChangesPerFile: true });
+        send("launcher:state-changed", state);
+      }
+      publishCodexPerFileReviewStatus(codexPerFileReviewStatus());
+      throw error;
+    }
+  });
   handle("launcher:set-preference", async (_event, key, value) => {
     if (key !== "runtimeAutoStart" && key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
       throw new Error("Unknown preference");
@@ -1077,6 +1205,7 @@ async function requestQuit({ relaunchArgs = null, beforeCommit = null } = {}) {
       stopCatalogVerificationMonitor();
       stopRuntimeStatusMonitor();
       stopCodexUsageUpsellMonitor();
+      stopCodexPerFileReviewMonitor();
       quitting = true;
       browserHost?.destroy();
       await browserControl?.close().catch(() => {});
@@ -1161,6 +1290,9 @@ async function start() {
   codexUsageUpsellPatcher = new CodexUsageUpsellPatcher({ logger });
   syncCodexUsageUpsellPatch({ logger, stateStore });
   startCodexUsageUpsellMonitor({ logger, stateStore });
+  codexPerFileReviewPatcher = new CodexPerFileReviewPatcher({ logger });
+  syncCodexPerFileReviewPatch({ logger, stateStore });
+  startCodexPerFileReviewMonitor({ logger, stateStore });
   const startHidden = process.argv.includes("--hidden");
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({

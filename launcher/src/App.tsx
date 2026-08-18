@@ -74,6 +74,9 @@ export function App() {
     const unsubscribeCodexUsageUpsell = api.onCodexUsageUpsellState((codexUsageUpsell) => {
       setSnapshot((current) => current ? { ...current, codexUsageUpsell } : current);
     });
+    const unsubscribeCodexPerFileReview = api.onCodexPerFileReviewState((codexPerFileReview) => {
+      setSnapshot((current) => current ? { ...current, codexPerFileReview } : current);
+    });
     return () => {
       cancelled = true;
       unsubscribeState();
@@ -83,6 +86,7 @@ export function App() {
       unsubscribeLog();
       unsubscribeUpdate();
       unsubscribeCodexUsageUpsell();
+      unsubscribeCodexPerFileReview();
     };
   }, []);
 
@@ -323,7 +327,7 @@ function LauncherShell({
                   icon="browser"
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
-                  subtitle={`${copy.browserTabMax} ${browser?.maxTabs ?? 5}`}
+                  subtitle={`${browser?.tabs.filter((tab) => tab.traceId !== null).length ?? 0} / ${browser?.maxTabs ?? 5} ${copy.browserTabMax}`}
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
@@ -2209,7 +2213,7 @@ function SettingsSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
-  const [activeAction, setActiveAction] = useState<"doctor" | "factory-reset" | "upsell" | null>(null);
+  const [activeAction, setActiveAction] = useState<"doctor" | "factory-reset" | "upsell" | "per-file-review" | null>(null);
   const busy = activeAction !== null;
 
   const runDoctor = async () => {
@@ -2227,6 +2231,18 @@ function SettingsSurface({
     setError(null);
     try {
       const result = await api!.setCodexUsageUpsellHidden(enabled);
+      updateState(result.state);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setActiveAction(null);
+    }
+  };
+  const setCodexPerFileReviewEnabled = async (enabled: boolean) => {
+    setActiveAction("per-file-review");
+    setError(null);
+    try {
+      const result = await api!.setCodexPerFileReviewEnabled(enabled);
       updateState(result.state);
     } catch (cause) {
       setError(messageOf(cause));
@@ -2289,6 +2305,16 @@ function SettingsSurface({
             checked={snapshot.state.hideCodexUsageUpsell}
             disabled={busy}
             onChange={(checked) => void setCodexUsageUpsellHidden(checked)}
+          />
+        </SettingRow>
+        <SettingRow
+          body={`${copy.codexPerFileReviewBody} ${codexPerFileReviewStatusText(copy, snapshot.codexPerFileReview)}`}
+          label={copy.codexPerFileReview}
+        >
+          <Switch
+            checked={snapshot.state.reviewCodexChangesPerFile}
+            disabled={busy}
+            onChange={(checked) => void setCodexPerFileReviewEnabled(checked)}
           />
         </SettingRow>
       </div>
@@ -2426,6 +2452,23 @@ function codexUsageUpsellStatusText(copy: Copy, status: LauncherSnapshot["codexU
     text = copy.codexUsageUpsellNotFound;
   }
   return status.reloadRequired ? `${text} ${copy.codexUsageUpsellReload}` : text;
+}
+
+function codexPerFileReviewStatusText(copy: Copy, status: LauncherSnapshot["codexPerFileReview"]) {
+  const version = status.version ?? "unknown";
+  let text: string;
+  if (status.message) {
+    text = copy.codexPerFileReviewError.replace("{message}", status.message);
+  } else if (status.state === "applied") {
+    text = copy.codexPerFileReviewApplied.replace("{version}", version);
+  } else if (status.state === "available") {
+    text = copy.codexPerFileReviewDetected.replace("{version}", version);
+  } else if (status.state === "unsupported") {
+    text = copy.codexPerFileReviewUnsupported.replace("{version}", version);
+  } else {
+    text = copy.codexPerFileReviewNotFound;
+  }
+  return status.reloadRequired ? `${text} ${copy.codexPerFileReviewReload}` : text;
 }
 
 function SettingRow({ body, children, label }: { body: string; children: ReactNode; label: string }) {

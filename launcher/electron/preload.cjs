@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setCodexUsageUpsellHidden: (enabled) => ipcRenderer.invoke("launcher:codex-usage-upsell-hidden", enabled),
+  setCodexPerFileReviewEnabled: (enabled) => ipcRenderer.invoke("launcher:codex-per-file-review-enabled", enabled),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   activityChatsPage: (input) => ipcRenderer.invoke("launcher:activity-chats-page", input),
@@ -65,4 +66,5 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
   onCodexUsageUpsellState: (listener) => subscription("launcher:codex-usage-upsell-state", listener),
+  onCodexPerFileReviewState: (listener) => subscription("launcher:codex-per-file-review-state", listener),
 });

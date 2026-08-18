@@ -8,6 +8,7 @@ export interface LauncherState {
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
   hideCodexUsageUpsell: boolean;
+  reviewCodexChangesPerFile: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
@@ -192,6 +193,16 @@ export interface CodexUsageUpsellStatus {
   message: string | null;
 }
 
+export interface CodexPerFileReviewStatus {
+  state: "not-found" | "unsupported" | "available" | "applied" | "error";
+  version: string | null;
+  extensionPath: string | null;
+  bundlePath: string | null;
+  backupAvailable: boolean;
+  reloadRequired: boolean;
+  message: string | null;
+}
+
 export type UpdateState =
   | { status: "disabled" | "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
@@ -215,6 +226,7 @@ export interface LauncherSnapshot {
   operation: OperationState | null;
   update: UpdateState;
   codexUsageUpsell: CodexUsageUpsellStatus;
+  codexPerFileReview: CodexPerFileReviewStatus;
 }
 
 export interface LauncherApi {
@@ -261,6 +273,7 @@ export interface LauncherApi {
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
   setPreference(key: "runtimeAutoStart" | "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setCodexUsageUpsellHidden(enabled: boolean): Promise<{ state: LauncherState; status: CodexUsageUpsellStatus }>;
+  setCodexPerFileReviewEnabled(enabled: boolean): Promise<{ state: LauncherState; status: CodexPerFileReviewStatus }>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   activityChatsPage(input?: { cursor?: string; limit?: number }): Promise<ActivityChatPage>;
@@ -281,6 +294,7 @@ export interface LauncherApi {
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
   onCodexUsageUpsellState(listener: (state: CodexUsageUpsellStatus) => void): () => void;
+  onCodexPerFileReviewState(listener: (state: CodexPerFileReviewStatus) => void): () => void;
 }
 
 declare global {
