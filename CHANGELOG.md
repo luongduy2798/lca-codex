@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.8] - Released
+
+### Added
+
+- Add query-targeted discovery for deferred MCP/app/provider tools exposed through Codex's native `exec` gateway. Deferred tools are inventoried and invoked inside the selected outer Codex route, preserving Codex sandbox, approvals, sessions, and tool lifecycle instead of reconnecting providers independently.
+- Add lazy parsing of embedded deferred-tool declarations into JSON Schema for the selected inventory page, with bounded metadata budgets and explicit `schema_error` reporting when declarations are missing, oversized, or unsupported.
+
+### Changed
+
+- Rank deferred tool inventory by exact wire/provider/operation identity before partial-name or description matches. Provider-plus-operation queries such as Figma `get_design_context` now prefer the exact provider route and suppress lower-confidence wrappers unless a wrapper/host is explicitly requested.
+- Keep empty inventory queries on the small direct turn registry, filter recursive LCA `codex_*` bridge/meta tools from deferred discovery, and require a deferred tool to be returned by inventory for the current binding before it can be invoked.
+- Require intentional repository edits from routed model turns to use `codex_apply_patch`; `codex_exec` and `codex_write_stdin` remain for inspection, tests, builds, and other non-editing command work and fail closed rather than substituting shell-based edits.
+- Clarify the routed prompt contract so named services/providers are discovered with targeted `codex_tool_inventory` queries and nested provider calls remain inside the connector selected for the outer Codex turn.
+
+### Tests
+
+- Add bridge, prompt-contract, and architecture-boundary coverage for deferred inventory ranking, Figma provider preference, wrapper opt-in, recursive bridge filtering, schema extraction/error bounds, deferred invocation readiness, and the native `codex_apply_patch` edit boundary.
+
 ## [1.0.7] - Released
 
 ### Added

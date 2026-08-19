@@ -11,6 +11,7 @@ function readSource(path: string): string {
 
 const architecture = readSource(join(repoRoot, "docs", "architecture.md"));
 const mcpServer = readSource(join(adapterRoot, "mcp-server.ts"));
+const deferredToolInventory = readSource(join(adapterRoot, "deferred-tool-inventory.ts"));
 const environment = readSource(join(adapterRoot, "environment.ts"));
 
 function adapterSources(): Array<{ path: string; source: string }> {
@@ -38,6 +39,9 @@ test("architecture defines LCA as a bridge and Codex as the sole harness and exe
   expect(architecture).toContain("`multi_agent = true` preserves routed subagent turns");
   expect(architecture).toContain("`multi_agent_v2 = false` keeps their payloads");
   expect(architecture).toContain("`remote_compaction_v2 = false` bounds retained Web image");
+  expect(architecture).toContain("Intentional repository edits use the dedicated `codex_apply_patch` wrapper");
+  expect(architecture).toContain("they must not be used as shell-based substitutes");
+  expect(architecture).toContain("turn fails closed instead of falling back to an opaque shell edit");
 });
 
 test("LCA Codex adapter does not independently discover AGENTS or skill files", () => {
@@ -49,10 +53,17 @@ test("LCA Codex adapter does not independently discover AGENTS or skill files", 
 });
 
 test("native tool relay is bounded by the current Codex registry or its advertised exec gateway", () => {
-  expect(mcpServer).toContain("const tool = namedTool(bound, wire_name);");
-  expect(mcpServer).toContain("if (!tool) throw new Error(`Codex tool is not available in this turn: ${requestedWireName}`);");
+  expect(mcpServer).toContain("const directMatches = bound.tools\n        .map(tool => ({");
+  expect(mcpServer).toContain('from "./deferred-tool-inventory"');
+  expect(mcpServer).toContain("inventoryToolRank(");
+  expect(deferredToolInventory).toContain("const blockedLogicalNames = new Set(");
+  expect(deferredToolInventory).toContain("const isBlockedLogicalName = logicalName => blockedLogicalNames.has(logicalName)");
+  expect(deferredToolInventory).toContain("!isBlockedLogicalName(identity(tool).logicalName)");
+  expect(mcpServer).toContain("if (gateway && needle) {");
+  expect(mcpServer).toContain("const discovered = discoveredGatewayTools.get(binding_id)?.get(wire_name);");
+  expect(mcpServer).toContain("Codex tool is not available in this turn or has not been returned by codex_tool_inventory");
   expect(mcpServer).toContain("if (!gateway) {\n      throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);");
-  expect(mcpServer).toContain("const matches = bound.tools.filter(tool =>");
+  expect(mcpServer).toContain("await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);");
 });
 
 test("bridge tool schemas cannot override Codex sandbox or approval policy", () => {

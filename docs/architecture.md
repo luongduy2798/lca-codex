@@ -357,9 +357,43 @@ material already supplied by the outer Codex harness.
 `codex_bind_turn` is therefore on demand. A direct answer can finish with zero connector calls. If
 history or a native tool is needed, binding still scopes every later request to the exact outer Codex
 turn. Native tool invocation is no longer gated on replaying unrelated history; `codex_tool_inventory`
-and `codex_tool_call` still expose only the registry advertised by that outer turn, preserving Codex
+and `codex_tool_call` still expose only the registry advertised by that outer turn. Inventory starts
+with the tools carried directly by the Responses request and, when Codex advertises its native `exec`
+gateway, can also page through that gateway's live `ALL_TOOLS` registry. A nested-only name is callable
+only after inventory returned it for the current binding, and the gateway verifies that exact name
+before its first invocation in the binding, then reuses that turn-scoped readiness result. Deferred
+MCP/plugin tools therefore remain owned by Codex instead of
+being reconnected independently by LCA, preserving Codex
 sandbox, approvals, sessions, and tool lifecycle as the execution authority. The snapshot dies with
 its outer Codex turn.
+
+Deferred discovery is query-targeted: an empty inventory query stays on the small set of tools carried
+directly by the turn instead of enumerating the full nested registry. The dedicated
+`deferred-tool-inventory.ts` module owns deferred ranking, recursion filtering, declaration parsing, and
+schema budgeting; `mcp-server.ts` stays focused on turn binding, orchestration, caching, and invocation.
+Search normalizes common query
+separators so phrases such as `figma get design context` can match the provider-plus-operation identity.
+When the query exactly names an available provider/namespace, that provider outranks a host/proxy tool
+whose logical name merely equals the same word; when the query names an operation, an exact logical
+operation wins. If a rank-0 match exists, lower-confidence deferred matches are suppressed from that
+inventory result, so an official provider/operation does not sit beside a flaky wrapper unless the
+caller explicitly searches for that wrapper or host. Partial logical/provider and description matches
+remain available when there is no exact route.
+The deferred registry also filters LCA's own `codex_*` bridge/meta tools, including host-prefixed
+wrappers whose logical names end in those bridge entry points, so discovery cannot feed another LCA
+bridge back through the native gateway recursively. When schema metadata is
+requested, the gateway returns only the selected page's embedded `exec tool declaration`; LCA converts
+that declaration's `args` object to JSON Schema lazily. Description and declaration payloads are bounded
+per page. If a declaration is missing, exceeds the schema metadata budget, or uses unsupported syntax,
+inventory omits `parameters` and reports `schema_error` instead of returning a permissive placeholder
+schema or truncating a declaration into something that looks authoritative.
+
+Intentional repository edits use the dedicated `codex_apply_patch` wrapper so the outer Codex task
+receives a native file-change item and can surface its normal review UI. The model contract reserves
+`codex_exec`/`codex_write_stdin` for inspection, search, tests, builds, and other non-editing command
+work; they must not be used as shell-based substitutes for creating, overwriting, rewriting, moving,
+or deleting source, tests, docs, or configuration. If the native patch route is unavailable, the
+turn fails closed instead of falling back to an opaque shell edit.
 
 Historical image bytes remain in the broker and are returned only when `codex_context` is called with
 `action=image` for an attachment reference discovered by a history result. They are no longer

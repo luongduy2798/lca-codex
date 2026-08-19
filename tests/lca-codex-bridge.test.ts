@@ -144,6 +144,25 @@ function gatewayRegistryResult(availability: Record<string, boolean>): BrokerToo
   };
 }
 
+function gatewayToolInventoryResult(
+  tools: Array<{
+    name: string;
+    description: string;
+    freeform?: boolean;
+    rank?: number;
+    declaration?: string;
+    schema_error?: string;
+  }>,
+  total = tools.length,
+): BrokerToolResult {
+  return {
+    content: [{
+      type: "text",
+      text: `LCA_CODEX_TOOL_INVENTORY:${JSON.stringify({ total, tools })}`,
+    }],
+  };
+}
+
 describe("LCA Codex ChatGPT Web bridge v3", () => {
   test("recovers the Codex exec gateway nested in an additional_tools namespace", () => {
     const gatewayDescription = [
@@ -1931,6 +1950,15 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         "codex_view_image",
         "codex_write_stdin",
       ]);
+      expect(listed.tools.find(tool => tool.name === "codex_exec")?.description).toContain(
+        "Intentional repository edits must use codex_apply_patch instead",
+      );
+      expect(listed.tools.find(tool => tool.name === "codex_write_stdin")?.description).toContain(
+        "Do not use a command session to substitute for codex_apply_patch",
+      );
+      expect(listed.tools.find(tool => tool.name === "codex_apply_patch")?.description).toContain(
+        "Required route for intentional repository edits",
+      );
 
       const bound = await call("codex_bind_turn", { turn_token: token });
       const bindingId = (bound.structuredContent as { binding_id?: string } | undefined)?.binding_id;
@@ -1948,9 +1976,203 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         return readinessRequest;
       };
 
-      const inventory = await call("codex_tool_inventory", { binding_id: bindingId, query: "docs" });
+      const inventoryPromise = call("codex_tool_inventory", { binding_id: bindingId, query: "docs", limit: 1 });
+      const [docsInventoryRequest] = await broker.nextToolBatch(token);
+      expect(docsInventoryRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(docsInventoryRequest?.input).toContain("ALL_TOOLS.filter");
+      broker.completeTool(token, docsInventoryRequest!.callId, gatewayToolInventoryResult([], 1));
+      const inventory = await inventoryPromise;
       const discovered = (inventory.structuredContent as { tools: Array<{ wire_name: string }> }).tools;
       expect(discovered.map(tool => tool.wire_name)).toEqual(["mcp__openaiDeveloperDocs__search_openai_docs"]);
+      expect(inventory.structuredContent).toMatchObject({ total: 2, next_offset: 1 });
+
+      const figmaWireName = "mcp__proxy_host__legacy_wrapper_figma_get_design_context";
+      const figmaInventoryPromise = call("codex_tool_inventory", { binding_id: bindingId, query: "figma" });
+      const [figmaInventoryRequest] = await broker.nextToolBatch(token);
+      expect(figmaInventoryRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(figmaInventoryRequest?.input).toContain("ALL_TOOLS.filter");
+      expect(figmaInventoryRequest?.input).toContain("LCA_CODEX_TOOL_INVENTORY:");
+      const rankedInventoryOutput: string[] = [];
+      const executeInventory = new Function("ALL_TOOLS", "text", figmaInventoryRequest!.input!) as (
+        tools: Array<{ name: string; description: string }>,
+        text: (value: string) => void,
+      ) => void;
+      const figmaCandidates = [
+        { name: "mcp__other__figma", description: "Exact logical tool name." },
+        { name: figmaWireName, description: "Read design context." },
+        { name: "mcp__figma__get_design_context", description: "Provider-owned design context." },
+        { name: "mcp__other__generic_helper", description: "Generic helper for a figma-workflow." },
+        { name: "mcp__lnd_lca_codex__codex_tool_call", description: "Figma bridge recursion trap." },
+        { name: "mcp__proxy_host__nested_bridge_codex_tool_inventory", description: "Figma bridge recursion trap behind a generic proxy prefix." },
+        { name: "mcp__proxy_host__legacy_wrapper_codex_tool_call", description: "Figma bridge call recursion trap behind a generic proxy prefix." },
+      ];
+      executeInventory(figmaCandidates, value => rankedInventoryOutput.push(value));
+      const rankedInventory = JSON.parse(rankedInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        total: number;
+        tools: Array<{ name: string; rank: number }>;
+      };
+      expect(rankedInventory.total).toBe(1);
+      expect(rankedInventory.tools.map(tool => [tool.name, tool.rank])).toEqual([
+        ["mcp__figma__get_design_context", 0],
+      ]);
+
+      const phraseInventoryOutput: string[] = [];
+      const phraseInventoryProgram = figmaInventoryRequest!.input!.replace(
+        'const needle = "figma";',
+        'const needle = "figma get design context";',
+      );
+      const executePhraseInventory = new Function("ALL_TOOLS", "text", phraseInventoryProgram) as typeof executeInventory;
+      executePhraseInventory(figmaCandidates, value => phraseInventoryOutput.push(value));
+      const phraseInventory = JSON.parse(phraseInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        total: number;
+        tools: Array<{ name: string; rank: number }>;
+      };
+      expect(phraseInventory.total).toBe(1);
+      expect(phraseInventory.tools.map(tool => [tool.name, tool.rank])).toEqual([
+        ["mcp__figma__get_design_context", 0],
+      ]);
+
+      const explicitWrapperOutput: string[] = [];
+      const explicitWrapperProgram = figmaInventoryRequest!.input!.replace(
+        'const needle = "figma";',
+        'const needle = "legacy_wrapper_figma_get_design_context";',
+      );
+      const executeExplicitWrapperInventory = new Function("ALL_TOOLS", "text", explicitWrapperProgram) as typeof executeInventory;
+      executeExplicitWrapperInventory(figmaCandidates, value => explicitWrapperOutput.push(value));
+      const explicitWrapperInventory = JSON.parse(explicitWrapperOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        total: number;
+        tools: Array<{ name: string; rank: number }>;
+      };
+      expect(explicitWrapperInventory.total).toBe(1);
+      expect(explicitWrapperInventory.tools.map(tool => [tool.name, tool.rank])).toEqual([
+        [figmaWireName, 0],
+      ]);
+
+      const metaInventoryOutput: string[] = [];
+      const metaInventoryProgram = figmaInventoryRequest!.input!.replace(
+        'const needle = "figma";',
+        'const needle = "codex_tool_inventory";',
+      );
+      const executeMetaInventory = new Function("ALL_TOOLS", "text", metaInventoryProgram) as typeof executeInventory;
+      executeMetaInventory(figmaCandidates, value => metaInventoryOutput.push(value));
+      const metaInventory = JSON.parse(metaInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        total: number;
+        tools: Array<{ name: string; rank: number }>;
+      };
+      expect(metaInventory).toEqual({ total: 0, tools: [] });
+
+      const unfilteredInventoryOutput: string[] = [];
+      const unfilteredInventoryProgram = figmaInventoryRequest!.input!.replace(
+        'const needle = "figma";',
+        'const needle = "";',
+      );
+      const executeUnfilteredInventory = new Function("ALL_TOOLS", "text", unfilteredInventoryProgram) as typeof executeInventory;
+      executeUnfilteredInventory(figmaCandidates, value => unfilteredInventoryOutput.push(value));
+      const unfilteredInventory = JSON.parse(unfilteredInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        tools: Array<{ name: string }>;
+      };
+      expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__nested_bridge_codex_tool_inventory");
+      expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__legacy_wrapper_codex_tool_call");
+
+      const missingSchemaOutput: string[] = [];
+      executeInventory([
+        { name: "mcp__other__figma_missing_schema", description: "Figma tool without embedded declaration." },
+      ], value => missingSchemaOutput.push(value));
+      const missingSchemaPayload = JSON.parse(missingSchemaOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        tools: Array<Record<string, unknown>>;
+      };
+      expect(missingSchemaPayload.tools[0]).not.toHaveProperty("declaration");
+      expect(missingSchemaPayload.tools[0]?.schema_error).toContain("exec tool declaration not found");
+
+      const oversizedSchemaOutput: string[] = [];
+      executeInventory([{
+        name: "mcp__other__figma_oversized_schema",
+        description: `Figma tool with oversized metadata.\n\nexec tool declaration:\n\`\`\`ts\n${"x".repeat(33_000)}\n\`\`\``,
+      }], value => oversizedSchemaOutput.push(value));
+      const oversizedSchemaPayload = JSON.parse(oversizedSchemaOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+        tools: Array<Record<string, unknown>>;
+      };
+      expect(oversizedSchemaPayload.tools[0]).not.toHaveProperty("declaration");
+      expect(oversizedSchemaPayload.tools[0]?.schema_error).toContain("exceeds 32000-character schema budget");
+      broker.completeTool(token, figmaInventoryRequest!.callId, gatewayToolInventoryResult([{
+        name: figmaWireName,
+        description: "Read Figma design context.",
+        rank: 2,
+        declaration: `declare const tools: {
+          mcp__proxy_host__legacy_wrapper_figma_get_design_context(args: {
+            node_id: string;
+            mode: "design" | "prototype";
+            depth?: number;
+            options?: {
+              include_images: boolean;
+              tags?: string[];
+            };
+          }): Promise<unknown>;
+        };`,
+      }]));
+      const figmaInventory = await figmaInventoryPromise;
+      expect((figmaInventory.structuredContent as { tools: Array<Record<string, unknown>> }).tools).toEqual([
+        expect.objectContaining({
+          wire_name: figmaWireName,
+          name: "legacy_wrapper_figma_get_design_context",
+          namespace: "proxy_host",
+          source: "exec_gateway",
+          kind: "function",
+          parameters: {
+            type: "object",
+            properties: {
+              node_id: { type: "string" },
+              mode: { type: "string", enum: ["design", "prototype"] },
+              depth: { type: "number" },
+              options: {
+                type: "object",
+                properties: {
+                  include_images: { type: "boolean" },
+                  tags: { type: "array", items: { type: "string" } },
+                },
+                required: ["include_images"],
+                additionalProperties: false,
+              },
+            },
+            required: ["node_id", "mode"],
+            additionalProperties: false,
+          },
+        }),
+      ]);
+
+      const malformedWireName = "mcp__codex_apps__broken_schema";
+      const malformedInventoryPromise = call("codex_tool_inventory", {
+        binding_id: bindingId,
+        query: "broken_schema",
+      });
+      const [malformedInventoryRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, malformedInventoryRequest!.callId, gatewayToolInventoryResult([{
+        name: malformedWireName,
+        description: "Tool with an unsupported named args type.",
+        rank: 0,
+        declaration: "declare const tools: { broken_schema(args: ExistingArgs): Promise<unknown>; };",
+      }]));
+      const malformedInventory = await malformedInventoryPromise;
+      const malformedTool = (malformedInventory.structuredContent as { tools: Array<Record<string, unknown>> }).tools[0]!;
+      expect(malformedTool).not.toHaveProperty("parameters");
+      expect(malformedTool.schema_error).toContain("unsupported named type ExistingArgs");
+
+      const missingWireName = "mcp__codex_apps__missing_schema";
+      const missingInventoryPromise = call("codex_tool_inventory", {
+        binding_id: bindingId,
+        query: "missing_schema",
+      });
+      const [missingInventoryRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, missingInventoryRequest!.callId, gatewayToolInventoryResult([{
+        name: missingWireName,
+        description: "Tool whose deferred declaration disappeared.",
+        rank: 0,
+        schema_error: "exec tool declaration not found in deferred tool description",
+      }]));
+      const missingInventory = await missingInventoryPromise;
+      const missingTool = (missingInventory.structuredContent as { tools: Array<Record<string, unknown>> }).tools[0]!;
+      expect(missingTool).not.toHaveProperty("parameters");
+      expect(missingTool.schema_error).toContain("exec tool declaration not found");
 
       const invented = await call("codex_tool_call", {
         binding_id: bindingId,
@@ -1959,6 +2181,18 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       });
       expect(invented.isError).toBe(true);
       expect(JSON.stringify(invented.content)).toContain("Codex tool is not available in this turn");
+
+      const figmaPromise = call("codex_tool_call", {
+        binding_id: bindingId,
+        wire_name: figmaWireName,
+        arguments: { node_id: "1:2" },
+      });
+      await completeReadiness({ [figmaWireName]: true });
+      const [figmaRequest] = await broker.nextToolBatch(token);
+      expect(figmaRequest).toMatchObject({ wireName: "exec", freeform: true });
+      expect(figmaRequest?.input).toContain(`tools[${JSON.stringify(figmaWireName)}](${JSON.stringify({ node_id: "1:2" })})`);
+      broker.completeTool(token, figmaRequest!.callId, toolResult({ nodes: 1 }));
+      expect((await figmaPromise).structuredContent).toEqual({ nodes: 1 });
 
       const execPromise = call("codex_exec", { binding_id: bindingId, cmd: "pwd", workdir: tempRoot });
       await completeReadiness({ exec_command: true });

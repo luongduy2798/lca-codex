@@ -638,6 +638,11 @@ export function compileLcaCodexPrompt(
       "Connector names are opaque routing identifiers. Do not infer aliases, equivalence, fallback relationships, or shared ownership from similar names.",
       `A failure, timeout, transport error, missing tool, or unavailable action from ${JSON.stringify(connectorLabel)} does not authorize fallback to another connector. Report the blocker instead of switching providers.`,
       "Switching connectors requires explicit user authorization.",
+      ...(parsed._compactionRequest ? [] : [
+        "Nested MCP/app/provider tools returned by codex_tool_inventory and invoked through codex_tool_call are still executed inside the selected connector's outer Codex route; do not treat that inventory/call path as switching connectors.",
+        "If the user explicitly names a service/tool/provider or supplies its URL and the needed operation is not a direct bridge tool, bind the turn and run codex_tool_inventory before declaring that capability unavailable. Prefer the most specific operation query you can infer (for example get_design_context) over only a broad provider query (for example figma).",
+        "When inventory returns an exact provider/namespace or exact logical-operation match alongside host/proxy/wrapper matches for the same service, use the exact provider/operation and do not choose a lower-ranked wrapper unless the user explicitly requested that wrapper or host. For Figma design-to-code URLs, query get_design_context first rather than a broad figma search.",
+      ]),
       parsed._compactionRequest
         ? "If the checkpoint entry has truncated=true, use its history_ref with codex_context get when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image."
         : "If a recent_context or checkpoint entry has truncated=true, use its history_ref with codex_context get only when the omitted part is needed. Historical attachment_refs can be fetched with codex_context image.",
@@ -667,6 +672,8 @@ export function compileLcaCodexPrompt(
       `If history, Codex capability instructions, or native tools are needed, call codex_bind_turn with turn_token ${turnToken}; otherwise do not bind. Use its binding_id for later connector calls and never expose either capability value.`,
       "Use codex_context selectively: instructions for Codex skill/capability guidance; recent/search/get for older history; image for old images; full only as fallback.",
       "Native connector tools bridge synchronously into the exact active outer Codex tool registry. Make real calls, wait for real results, and continue until the requested work is complete.",
+      "For every intentional repository edit to source, tests, docs, or configuration, use codex_apply_patch so Codex receives a native file-change item. Do not use codex_exec, codex_write_stdin, or nested shell/Python/Node commands to create, overwrite, append, rewrite, patch, move, or delete repository files as a substitute for codex_apply_patch.",
+      "Use codex_exec for inspection, search, tests, builds, and other non-editing command work. If codex_apply_patch is unavailable or fails, report that blocker instead of falling back to a shell-based file edit.",
     ]
     : [
       `This is LCA Codex ${mode.displayLabel} with no lca-codex bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,

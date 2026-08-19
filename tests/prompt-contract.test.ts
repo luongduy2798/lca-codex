@@ -83,11 +83,14 @@ test("tool-capable prompts expose active and recent context immediately while ke
   expect(snapshot.serialized).toContain("preserve-system");
   expect(compiled.text).toContain("Use codex_context selectively: instructions for Codex skill/capability guidance");
   expect(compiled.text).toContain("otherwise do not bind");
+  expect(compiled.text).toContain("For every intentional repository edit to source, tests, docs, or configuration, use codex_apply_patch");
+  expect(compiled.text).toContain("Do not use codex_exec, codex_write_stdin, or nested shell/Python/Node commands");
+  expect(compiled.text).toContain("If codex_apply_patch is unavailable or fails, report that blocker instead of falling back to a shell-based file edit");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
 test("tool-capable prompts make the configured connector an exclusive routing constraint", () => {
-  const connectorName = "Macmini Lca Codex";
+  const connectorName = "Selected Lca Codex";
   const compiled = compileLcaCodexPrompt(
     request("high"),
     { localToolsEnabled: true, proAvailable: true },
@@ -104,6 +107,11 @@ test("tool-capable prompts make the configured connector an exclusive routing co
   expect(compiled.text).toContain(`from "${connectorName}" does not authorize fallback to another connector`);
   expect(compiled.text).toContain("Report the blocker instead of switching providers");
   expect(compiled.text).toContain("Switching connectors requires explicit user authorization");
+  expect(compiled.text).toContain("Nested MCP/app/provider tools returned by codex_tool_inventory and invoked through codex_tool_call are still executed inside the selected connector's outer Codex route");
+  expect(compiled.text).toContain("run codex_tool_inventory before declaring that capability unavailable");
+  expect(compiled.text).toContain("Prefer the most specific operation query you can infer");
+  expect(compiled.text).toContain("use the exact provider/operation and do not choose a lower-ranked wrapper");
+  expect(compiled.text).toContain("For Figma design-to-code URLs, query get_design_context first rather than a broad figma search");
 });
 
 test("fresh Temporary Chats inline the previous user and assistant exchange for ambiguous follow-ups", () => {

@@ -4,6 +4,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { waitForCodexToolGatewayRoutes } from "./codex-tool-health";
+import {
+  gatewayToolInventoryProgram,
+  gatewayWireIdentity,
+  inventoryToolRank,
+  parseGatewayToolInventory,
+  type GatewayDiscoveredTool,
+} from "./deferred-tool-inventory";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { callTurnBroker, type BrokerToolResult } from "./turn-broker";
 
@@ -117,12 +124,6 @@ function exactTool(environment: ChatGptTurnEnvironment, name: string): CodexTool
   return environment.tools.find(tool => !tool.namespace && tool.name === name);
 }
 
-function namedTool(environment: ChatGptTurnEnvironment, requestedWireName: string): CodexTool {
-  const tool = environment.tools.find(candidate => wireName(candidate) === requestedWireName);
-  if (!tool) throw new Error(`Codex tool is not available in this turn: ${requestedWireName}`);
-  return tool;
-}
-
 function invocationTimeout(environment: ChatGptTurnEnvironment & { expiresAt?: number }): number | null {
   return environment.expiresAt === undefined ? null : Math.max(1, environment.expiresAt - Date.now());
 }
@@ -177,6 +178,7 @@ function execGatewayProgram(
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
   const server = new McpServer({ name: "codex-native", version: "3.0.0" });
   const readyGatewayTools = new Map<string, Set<string>>();
+  const discoveredGatewayTools = new Map<string, Map<string, GatewayDiscoveredTool>>();
 
   const environment = async (
     bindingId: string,
@@ -348,7 +350,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         capabilities: ["native_tool_loop", "session_history", "lazy_context", "lazy_instructions", "lazy_images", "exec", "apply_patch", "images", "tool_registry"],
         context_transport: "mcp_lazy",
         context_required: false,
-        next_action: "Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool. Call codex_context selectively; do not preload history or instruction catalogs.",
+        next_action: "Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool. Call codex_context selectively; for a named MCP/app/provider operation that is not a direct bridge tool, use a targeted codex_tool_inventory query before deciding that tool is unavailable.",
       });
     },
   );
@@ -391,7 +393,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_exec",
     {
       title: "Run a native Codex command",
-      description: "Invoke the command tool advertised by the current outer Codex harness. A long-running command returns its native session_id.",
+      description: "Invoke the command tool advertised by the current outer Codex harness for inspection, search, tests, builds, and other non-editing command work. Intentional repository edits must use codex_apply_patch instead so Codex receives a native file-change item. A long-running command returns its native session_id.",
       inputSchema: {
         binding_id: bindingSchema,
         cmd: z.string().min(1).max(100_000),
@@ -430,7 +432,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_write_stdin",
     {
       title: "Continue a native Codex command session",
-      description: "Write characters to, or poll, a session_id returned by codex_exec.",
+      description: "Write characters to, or poll, a session_id returned by codex_exec. Do not use a command session to substitute for codex_apply_patch when intentionally editing repository files.",
       inputSchema: {
         binding_id: bindingSchema,
         session_id: z.number().int().nonnegative(),
@@ -459,7 +461,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_apply_patch",
     {
       title: "Apply a native Codex patch",
-      description: "Invoke the outer Codex apply_patch tool, producing a native file-change item in the Codex task.",
+      description: "Required route for intentional repository edits. Invoke the outer Codex apply_patch tool, producing a native file-change item in the Codex task.",
       inputSchema: { binding_id: bindingSchema, patch: z.string().min(1).max(5_000_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -506,7 +508,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_tool_inventory",
     {
       title: "Discover tools from the current Codex harness",
-      description: "Search the exact tool registry supplied to the current outer Codex turn, including configured MCP/app tools.",
+      description: "Search the exact tool registry supplied to the current outer Codex turn, including configured MCP/app tools. Deferred results discovered here remain inside this selected Codex route; invoking them with codex_tool_call is not connector switching. Prefer a specific operation query when known (for example get_design_context) over a broad provider query.",
       inputSchema: {
         binding_id: bindingSchema,
         query: z.string().max(500).optional(),
@@ -519,24 +521,115 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, query, offset, limit, include_schema }) => {
       const bound = await environment(binding_id, "codex_tool_inventory");
       const needle = query?.trim().toLowerCase();
-      const matches = bound.tools.filter(tool => !needle || [
-        wireName(tool),
-        tool.name,
-        tool.namespace ?? "",
-        tool.description,
-      ].join("\n").toLowerCase().includes(needle));
-      const page = matches.slice(offset, offset + limit).map(tool => ({
-        wire_name: wireName(tool),
-        name: tool.name,
-        namespace: tool.namespace ?? null,
-        description: tool.description,
-        kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
-        ...(include_schema ? { parameters: tool.parameters } : {}),
+      const needleKey = needle?.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ?? "";
+      const directExactNamespaceMatchExists = Boolean(needleKey) && bound.tools.some(
+        tool => (tool.namespace ?? "").toLowerCase() === needleKey,
+      );
+      const directMatches = bound.tools
+        .map(tool => ({
+          tool,
+          rank: inventoryToolRank(
+            needle ?? "",
+            wireName(tool),
+            tool.name,
+            tool.namespace ?? "",
+            tool.description,
+            directExactNamespaceMatchExists,
+          ),
+        }))
+        .filter(item => !needle || item.rank < 5)
+        .sort((left, right) => left.rank - right.rank || wireName(left.tool).localeCompare(wireName(right.tool)));
+      const directRows = directMatches.map(({ tool, rank }) => ({
+        rank,
+        wireName: wireName(tool),
+        value: {
+          wire_name: wireName(tool),
+          name: tool.name,
+          namespace: tool.namespace ?? null,
+          description: tool.description,
+          kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
+          source: "turn" as const,
+          ...(include_schema ? { parameters: tool.parameters } : {}),
+        } as Record<string, unknown>,
       }));
+
+      const gateway = execGateway(bound);
+      let nestedTotal = 0;
+      let nestedDiscoveryError: string | undefined;
+      const nestedRows: Array<{ rank: number; wireName: string; value: Record<string, unknown> }> = [];
+      if (gateway && needle) {
+        try {
+          const discovered = parseGatewayToolInventory(await invoke(
+            binding_id,
+            bound,
+            gateway,
+            { input: gatewayToolInventoryProgram({
+              query,
+              excludedWireNames: bound.tools.map(wireName),
+              offset: 0,
+              limit: offset + limit,
+              includeSchema: include_schema,
+            }) },
+            "codex_tool_inventory",
+            "codex_nested_tool_inventory",
+          ));
+          nestedTotal = discovered.total;
+          const cache = discoveredGatewayTools.get(binding_id) ?? new Map<string, GatewayDiscoveredTool>();
+          for (const tool of discovered.tools) {
+            const previous = cache.get(tool.wireName);
+            const identity = gatewayWireIdentity(tool.wireName);
+            const cached: GatewayDiscoveredTool = {
+              ...previous,
+              ...tool,
+            };
+            if (include_schema) {
+              if (tool.parameters) {
+                cached.parameters = tool.parameters;
+                delete cached.schemaError;
+              } else {
+                delete cached.parameters;
+                if (!tool.schemaError) delete cached.schemaError;
+              }
+            } else if (previous?.parameters) {
+              cached.parameters = previous.parameters;
+              if (previous.schemaError) cached.schemaError = previous.schemaError;
+            }
+            cache.set(tool.wireName, cached);
+            nestedRows.push({
+              rank: tool.rank,
+              wireName: tool.wireName,
+              value: {
+                wire_name: tool.wireName,
+                name: identity.name,
+                namespace: identity.namespace,
+                description: tool.description,
+                kind: tool.freeform ? "freeform" : "function",
+                source: "exec_gateway",
+                ...(include_schema && tool.parameters ? { parameters: tool.parameters } : {}),
+                ...(include_schema && tool.schemaError ? { schema_error: tool.schemaError.slice(0, 500) } : {}),
+              },
+            });
+          }
+          discoveredGatewayTools.set(binding_id, cache);
+          if (discoveredGatewayTools.size > 128) {
+            const oldest = discoveredGatewayTools.keys().next().value;
+            if (oldest) discoveredGatewayTools.delete(oldest);
+          }
+        } catch (error) {
+          nestedDiscoveryError = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      const page = [...directRows, ...nestedRows]
+        .sort((left, right) => left.rank - right.rank || left.wireName.localeCompare(right.wireName))
+        .slice(offset, offset + limit)
+        .map(item => item.value);
+      const total = directMatches.length + nestedTotal;
       return result({
         tools: page,
-        total: matches.length,
-        next_offset: offset + page.length < matches.length ? offset + page.length : null,
+        total,
+        next_offset: offset + page.length < total ? offset + page.length : null,
+        ...(nestedDiscoveryError ? { nested_discovery_error: nestedDiscoveryError.slice(0, 500) } : {}),
       });
     },
   );
@@ -545,7 +638,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     "codex_tool_call",
     {
       title: "Call any tool from the current Codex harness",
-      description: "Invoke an exact wire_name returned by codex_tool_inventory. The outer Codex runtime performs the call, approvals, and UI lifecycle.",
+      description: "Invoke an exact wire_name returned by codex_tool_inventory. Deferred calls remain inside the selected Codex connector route; the outer Codex runtime performs the call, approvals, and UI lifecycle.",
       inputSchema: {
         binding_id: bindingSchema,
         wire_name: z.string().min(1).max(1_000),
@@ -556,14 +649,28 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
     async ({ binding_id, wire_name, arguments: args, input }) => {
       const bound = await environment(binding_id);
-      const tool = namedTool(bound, wire_name);
-      if (tool.freeform) {
+      const tool = bound.tools.find(candidate => wireName(candidate) === wire_name);
+      if (tool?.freeform) {
         if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
         if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
         return invokeNative(binding_id, bound, tool, { input }, "codex_tool_call");
       }
+      if (tool) {
+        if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
+        return invokeNative(binding_id, bound, tool, { arguments: args ?? {} }, "codex_tool_call");
+      }
+
+      const discovered = discoveredGatewayTools.get(binding_id)?.get(wire_name);
+      if (!discovered) {
+        throw new Error(`Codex tool is not available in this turn or has not been returned by codex_tool_inventory: ${wire_name}`);
+      }
+      if (discovered.freeform) {
+        if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
+        if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
+        return invokeNestedNative(binding_id, bound, wire_name, true, { input }, "codex_tool_call");
+      }
       if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-      return invokeNative(binding_id, bound, tool, { arguments: args ?? {} }, "codex_tool_call");
+      return invokeNestedNative(binding_id, bound, wire_name, false, { arguments: args ?? {} }, "codex_tool_call");
     },
   );
 
