@@ -55,6 +55,32 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
   .filter({ hasText: /making requests too quickly/i })
   .last();
 
+const CHATGPT_TOOL_CONFIRMATION_DIALOG_TEXT = /^Allow ChatGPT to use .+\?/i;
+
+interface ChatGptSafeSystemDialogRule {
+  matches: (text: string) => boolean;
+  actions: readonly string[];
+}
+
+const CHATGPT_SAFE_SYSTEM_DIALOG_RULES: readonly ChatGptSafeSystemDialogRule[] = [
+  {
+    // Temporary Chat occasionally shows an informational first-use notice over the composer.
+    // Keep this whitelist intentionally narrow: legal/account consent dialogs must never be
+    // accepted merely because they happen to expose a generic Continue/Got it button.
+    matches: text => /Temporary Chat/i.test(text)
+      && /(won['’]?t appear in (?:your )?history|may keep a copy|not used to train)/i.test(text),
+    actions: ["Got it", "Continue"],
+  },
+];
+
+const normalizedDialogText = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+const chatGptManualActionRequiredError = (text: string): LcaCodexAdapterError => new LcaCodexAdapterError(
+  `ChatGPT is showing a blocking popup that LCA Codex does not recognize: ${JSON.stringify(normalizedDialogText(text))}. `
+  + "Open ChatGPT, handle or dismiss this popup manually, then retry the request.",
+  { status: 409, errorType: "invalid_request_error", code: "chatgpt_manual_action_required", retryable: false },
+);
+
 export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   const dialog = chatGptRateLimitDialog(page);
   if (!await dialog.isVisible().catch(() => false)) return;
@@ -73,6 +99,71 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   throw new LcaCodexAdapterError(
     "ChatGPT rate limit: too many requests are being made too quickly. Wait before retrying.",
     { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: true },
+  );
+}
+
+export async function resolveChatGptBlockingSystemDialogs(
+  page: Page,
+  captureDiagnostic?: (checkpoint: string) => Promise<void>,
+): Promise<void> {
+  // A known rate limit remains a structured 429 rather than being mistaken for a manual-action
+  // popup. This also preserves the existing acknowledgement/backoff behavior.
+  await throwIfChatGptRateLimitDialog(page);
+
+  // A small bounded loop handles stacked first-use notices without ever turning this into a
+  // generic "click whatever says Continue" mechanism.
+  for (let pass = 0; pass < 8; pass += 1) {
+    const dialogs = page.locator('[role="dialog"]').filter({ visible: true });
+    const count = await dialogs.count().catch(() => 0);
+    let dismissedKnownDialog = false;
+
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const dialog = dialogs.nth(index);
+      const text = normalizedDialogText(await dialog.innerText().catch(() => ""));
+      if (!text) continue;
+
+      // Connector/tool approval is owned by resolveChatGptToolConfirmation. Never consume it as
+      // a system notice, and never turn manual connector approval into a generic popup failure.
+      if (CHATGPT_TOOL_CONFIRMATION_DIALOG_TEXT.test(text)) continue;
+
+      const rule = CHATGPT_SAFE_SYSTEM_DIALOG_RULES.find(candidate => candidate.matches(text));
+      if (!rule) {
+        await captureDiagnostic?.("system-dialog-manual-action-required");
+        throw chatGptManualActionRequiredError(text);
+      }
+
+      for (const action of rule.actions) {
+        const button = dialog.getByRole("button", { name: action, exact: true }).last();
+        if (!await button.isVisible().catch(() => false)) continue;
+        try {
+          await button.press("Enter");
+          await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+        } catch (error) {
+          throw new LcaCodexAdapterError(
+            `ChatGPT showed a known system popup, but LCA Codex could not dismiss it safely: ${JSON.stringify(text)}. `
+            + `Open ChatGPT and handle the popup manually, then retry. (${error instanceof Error ? error.message : String(error)})`,
+            { status: 409, errorType: "invalid_request_error", code: "chatgpt_manual_action_required", retryable: false },
+          );
+        }
+        await captureDiagnostic?.("system-dialog-auto-dismissed");
+        dismissedKnownDialog = true;
+        break;
+      }
+
+      if (!dismissedKnownDialog) {
+        await captureDiagnostic?.("system-dialog-manual-action-required");
+        throw chatGptManualActionRequiredError(text);
+      }
+      break;
+    }
+
+    if (!dismissedKnownDialog) return;
+    await throwIfChatGptRateLimitDialog(page);
+  }
+
+  throw new LcaCodexAdapterError(
+    "ChatGPT kept showing stacked system popups after LCA Codex dismissed the known safe notices. Open ChatGPT, handle the remaining popup manually, then retry.",
+    { status: 409, errorType: "invalid_request_error", code: "chatgpt_manual_action_required", retryable: false },
   );
 }
 
@@ -1165,13 +1256,13 @@ export class ChatGptBrowserWorker {
     } catch {
       throw new Error("ChatGPT rendered the composer but its model/effort control did not become ready");
     }
-    await throwIfChatGptRateLimitDialog(page);
+    await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
     await captureDiagnostic?.("effort-control-ready");
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const menuVisible = await effortMenu.isVisible().catch(() => false);
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
     if (!menuVisible && menuExpanded !== "true") {
-      await throwIfChatGptRateLimitDialog(page);
+      await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
       await currentEffort.click();
     }
     await captureDiagnostic?.("effort-menu-open-requested");
@@ -1200,7 +1291,7 @@ export class ChatGptBrowserWorker {
       const target = mode.uiEffortIndex;
       if ([min, max, value].every(Number.isFinite) && target >= min && target <= max) {
         if (value !== target) {
-          await throwIfChatGptRateLimitDialog(page);
+          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
           await effortSlider.focus();
           const key = target > value ? "ArrowRight" : "ArrowLeft";
           for (let step = 0; step < Math.abs(target - value); step += 1) await effortSlider.press(key);
@@ -1208,7 +1299,7 @@ export class ChatGptBrowserWorker {
         const deadline = Date.now() + 40_000;
         let confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
         while (confirmed !== target && Date.now() < deadline) {
-          await throwIfChatGptRateLimitDialog(page);
+          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
           await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
           confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
         }
@@ -1237,7 +1328,7 @@ export class ChatGptBrowserWorker {
       await captureDiagnostic?.("effort-choice-visible");
     } catch (error) {
       if (error instanceof LcaCodexAdapterError) throw error;
-      await throwIfChatGptRateLimitDialog(page);
+      await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
       const sliderRange = sliderReady
         ? `${await effortSlider.getAttribute("aria-valuemin").catch(() => null) ?? "?"}-${await effortSlider.getAttribute("aria-valuemax").catch(() => null) ?? "?"}`
         : "none";
@@ -1258,7 +1349,7 @@ export class ChatGptBrowserWorker {
       await page.keyboard.press("Escape");
       return mode;
     }
-    await throwIfChatGptRateLimitDialog(page);
+    await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
     await effortChoice.click();
     await captureDiagnostic?.("effort-choice-clicked");
 
@@ -1268,7 +1359,7 @@ export class ChatGptBrowserWorker {
       if (!await effortMenu.isVisible().catch(() => false)) {
         const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
         if (expanded !== "true") {
-          await throwIfChatGptRateLimitDialog(page);
+          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
           await currentEffort.click();
         }
         await effortChoice.waitFor({
@@ -1306,6 +1397,7 @@ export class ChatGptBrowserWorker {
   }
 
   private async waitForSubmissionAccepted(
+    page: Page,
     networkObserver: ChatGptNetworkTurnObserver,
     signal?: AbortSignal,
   ): Promise<ChatGptSubmissionEvidence> {
@@ -1317,6 +1409,7 @@ export class ChatGptBrowserWorker {
       }
       const networkState = networkObserver.snapshot();
       if (networkState.submissionKnown || networkState.turnKnown || networkState.completed) return "network_turn";
+      await resolveChatGptBlockingSystemDialogs(page);
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
   }
@@ -1979,6 +2072,10 @@ export class ChatGptBrowserWorker {
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
       ), turn.abortSignal);
       await diagnostics.capture(page, "temporary-chat-navigation-complete");
+      await resolveChatGptBlockingSystemDialogs(
+        page,
+        async checkpoint => { await diagnostics.capture(page, checkpoint); },
+      );
       try {
         await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
           this.activeComposer(page)
@@ -1988,6 +2085,10 @@ export class ChatGptBrowserWorker {
       }
       await diagnostics.capture(page, "composer-ready");
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
+        await resolveChatGptBlockingSystemDialogs(
+          page,
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
+        );
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
         await assertTemporaryChatPage(page);
@@ -2004,7 +2105,15 @@ export class ChatGptBrowserWorker {
       ), turn.abortSignal);
       await diagnostics.capture(page, "effort-selection-complete");
       await this.runStage(turn.traceId, "prompt_attachment", browserStageTimeouts.promptAttachment, () => (
-        this.attachPrompt(page, prepared.text, mode.localTools, async checkpoint => { await diagnostics.capture(page, checkpoint); })
+        resolveChatGptBlockingSystemDialogs(
+          page,
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
+        ).then(() => this.attachPrompt(
+          page,
+          prepared.text,
+          mode.localTools,
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
+        ))
       ), turn.abortSignal);
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
@@ -2035,6 +2144,10 @@ export class ChatGptBrowserWorker {
         );
       }
       await this.runStage(turn.traceId, "send", browserStageTimeouts.send, async (stageSignal) => {
+        await resolveChatGptBlockingSystemDialogs(
+          page,
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
+        );
         const composer = await this.activeComposer(page);
         const sendButton = composer
           .locator("xpath=ancestor::form[1]")
@@ -2048,7 +2161,7 @@ export class ChatGptBrowserWorker {
         networkArmedAt = Date.now();
         networkObserver.arm();
         await sendButton.press("Enter");
-        const evidence = await this.waitForSubmissionAccepted(networkObserver, stageSignal);
+        const evidence = await this.waitForSubmissionAccepted(page, networkObserver, stageSignal);
         console.info(`[lca-codex] browser turn ${turn.traceId} submission accepted evidence=${evidence}`);
       }, turn.abortSignal);
       const sentAt = Date.now();
@@ -2160,6 +2273,11 @@ export class ChatGptBrowserWorker {
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
+
+        await resolveChatGptBlockingSystemDialogs(
+          page,
+          async checkpoint => { await diagnostics.capture(page, checkpoint); },
+        );
 
         let snapshot: ChatGptResponseDomSnapshot;
         try {

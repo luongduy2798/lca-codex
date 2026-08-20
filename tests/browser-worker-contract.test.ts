@@ -14,6 +14,7 @@ import {
   browserDiagnosticCheckpoint,
   isChatGptTraceControl,
   redactChatGptUiDiagnostic,
+  resolveChatGptBlockingSystemDialogs,
   resolveBrowserConfig,
   resolveChatGptToolConfirmation,
   throwIfChatGptRateLimitDialog,
@@ -1031,7 +1032,7 @@ test("effort selection handles the known ChatGPT rate-limit dialog before truste
   const selectionStart = workerSource.indexOf("private async selectModelAndEffort");
   const selectionEnd = workerSource.indexOf("private async activeComposer", selectionStart);
   const selectionSource = workerSource.slice(selectionStart, selectionEnd);
-  const guard = selectionSource.indexOf("throwIfChatGptRateLimitDialog(page)");
+  const guard = selectionSource.indexOf("resolveChatGptBlockingSystemDialogs(page, captureDiagnostic)");
   const activation = selectionSource.indexOf("currentEffort.click()");
 
   expect(workerSource).toContain("Too many requests");
@@ -1070,6 +1071,45 @@ function dialogPage(text: string): { page: Page; pressed: string[] } {
   };
 }
 
+function blockingSystemDialogPage(
+  text: string,
+  visibleActions: readonly string[] = [],
+): { page: Page; pressed: string[] } {
+  let visible = true;
+  const pressed: string[] = [];
+  const button = (name: string) => ({
+    last: () => button(name),
+    isVisible: async () => visible && visibleActions.includes(name),
+    press: async (key: string) => {
+      pressed.push(`${name}:${key}`);
+      visible = false;
+    },
+  });
+  const dialog = (matches = true): Record<string, unknown> => ({
+    filter: (input: { hasText?: string | RegExp }) => {
+      if (input.hasText === undefined) return dialog(matches);
+      const textMatches = typeof input.hasText === "string"
+        ? text.includes(input.hasText)
+        : input.hasText.test(text);
+      return dialog(matches && textMatches);
+    },
+    count: async () => matches && visible ? 1 : 0,
+    nth: () => dialog(matches),
+    last: () => dialog(matches),
+    isVisible: async () => matches && visible,
+    innerText: async () => text,
+    getByRole: (_role: string, input: { name: string }) => button(input.name),
+    waitFor: async ({ state }: { state: string }) => {
+      expect(state).toBe("hidden");
+      expect(visible).toBeFalse();
+    },
+  });
+  return {
+    page: { locator: () => dialog() } as unknown as Page,
+    pressed,
+  };
+}
+
 test("the known ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
 
@@ -1090,6 +1130,42 @@ test("unrelated ChatGPT dialogs are left untouched", async () => {
   expect(fixture.pressed).toEqual([]);
 });
 
+test("known safe Temporary Chat notices are dismissed before browser automation continues", async () => {
+  const fixture = blockingSystemDialogPage(
+    "Temporary Chat. This chat won't appear in your history and may keep a copy for up to 30 days.",
+    ["Got it"],
+  );
+
+  await resolveChatGptBlockingSystemDialogs(fixture.page);
+  expect(fixture.pressed).toEqual(["Got it:Enter"]);
+});
+
+test("unknown blocking ChatGPT dialogs surface their text and require manual user action", async () => {
+  const fixture = blockingSystemDialogPage("Please review the new account notice before continuing.", ["Continue"]);
+
+  await expect(resolveChatGptBlockingSystemDialogs(fixture.page)).rejects.toMatchObject({
+    name: "LcaCodexAdapterError",
+    status: 409,
+    errorType: "invalid_request_error",
+    code: "chatgpt_manual_action_required",
+    retryable: false,
+  });
+  await expect(resolveChatGptBlockingSystemDialogs(fixture.page)).rejects.toThrow(
+    "Please review the new account notice before continuing.",
+  );
+  await expect(resolveChatGptBlockingSystemDialogs(fixture.page)).rejects.toThrow(
+    "Open ChatGPT, handle or dismiss this popup manually, then retry the request.",
+  );
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("generic system-popup handling does not consume connector approval dialogs", async () => {
+  const fixture = blockingSystemDialogPage("Allow ChatGPT to use lca-codex?", ["Continue"]);
+
+  await resolveChatGptBlockingSystemDialogs(fixture.page);
+  expect(fixture.pressed).toEqual([]);
+});
+
 test("a failed subscription fetch is retryable and does not falsely invalidate ChatGPT login", async () => {
   const fixture = dialogPage(
     "Failed to load subscription: Something went wrong. If this issue persists please contact us through our help center at help.openai.com.",
@@ -1107,6 +1183,7 @@ test("a failed subscription fetch is retryable and does not falsely invalidate C
 test("submission acceptance stops when its stage is aborted", async () => {
   const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
     waitForSubmissionAccepted(
+      page: Page,
       networkObserver: unknown,
       signal: AbortSignal,
     ): Promise<unknown>;
@@ -1116,6 +1193,7 @@ test("submission acceptance stops when its stage is aborted", async () => {
 
   await expect(waitForSubmissionAccepted.call(
     {},
+    {} as Page,
     {},
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
