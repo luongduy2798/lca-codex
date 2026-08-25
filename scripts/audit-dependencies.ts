@@ -91,7 +91,7 @@ export function dependencyAdvisories(
 async function main(): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const packages = new Map<string, Set<string>>();
-  for (const relativePath of ["bun.lock", "launcher/bun.lock"]) {
+  for (const relativePath of ["bun.lock"]) {
     mergeLockedPackages(
       packages,
       lockedPackages(readFileSync(resolve(root, relativePath), "utf8"), relativePath),
@@ -121,7 +121,7 @@ async function main(): Promise<void> {
     }
     throw new Error(`Dependency audit found ${findings.length} advisory finding(s)`);
   }
-  process.stdout.write(`DEPENDENCY_AUDIT_OK ${packages.size} packages across 2 lockfiles\n`);
+  process.stdout.write(`DEPENDENCY_AUDIT_OK ${packages.size} packages across 1 lockfile\n`);
 }
 
 if (import.meta.main) await main();

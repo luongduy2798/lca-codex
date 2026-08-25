@@ -16,7 +16,7 @@ export function processRunning(
     return true;
   } catch (error) {
     // Windows and hardened Unix environments can deny signalling an existing process. EPERM is
-    // existence evidence, not proof that the launcher/browser/tunnel owner disappeared.
+    // existence evidence, not proof that the browser/tunnel owner disappeared.
     return (error as NodeJS.ErrnoException)?.code === "EPERM";
   }
 }

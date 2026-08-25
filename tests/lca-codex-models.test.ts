@@ -22,12 +22,12 @@ function parsed(modelId: string, reasoning = "medium"): CodexParsedRequest {
   };
 }
 
-describe("single LCA Codex model", () => {
+describe("single LCA Token model", () => {
   test("exposes one stable model and maps reasoning to browser modes", () => {
     expect(LCA_CODEX_MODEL).toEqual({
-      slug: "lca-codex",
-      displayName: "LCA-5.6 Sol",
-      description: "LCA Codex through the native Codex harness.",
+      slug: "lca-token",
+      displayName: "LCA Token",
+      description: "ChatGPT Web through the local LCA Token runtime.",
     });
     expect(LCA_CODEX_REASONING_MODES.map(mode => [mode.codexEffort, mode.adapterEffort, mode.displayLabel])).toEqual([
       ["low", "low", "Instant"],
@@ -36,8 +36,8 @@ describe("single LCA Codex model", () => {
       ["xhigh", "xhigh", "Extra High"],
       ["ultra", "max", "Pro"],
     ]);
-    expect(requireLcaCodexModel("lca-codex")).toBe(LCA_CODEX_MODEL);
-    expect(() => requireLcaCodexModel("lca-codex/high")).toThrow("model is not enabled");
+    expect(requireLcaCodexModel("lca-token")).toBe(LCA_CODEX_MODEL);
+    expect(() => requireLcaCodexModel("lca-token/high")).toThrow("model is not enabled");
   });
 
   test("advertises Pro-only reasoning levels only when the account supports them", () => {
@@ -67,11 +67,11 @@ describe("single LCA Codex model", () => {
   });
 
   test("routes the single model while preserving the selected reasoning mode", () => {
-    const request = parsed("lca-codex", "low");
+    const request = parsed("lca-token", "low");
     const rawSnapshot = structuredClone(request._rawBody);
     const model = routeLcaCodexRequest(request, defaultConfig());
 
-    expect(model.slug).toBe("lca-codex");
+    expect(model.slug).toBe("lca-token");
     expect(request.modelId).toBe(LCA_CODEX_BASE_MODEL);
     expect(request.options.reasoning).toBe("low");
     expect(request._rawBody).toEqual(rawSnapshot);
@@ -80,10 +80,10 @@ describe("single LCA Codex model", () => {
   test("maps Pro to the browser max effort and fails closed for unsupported routed slugs", () => {
     const config = defaultConfig();
     config.proAvailable = true;
-    const request = parsed("lca-codex", "max");
-    expect(routeLcaCodexRequest(request, config).slug).toBe("lca-codex");
+    const request = parsed("lca-token", "max");
+    expect(routeLcaCodexRequest(request, config).slug).toBe("lca-token");
     expect(request.options.reasoning).toBe("max");
-    expect(() => routeLcaCodexRequest(parsed("lca-codex/pro"), config))
+    expect(() => routeLcaCodexRequest(parsed("lca-token/pro"), config))
       .toThrow("model is not enabled");
   });
 });

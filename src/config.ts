@@ -1,13 +1,22 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import type { CodexProviderConfig } from "./types";
+import {
+  DEFAULT_PORT,
+  DEFAULT_PROFILE,
+  PRODUCT_BUN_ENV,
+  PRODUCT_HOME_ENV,
+  PRODUCT_ID,
+  PRODUCT_PROFILE_ENV,
+  SOURCE_CLI_COMMAND,
+  assertProfileName,
+} from "./product";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "full";
-export type BrowserHostMode = "managed-chrome" | "launcher";
 
 export interface TunnelConfig {
   binaryPath: string;
@@ -26,12 +35,10 @@ export interface AppConfig {
   port: number;
   contextWindow: number;
   appName: string;
-  browserHost: BrowserHostMode;
-  browserHostDescriptorPath?: string;
+  browserHost: "managed-chrome";
   chromeExecutablePath: string;
   storageStatePath: string;
   brokerSocketPath: string;
-  headed: boolean;
   proAvailable: boolean;
   autoApproveToolCalls: boolean;
   controlToken: string;
@@ -47,8 +54,40 @@ export function expandUserPath(value: string): string {
 }
 
 export function getConfigDir(): string {
-  const configured = process.env.LCA_CODEX_HOME?.trim();
-  return resolve(expandUserPath(configured || join(homedir(), ".lca-codex")));
+  return join(getProductHome(), "profiles", getProfileName());
+}
+
+export function getProductHome(): string {
+  const configured = process.env[PRODUCT_HOME_ENV]?.trim();
+  return resolve(expandUserPath(configured || join(homedir(), `.${PRODUCT_ID}`)));
+}
+
+export function getProfileName(): string {
+  const configured = process.env[PRODUCT_PROFILE_ENV]?.trim();
+  if (configured) return assertProfileName(configured);
+  const activePath = join(getProductHome(), "active-profile");
+  if (existsSync(activePath)) {
+    const active = readFileSync(activePath, "utf8").trim();
+    if (active) return assertProfileName(active);
+  }
+  return DEFAULT_PROFILE;
+}
+
+export function setActiveProfile(profile: string): string {
+  const validated = assertProfileName(profile);
+  const directory = join(getProductHome(), "profiles", validated);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  atomicWriteFile(join(getProductHome(), "active-profile"), `${validated}\n`);
+  return validated;
+}
+
+export function listProfiles(): string[] {
+  const profilesDir = join(getProductHome(), "profiles");
+  if (!existsSync(profilesDir)) return [];
+  return readdirSync(profilesDir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9._-]+$/.test(entry.name))
+    .map(entry => entry.name)
+    .sort();
 }
 
 export function getConfigPath(): string {
@@ -62,7 +101,7 @@ export function isWindowsPipeEndpoint(value: string): boolean {
 export function defaultBrokerEndpoint(home = getConfigDir(), platform = process.platform): string {
   if (platform !== "win32") return join(home, "runtime", "turn-broker.sock");
   const identity = createHash("sha256").update(resolve(home).toLowerCase()).digest("hex").slice(0, 20);
-  return `\\\\.\\pipe\\lca-codex-${identity}`;
+  return `\\\\.\\pipe\\lca-token-${identity}`;
 }
 
 export function resolveBrokerEndpoint(value: string): string {
@@ -114,16 +153,15 @@ export function defaultConfig(): AppConfig {
     releaseVersion: VERSION,
     mode: "full",
     host: "127.0.0.1",
-    port: 17841,
+    port: DEFAULT_PORT,
     contextWindow: 256_000,
-    appName: "lca-codex",
+    appName: PRODUCT_ID,
     browserHost: "managed-chrome",
     chromeExecutablePath: defaultChromeExecutable(),
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
-    headed: true,
     proAvailable: false,
-    autoApproveToolCalls: false,
+    autoApproveToolCalls: true,
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
   };
@@ -135,7 +173,6 @@ export function currentRuntimeCommand(): string[] {
     ? installedBunExecutable()
     : undefined;
   return runtimeCommandForProcess({
-    launcher: process.env.LCA_CODEX_LAUNCHER,
     executable: process.execPath,
     entry: typeof Bun !== "undefined" ? Bun.main : process.argv[1],
     bunExecutable,
@@ -159,7 +196,7 @@ export function installedBunExecutable({
     .filter(Boolean)
     .map(part => join(part, executableName));
   const discovered = [
-    process.env.LCA_CODEX_BUN,
+    process.env[PRODUCT_BUN_ENV],
     ...candidates,
     ...pathCandidates,
     typeof Bun !== "undefined" ? Bun.which("bun") : undefined,
@@ -179,22 +216,14 @@ export function installedBunExecutable({
 }
 
 export function runtimeCommandForProcess({
-  launcher,
   executable,
   entry,
   bunExecutable,
 }: {
-  launcher?: string;
   executable: string;
   entry?: string;
   bunExecutable?: string | null;
 }): string[] {
-  launcher = launcher?.trim();
-  if (launcher) {
-    const command = [resolve(launcher)];
-    assertDurableRuntimeCommand(command);
-    return command;
-  }
   executable = resolve(executable);
   const executableName = basename(executable).toLowerCase();
   if (executableName === "bun" || executableName === "bun.exe") {
@@ -246,7 +275,7 @@ export function defaultChromeExecutable(
 
 export function loadConfig(): AppConfig {
   const path = getConfigPath();
-  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run lca-codex setup first.`);
+  if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run ${SOURCE_CLI_COMMAND} setup first.`);
   return parseConfig(JSON.parse(readFileSync(path, "utf8")), path);
 }
 
@@ -257,14 +286,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
   if (parsed.mode !== "full") throw new Error(`LCA Codex requires the ChatGPT Web bridge runtime in ${path}`);
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
-  if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {
+  if (parsed.browserHost !== "managed-chrome") {
     throw new Error(`Invalid browserHost in ${path}`);
   }
   if (!Number.isInteger(parsed.port) || parsed.port! < 1 || parsed.port! > 65_535) throw new Error(`Invalid port in ${path}`);
   if (!Number.isSafeInteger(parsed.contextWindow) || parsed.contextWindow! <= 0) {
     throw new Error(`Invalid contextWindow in ${path}`);
   }
-  if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
   }
@@ -275,14 +303,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
     if (typeof parsed[key] !== "string" || !(parsed[key] as string).trim()) throw new Error(`Missing ${key} in ${path}`);
   }
   if (parsed.appName!.length > 80) throw new Error(`appName is too long in ${path}`);
-  if (parsed.browserHost === "launcher"
-    && (typeof parsed.browserHostDescriptorPath !== "string" || !parsed.browserHostDescriptorPath.trim())) {
-    throw new Error(`Launcher browser host requires browserHostDescriptorPath in ${path}`);
-  }
-  if (parsed.browserHost === "launcher"
-    && !isAbsolute(expandUserPath(parsed.browserHostDescriptorPath!))) {
-    throw new Error(`Launcher browserHostDescriptorPath must be absolute in ${path}`);
-  }
   const brokerEndpoint = expandUserPath(parsed.brokerSocketPath!);
   if (process.platform === "win32") {
     if (!isWindowsPipeEndpoint(brokerEndpoint)) {
@@ -333,14 +353,10 @@ function parseConfig(value: unknown, path: string): AppConfig {
     port: parsed.port!,
     contextWindow: parsed.contextWindow!,
     appName: parsed.appName!,
-    browserHost: parsed.browserHost,
-    ...(parsed.browserHostDescriptorPath
-      ? { browserHostDescriptorPath: parsed.browserHostDescriptorPath }
-      : {}),
+    browserHost: "managed-chrome",
     chromeExecutablePath: parsed.chromeExecutablePath!,
     storageStatePath: parsed.storageStatePath!,
     brokerSocketPath: parsed.brokerSocketPath!,
-    headed: parsed.headed,
     proAvailable: parsed.proAvailable,
     autoApproveToolCalls: parsed.autoApproveToolCalls,
     controlToken: parsed.controlToken!,
@@ -380,12 +396,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     lcaCodex: {
       appName: config.appName,
       browserHost: config.browserHost,
-      browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
-      headed: config.headed,
       localToolsEnabled: true,
       proAvailable: config.proAvailable,
       autoApproveToolCalls: config.autoApproveToolCalls,

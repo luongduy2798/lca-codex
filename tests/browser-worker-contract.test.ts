@@ -17,6 +17,7 @@ import {
   resolveChatGptBlockingSystemDialogs,
   resolveBrowserConfig,
   resolveChatGptToolConfirmation,
+  throwIfChatGptHumanVerificationChallenge,
   throwIfChatGptRateLimitDialog,
   throwIfChatGptSessionFailureAlert,
 } from "../src/adapters/lca-codex/browser-worker";
@@ -71,6 +72,15 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   await Promise.all([...active.slice(1), sixth]);
 });
 
+test("every browser generation owns a fresh Temporary Chat and closes it after completion", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("const managed = await this.pageForNewTurn();");
+  expect(workerSource).toContain('page.goto(CHATGPT_TEMPORARY_CHAT_URL');
+  expect(workerSource).toContain("if (managedPage && !managedPage.isClosed()) {");
+  expect(workerSource).not.toContain("conversationPages");
+  expect(workerSource).not.toContain("temporary-chat-reused");
+});
+
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {
   const provider = { adapter: "lca-codex" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).turnTimeoutMs).toBeUndefined();
@@ -92,6 +102,53 @@ test("managed Chrome defaults follow the host platform", () => {
   );
   const provider = { adapter: "lca-codex" as const, baseUrl: "browser://chatgpt" };
   expect(resolveBrowserConfig(provider).chromeExecutablePath).toBe(defaultChromeExecutable());
+});
+
+test("managed response browser uses one shared headed off-screen launch", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
+  const launchCount = workerSource.match(/headless: false/g)?.length ?? 0;
+  expect(workerSource.match(/chromium\.launch\(/g)?.length).toBe(1);
+  expect(launchCount).toBe(1);
+  expect(workerSource).not.toContain("headless: true");
+  expect(workerSource).not.toContain("configured.headed");
+  expect(workerSource).toContain("assertManagedChromeDisplayAvailable()");
+  expect(workerSource).toContain("args: chatGptManagedChromeArgs(false)");
+  expect(workerSource).toContain("const { context } = await this.ensureManagedBrowser();");
+});
+
+test("managed-browser human verification challenge is not misreported as expired login", async () => {
+  const challengePage = {
+    title: async () => "Just a moment...",
+    locator: () => ({
+      last: () => ({ isVisible: async () => true }),
+    }),
+  } as unknown as Page;
+
+  try {
+    await throwIfChatGptHumanVerificationChallenge(challengePage);
+    throw new Error("expected human-verification challenge to throw");
+  } catch (error) {
+    expect(error).toMatchObject({
+      name: "LcaCodexAdapterError",
+      status: 409,
+      errorType: "invalid_request_error",
+      code: "chatgpt_human_verification_challenge",
+      retryable: false,
+    });
+    expect(String(error)).toContain("human-verification challenge");
+    expect(String(error)).not.toContain("login is expired");
+  }
+});
+
+test("normal ChatGPT title does not trigger the human-verification challenge error", async () => {
+  const normalPage = {
+    title: async () => "ChatGPT",
+    locator: () => ({
+      last: () => ({ isVisible: async () => false }),
+    }),
+  } as unknown as Page;
+
+  await expect(throwIfChatGptHumanVerificationChallenge(normalPage)).resolves.toBeUndefined();
 });
 
 test("browser stage timeout aborts late page acquisition", async () => {
@@ -122,7 +179,7 @@ test("browser stage timeout aborts late page acquisition", async () => {
   expect(acquisitionAborted).toBeTrue();
 });
 
-test("closing the launcher page is an immediate terminal turn error", async () => {
+test("closing the managed browser page is an immediate terminal turn error", async () => {
   const responseDomSnapshot = (ChatGptBrowserWorker.prototype as unknown as {
     responseDomSnapshot(responseTurn: unknown): Promise<unknown>;
   }).responseDomSnapshot;
@@ -134,21 +191,6 @@ test("closing the launcher page is an immediate terminal turn error", async () =
   await expect(responseDomSnapshot.call({}, responseTurn)).rejects.toThrow(
     "ChatGPT browser tab was closed; the Codex turn was terminated",
   );
-});
-
-test("a transient launcher CDP disconnect reattaches the same browser surface instead of replaying the turn", () => {
-  const workerSource = readFileSync(
-    new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url),
-    "utf8",
-  ).replace(/\r\n/g, "\n");
-  expect(workerSource).toContain("const reattachLauncherSurface = async (): Promise<boolean> => {");
-  expect(workerSource).toContain("!turnConnection || turnConnection.isConnected()");
-  expect(workerSource).toContain("launcherSurfaceId,\n            turn.abortSignal,");
-  expect(workerSource).toContain("responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last()");
-  // Initial polling, the network-terminal re-snapshot, and the loop liveness check all recover
-  // the same launcher-owned surface instead of replaying the submitted ChatGPT generation.
-  expect(workerSource.match(/if \(await reattachLauncherSurface\(\)\) continue;/g)?.length).toBe(3);
-  expect(workerSource).toContain("rather than replaying the\n          // ChatGPT turn");
 });
 
 test("browser network lifecycle correlates completion regardless of created/stream ordering", () => {
@@ -434,7 +476,7 @@ test("five browser turn trackers keep terminal state isolated", () => {
   expect(trackers.map(tracker => tracker.snapshot().completed)).toEqual([false, false, true, false, false]);
 });
 
-test("browser network lifecycle is mandatory before Send and after launcher reattachment", () => {
+test("browser network lifecycle is mandatory before Send", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const attach = workerSource.indexOf("await networkObserver.attach(page);");
   const arm = workerSource.indexOf("networkObserver.arm();", attach);
@@ -447,8 +489,7 @@ test("browser network lifecycle is mandatory before Send and after launcher reat
   expect(workerSource).toContain('url.pathname === "/backend-api/f/conversation"');
   expect(workerSource).toContain("stream_status$/.exec(url.pathname)");
   expect(workerSource).toContain("this.tracker.arm()");
-  expect(workerSource.match(/await networkObserver\.attach\(page\);/g)?.length).toBe(2);
-  expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_reattached"');
+  expect(workerSource.match(/await networkObserver\.attach\(page\);/g)?.length).toBe(1);
   expect(workerSource).toContain('logLcaCodexActivity("lca_codex.network_observer_unavailable"');
   expect(workerSource).toContain('"lca_codex.network_turn_created"');
   expect(workerSource).toContain('"lca_codex.network_turn_streaming"');
@@ -464,8 +505,6 @@ test("browser network lifecycle is mandatory before Send and after launcher reat
   expect(workerSource).not.toContain("turnCompletionReady");
   expect(workerSource).not.toContain("completionTracker");
   expect(workerSource).toContain("ChatGPT network lifecycle observer is unavailable before Send");
-  expect(workerSource).toContain("continuing generation after network observer reattach failed; network completion remains authoritative");
-  expect(workerSource).not.toContain("ChatGPT network lifecycle observer could not reattach to the active turn");
   expect(workerSource).not.toContain('payloadData.includes("[DONE]")');
 });
 
@@ -1637,9 +1676,9 @@ test("response DOM parsing recognizes terminal action groups when Copy collapses
   expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
 });
 
-test("browser DOM serialization re-resolves the latest visible assistant turn after launcher reattachment", () => {
+test("browser DOM serialization targets the latest visible assistant turn", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/responseTurn = page\.locator\(CHATGPT_ASSISTANT_TURN_SELECTOR\)\.filter\(\{ visible: true \}\)\.last\(\)/g)?.length).toBe(2);
+  expect(workerSource.match(/responseTurn = page\.locator\(CHATGPT_ASSISTANT_TURN_SELECTOR\)\.filter\(\{ visible: true \}\)\.last\(\)/g)?.length).toBe(1);
   expect(workerSource).not.toContain("initialResponseTurnCount");
 });
 

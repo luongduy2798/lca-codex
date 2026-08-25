@@ -1,68 +1,84 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import { timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
-import { checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { defaultConfig, getConfigDir, getConfigPath, loadConfig } from "./config";
-import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
 import {
-  activateCodexIntegration,
-  deactivateCodexIntegration,
-  inspectCodexIntegration,
-  installCodexIntegration,
-  preflightCodexIntegration,
-  uninstallCodexIntegration,
-} from "./codex-integration";
+  bootstrapBrowserLogin,
+  browserLoginStateExists,
+  checkBrowserEngine,
+  defaultBrowserLoginExportPath,
+  exportBrowserLoginState,
+  importBrowserLoginState,
+  logoutBrowserLogin,
+} from "./browser-login";
+import {
+  getConfigPath,
+  getProductHome,
+  getProfileName,
+  listProfiles,
+  loadConfig,
+  setActiveProfile,
+} from "./config";
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/lca-codex/mcp-main";
 import { runCommand } from "./process";
+import { PRODUCT_HOME_ENV, PRODUCT_ID, PRODUCT_PROFILE_ENV, SOURCE_CLI_COMMAND, assertProfileName } from "./product";
 import { startServer } from "./server";
-import { assertServiceIdle, cancelBrowserTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
+import { formatStatusReport, runStatus } from "./status";
+import {
+  cancelBrowserTurns,
+  getServiceStatus,
+  installService,
+  waitForServiceReady,
+} from "./service";
 import { existingBridgeSetupCredentials, setup, type SetupOptions } from "./setup";
-import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
-import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
+import { installRuntimeKeyBytes, managedRuntimeKeyPath, tunnelStatus } from "./tunnel";
+import { getTunnelServiceStatus } from "./tunnel-service";
+import { restartRuntimeStack, startRuntimeStack, stopRuntimeStack } from "./runtime-lifecycle";
 import { VERSION } from "./version";
+import { apiTokenPath, ensureApiToken, readApiToken, removeApiToken, rotateApiToken } from "./api-auth";
+import { runSetupWizard, runTui, tuiSupported } from "./tui";
+import { uninstallProfile } from "./uninstall";
 
-const HELP = `lca-codex ${VERSION}
+const HELP = `${PRODUCT_ID} ${VERSION}
 
-Focused LCA Codex models for the native Codex harness.
+Headless ChatGPT Web runtime for Responses-compatible agent harnesses.
 
 Usage:
-  lca-codex setup --tunnel-id ID --runtime-key-file PATH [options]
-  lca-codex login
-  lca-codex doctor [--json]
-  lca-codex route <status|install|connect|disconnect|reset> [options]
-  lca-codex browser check
-  lca-codex serve
-  lca-codex mcp [--broker-socket PATH]
-  lca-codex service <status|install|start|restart|stop|cancel-turns>
-  lca-codex tunnel <status|start|restart|stop|key-import>
-  lca-codex open <tunnels|runtime-keys|connectors>
-  lca-codex uninstall --yes
+  ${SOURCE_CLI_COMMAND}                         Open the interactive Control Center TUI
+  ${SOURCE_CLI_COMMAND} tui                     Open the interactive Control Center TUI
+  ${SOURCE_CLI_COMMAND} setup                   Open the Setup Wizard TUI in an interactive terminal
+  ${SOURCE_CLI_COMMAND} setup --tunnel-id ID --runtime-key-file PATH [options]
+  ${SOURCE_CLI_COMMAND} auth <status|login|import|export|logout> [PATH]
+  ${SOURCE_CLI_COMMAND} status
+  ${SOURCE_CLI_COMMAND} doctor [--json]
+  ${SOURCE_CLI_COMMAND} start|stop|restart
+  ${SOURCE_CLI_COMMAND} service <status|install|cancel-turns>
+  ${SOURCE_CLI_COMMAND} tunnel <status|key-import>
+  ${SOURCE_CLI_COMMAND} connector <status|setup>
+  ${SOURCE_CLI_COMMAND} api key <status|create|rotate|revoke|path>
+  ${SOURCE_CLI_COMMAND} browser check
+  ${SOURCE_CLI_COMMAND} profile <show|list|create|use> [NAME]
+  ${SOURCE_CLI_COMMAND} config path
+  ${SOURCE_CLI_COMMAND} serve
+  ${SOURCE_CLI_COMMAND} uninstall --yes
 
 Setup options:
-  --port NUMBER                Loopback Responses port (default: 17841)
-  --chrome PATH                Google Chrome executable
-  --browser-host-descriptor PATH
-                               Use the embedded launcher browser described by this owner-only file
-  --app-name NAME              ChatGPT connector name (default: lca-codex)
-  --tunnel-id ID               Existing OpenAI tunnel id (ChatGPT Web bridge)
+  --port NUMBER                Loopback Responses port (default: 8317)
+  --chrome PATH                Chrome/Chromium executable
+  --app-name NAME              ChatGPT connector name (default: lca-token)
+  --tunnel-id ID               Existing OpenAI tunnel id
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
-  --replace-codex-route        Reversibly replace existing Codex model routing
-  --restart-service            Explicitly restart this project's daemon after an update
-  --login                      Refresh the stored ChatGPT login even if one exists
-  --auto-approve-tool-calls    Opt in to per-call browser clicks on "Allow once" prompts
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
-Route install options:
-  --replace-codex-route        Reversibly replace an existing Codex route
-  --connect                    Activate the installed route immediately
 
 Global:
-  --home PATH                  Override ~/.lca-codex
+  --home PATH                  Override ~/.lca-token
+  --profile NAME               Select an isolated profile (default: active/default)
   -h, --help
   -v, --version
+
 `;
 
 function takeOption(args: string[], name: string): string | undefined {
@@ -79,6 +95,10 @@ function takeFlag(args: string[], name: string): boolean {
   if (index < 0) return false;
   args.splice(index, 1);
   return true;
+}
+
+function assertNoArgs(args: string[]): void {
+  if (args.length > 0) throw new Error(`Unknown arguments: ${args.join(" ")}`);
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -111,31 +131,22 @@ async function secretPrompt(question: string): Promise<string> {
   }
 }
 
-function assertNoArgs(args: string[]): void {
-  if (args.length > 0) throw new Error(`Unknown arguments: ${args.join(" ")}`);
-}
-
 async function setupCommand(args: string[]): Promise<void> {
   const portRaw = takeOption(args, "--port");
   let acknowledged = takeFlag(args, "--acknowledge-unofficial");
-  const options: SetupOptions = {
-    ...(portRaw ? { port: Number(portRaw) } : {}),
-  };
+  const options: SetupOptions = { ...(portRaw ? { port: Number(portRaw) } : {}) };
   const appName = takeOption(args, "--app-name");
   const tunnelId = takeOption(args, "--tunnel-id");
   const runtimeKeyFile = takeOption(args, "--runtime-key-file");
   const chrome = takeOption(args, "--chrome");
-  const browserHostDescriptorPath = takeOption(args, "--browser-host-descriptor");
-  if (chrome && browserHostDescriptorPath) throw new Error("Choose either --chrome or --browser-host-descriptor, not both");
-  if (chrome) options.chromeExecutablePath = chrome;
-  if (browserHostDescriptorPath) options.browserHostDescriptorPath = browserHostDescriptorPath;
+  if (chrome) options.chromeExecutablePath = resolve(chrome);
   if (appName) options.appName = appName;
   if (tunnelId) options.tunnelId = tunnelId;
-  if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
-  options.forceLogin = takeFlag(args, "--login");
-  options.autoApproveToolCalls = takeFlag(args, "--auto-approve-tool-calls");
-  options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
-  options.restartService = takeFlag(args, "--restart-service");
+  if (runtimeKeyFile) options.runtimeKeyFile = resolve(runtimeKeyFile);
+  // Legacy setup flags are accepted as no-ops. Setup now always owns daemon restart lifecycle
+  // and always enables broker-scoped ChatGPT "Allow once" confirmation clicks.
+  takeFlag(args, "--auto-approve-tool-calls");
+  takeFlag(args, "--restart-service");
   assertNoArgs(args);
 
   if (!acknowledged) {
@@ -154,25 +165,74 @@ async function setupCommand(args: string[]): Promise<void> {
   const needsRuntimeKey = !options.runtimeKeyFile
     && !reusableCredentials.runtimeKey
     && !existsSync(managedRuntimeKeyPath());
-
   if ((needsTunnelId || needsRuntimeKey) && stdin.isTTY) {
     stdout.write("The ChatGPT Web bridge needs an OpenAI tunnel and a runtime key with Tunnels Read + Use.\n");
-    stdout.write("Tunnels: https://platform.openai.com/settings/organization/tunnels\n");
-    stdout.write("Runtime keys: https://platform.openai.com/settings/organization/api-keys\n");
     if (needsTunnelId) options.tunnelId = await prompt("Tunnel id: ");
-    if (needsRuntimeKey) {
-      options.runtimeKeyValue = await secretPrompt("Runtime key (hidden): ");
-    }
+    if (needsRuntimeKey) options.runtimeKeyValue = await secretPrompt("Runtime key (hidden): ");
   }
 
   const result = await setup(options);
+  const apiToken = ensureApiToken();
   stdout.write(`Setup complete: ${result.mode}\n`);
+  stdout.write(`Profile: ${getProfileName()}\n`);
   stdout.write(`Config: ${result.configPath}\n`);
-  if (result.connectorSetupRequired) {
-    stdout.write("One account-level step remains: attach the tunnel to the ChatGPT connector named in config.\n");
-    stdout.write("Open: https://chatgpt.com/#settings/Connectors\n");
+  if (apiToken.created) {
+    stdout.write("API key (shown once; store it securely):\n");
+    stdout.write(`${apiToken.token}\n`);
   }
-  stdout.write("Restart the Codex app once so its native model catalog refreshes through the installed route.\n");
+  if (!browserLoginStateExists(loadConfig())) {
+    stdout.write(`ChatGPT session is not configured. Import one with: ${SOURCE_CLI_COMMAND} auth import PATH\n`);
+  }
+  if (result.connectorSetupRequired) {
+    stdout.write("Attach the configured tunnel to the ChatGPT connector once at https://chatgpt.com/#settings/Connectors\n");
+  }
+}
+
+async function authCommand(args: string[]): Promise<void> {
+  const action = args.shift() ?? "status";
+  const config = loadConfig();
+  if (action === "status") {
+    assertNoArgs(args);
+    stdout.write(`${JSON.stringify({ profile: getProfileName(), authenticated: browserLoginStateExists(config), storageStatePath: config.storageStatePath }, null, 2)}\n`);
+    return;
+  }
+  if (action === "login") {
+    assertNoArgs(args);
+    if (!stdin.isTTY || !stdout.isTTY) throw new Error("auth login requires an interactive terminal");
+    stdout.write("Opening a dedicated LCA Token Chrome profile. Sign in to ChatGPT there and leave that Chrome window open.\n");
+    stdout.write("Your normal Chrome profile is not used. When ChatGPT is ready, return here and press Enter; LCA Token will close only that dedicated Chrome window, then verify its isolated profile in a background Chrome renderer.\n");
+    const result = await bootstrapBrowserLogin(config, {
+      waitForLoginCompletion: async () => {
+        await prompt("After ChatGPT is signed in and the composer is visible, press Enter here to verify: ");
+        stdout.write("Closing the dedicated Chrome window, then verifying its isolated profile in background Chrome…\n");
+      },
+    });
+    stdout.write(`ChatGPT login verified and stored at ${result.storageStatePath}\n`);
+    return;
+  }
+  if (action === "import") {
+    const path = args.shift();
+    assertNoArgs(args);
+    if (!path) throw new Error("auth import requires a storage-state JSON path");
+    const result = await importBrowserLoginState(config, resolve(path));
+    stdout.write(`ChatGPT login imported and verified at ${result.storageStatePath}\n`);
+    return;
+  }
+  if (action === "export") {
+    const path = args.shift();
+    assertNoArgs(args);
+    const destination = path ? resolve(path) : defaultBrowserLoginExportPath(config);
+    exportBrowserLoginState(config, destination);
+    stdout.write(`ChatGPT storage state exported to ${destination}\n`);
+    return;
+  }
+  if (action === "logout") {
+    assertNoArgs(args);
+    logoutBrowserLogin(config);
+    stdout.write("ChatGPT login state removed for this profile.\n");
+    return;
+  }
+  throw new Error("Auth command must be: status, login, import, export, or logout");
 }
 
 async function doctorCommand(args: string[]): Promise<void> {
@@ -183,67 +243,60 @@ async function doctorCommand(args: string[]): Promise<void> {
   if (!report.ok) process.exitCode = 1;
 }
 
-async function routeCommand(args: string[]): Promise<void> {
-  const action = args.shift() ?? "status";
-  const replaceExistingRoute = action === "install" && takeFlag(args, "--replace-codex-route");
-  const connect = action === "install" && takeFlag(args, "--connect");
+async function statusCommand(args: string[]): Promise<void> {
+  const json = takeFlag(args, "--json");
   assertNoArgs(args);
-  const result = action === "status"
-    ? (() => {
-        const status = inspectCodexIntegration();
-        return {
-          installed: status.installed,
-          active: status.active,
-          ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
-          errors: status.errors,
-        };
-      })()
-    : action === "install"
-      ? (() => {
-          const config = existsSync(getConfigPath()) ? loadConfig() : defaultConfig();
-          preflightCodexIntegration(config, { replaceExistingRoute });
-          installCodexIntegration(config, { replaceExistingRoute, activate: connect });
-          const status = inspectCodexIntegration();
-          return {
-            installed: status.installed,
-            active: status.active,
-            ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
-            errors: status.errors,
-          };
-        })()
-      : action === "connect"
-        ? activateCodexIntegration()
-        : action === "disconnect"
-        ? deactivateCodexIntegration()
-        : action === "reset"
-          ? uninstallCodexIntegration()
-          : undefined;
-  if (!result) throw new Error(`Unknown route action: ${action}`);
-  stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  const report = await runStatus();
+  stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatStatusReport(report));
+  if (!report.ok) process.exitCode = 1;
 }
 
 async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
+  if (action === "start" || action === "restart" || action === "stop") {
+    await runtimeLifecycleCommand([action]);
+    return;
+  }
   const config = action === "status" ? undefined : loadConfig();
   if (action === "cancel-turns") {
     const cancelled = await cancelBrowserTurns(config!);
     stdout.write(`${JSON.stringify({ cancelledBrowserTurns: cancelled }, null, 2)}\n`);
     return;
   }
-  const status = action === "status" ? getServiceStatus()
-    : action === "install" ? installService(config!)
-      : action === "start" ? startService()
-        : action === "restart" ? await restartService(config!)
-          : action === "stop" ? await stopService(config!)
-            : undefined;
+  let status;
+  if (action === "status") status = getServiceStatus();
+  else if (action === "install") {
+    installService(config!);
+    await waitForServiceReady(config!);
+    status = getServiceStatus();
+  }
   if (!status) throw new Error(`Unknown service action: ${action}`);
+  stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+}
+
+async function runtimeLifecycleCommand(args: string[]): Promise<void> {
+  const action = args.shift();
+  assertNoArgs(args);
+  if (action !== "start" && action !== "restart" && action !== "stop") {
+    throw new Error("Runtime lifecycle command must be: start, restart, or stop");
+  }
+  const config = loadConfig();
+  const status = action === "start"
+    ? await startRuntimeStack(config)
+    : action === "restart"
+      ? await restartRuntimeStack(config)
+      : await stopRuntimeStack(config);
   stdout.write(`${JSON.stringify(status, null, 2)}\n`);
 }
 
 async function tunnelCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
+  if (action === "start" || action === "restart" || action === "stop") {
+    await runtimeLifecycleCommand([action]);
+    return;
+  }
   if (action === "key-import") {
     const key = await secretPrompt("Runtime key (hidden): ");
     if (!key) throw new Error("A non-empty runtime key is required");
@@ -252,90 +305,113 @@ async function tunnelCommand(args: string[]): Promise<void> {
     return;
   }
   const config = loadConfig();
-  if (action === "start") startTunnelService();
-  else if (action === "restart") {
-    await assertServiceIdle(config);
-    await restartTunnelService();
-  }
-  else if (action === "stop") {
-    await assertServiceIdle(config);
-    await stopTunnelService();
-    stopTunnel(config);
-  }
-  else if (action !== "status") throw new Error(`Unknown tunnel action: ${action}`);
-  const status = action === "start" || action === "restart"
-    ? await waitForTunnelReady(config)
-    : tunnelStatus(config);
+  if (action !== "status") throw new Error(`Unknown tunnel action: ${action}`);
+  const status = tunnelStatus(config);
   const service = getTunnelServiceStatus();
   stdout.write(`${JSON.stringify({ service, runtime: status }, null, 2)}\n`);
-  if (action !== "stop" && (!service.running || !status.ok)) process.exitCode = 1;
+  if (!service.running || !status.ok) process.exitCode = 1;
 }
 
-async function openCommand(args: string[]): Promise<void> {
-  const target = args.shift();
+function connectorCommand(args: string[]): void {
+  const action = args.shift() ?? "status";
   assertNoArgs(args);
-  const urls: Record<string, string> = {
-    tunnels: "https://platform.openai.com/settings/organization/tunnels",
-    "runtime-keys": "https://platform.openai.com/settings/organization/api-keys",
-    connectors: "https://chatgpt.com/#settings/Connectors",
-  };
-  const url = target ? urls[target] : undefined;
-  if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
-  if (process.platform === "darwin") {
-    const result = runCommand("open", [url]);
-    if (result.status !== 0) throw new Error(result.stderr.trim() || `Could not open ${url}`);
-  } else {
-    stdout.write(`${url}\n`);
+  const config = loadConfig();
+  if (action === "setup") {
+    stdout.write("Open https://chatgpt.com/#settings/Connectors and attach the tunnel to this connector:\n");
+    stdout.write(`${config.appName}\n`);
+    return;
   }
+  if (action === "status") {
+    stdout.write(`${JSON.stringify({ connector: config.appName, tunnelAlias: config.tunnel?.alias ?? null }, null, 2)}\n`);
+    return;
+  }
+  throw new Error("Connector command must be: status or setup");
+}
+
+function profileCommand(args: string[]): void {
+  const action = args.shift() ?? "show";
+  if (action === "show") {
+    assertNoArgs(args);
+    stdout.write(`${getProfileName()}\n`);
+    return;
+  }
+  if (action === "list") {
+    assertNoArgs(args);
+    const active = getProfileName();
+    for (const profile of listProfiles()) stdout.write(`${profile === active ? "*" : " "} ${profile}\n`);
+    return;
+  }
+  if (action === "create") {
+    const name = args.shift();
+    assertNoArgs(args);
+    if (!name) throw new Error("profile create requires NAME");
+    const profile = assertProfileName(name);
+    mkdirSync(join(getProductHome(), "profiles", profile), { recursive: true, mode: 0o700 });
+    stdout.write(`Created profile ${profile}\n`);
+    return;
+  }
+  if (action === "use") {
+    const name = args.shift();
+    assertNoArgs(args);
+    if (!name) throw new Error("profile use requires NAME");
+    const profile = setActiveProfile(name);
+    stdout.write(`Active profile: ${profile}\n`);
+    return;
+  }
+  throw new Error("Profile command must be: show, list, create, or use");
+}
+
+function apiCommand(args: string[]): void {
+  const resource = args.shift();
+  const action = args.shift();
+  assertNoArgs(args);
+  if ((resource !== "key" && resource !== "token") || !action) throw new Error("API command must be: api key status|create|rotate|revoke|path");
+  if (action === "status") {
+    stdout.write(`${JSON.stringify({ configured: Boolean(readApiToken()), path: apiTokenPath() }, null, 2)}\n`);
+    return;
+  }
+  if (action === "path") {
+    stdout.write(`${apiTokenPath()}\n`);
+    return;
+  }
+  if (action === "create") {
+    const result = ensureApiToken();
+    if (!result.created) {
+      stdout.write(`API key already exists at ${apiTokenPath()}; rotate it to receive a new value.\n`);
+      return;
+    }
+    stdout.write(`${result.token}\n`);
+    return;
+  }
+  if (action === "rotate") {
+    stdout.write(`${rotateApiToken()}\n`);
+    return;
+  }
+  if (action === "revoke") {
+    removeApiToken();
+    stdout.write("API key revoked for this profile.\n");
+    return;
+  }
+  throw new Error("API command must be: api key status|create|rotate|revoke|path");
 }
 
 async function uninstallCommand(args: string[]): Promise<void> {
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
-  const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
-  if (launcherControl) {
-    const descriptorPath = process.env.LCA_CODEX_BROWSER_HOST_DESCRIPTOR?.trim();
-    const supplied = process.env.LCA_CODEX_LAUNCHER_CONTROL_TOKEN?.trim();
-    if (!descriptorPath || !supplied) {
-      throw new Error("Launcher-controlled uninstall requires a live launcher authorization");
-    }
-    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-    const expectedBytes = Buffer.from(descriptor.control.token);
-    const suppliedBytes = Buffer.from(supplied);
-    if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
-      throw new Error("Launcher-controlled uninstall authorization is invalid");
-    }
-    delete process.env.LCA_CODEX_LAUNCHER_CONTROL_TOKEN;
-  }
-  if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
+  if (!yes && !await confirm(`Stop services and remove ${PRODUCT_ID} profile ${getProfileName()}?`)) {
     throw new Error("Uninstall cancelled");
   }
-  const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
-  if (config?.browserHost === "launcher" && !launcherControl) {
-    throw new Error(
-      "Launcher-owned integration must be removed from lca-codex Settings so the active runtime can be drained safely.",
-    );
-  }
-  if (!config && process.platform === "darwin" && getServiceStatus().installed) {
-    throw new Error("Service exists but configuration is missing; refusing an unverifiable uninstall");
-  }
-  const launcherRuntimeStopped = config?.browserHost === "launcher" && launcherControl;
-  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await assertServiceIdle(config);
-  if (config?.tunnel && !launcherRuntimeStopped) {
-    if (process.platform === "darwin") await uninstallTunnelService();
-    stopTunnel(config);
-  }
-  if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
-  uninstallCodexIntegration();
-  if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
-  stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
+  await uninstallProfile({ keepData });
+  stdout.write(keepData ? "Uninstalled; private profile data was preserved.\n" : "Uninstalled and removed private profile data.\n");
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const home = takeOption(args, "--home");
-  if (home) process.env.LCA_CODEX_HOME = home;
+  const profile = takeOption(args, "--profile");
+  if (home) process.env[PRODUCT_HOME_ENV] = resolve(home);
+  if (profile) process.env[PRODUCT_PROFILE_ENV] = assertProfileName(profile);
   if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
     stdout.write(HELP);
     return;
@@ -344,46 +420,66 @@ async function main(): Promise<void> {
     stdout.write(`${VERSION}\n`);
     return;
   }
-  const command = args.shift() ?? "help";
+
+  const command = args.shift();
+  if (!command) {
+    if (tuiSupported()) await runTui();
+    else stdout.write(HELP);
+    return;
+  }
   if (command === "help") stdout.write(HELP);
-  else if (command === "setup") await setupCommand(args);
-  else if (command === "login") {
+  else if (command === "tui") {
     assertNoArgs(args);
-    const config = loadConfig();
-    if (config.browserHost === "launcher") {
-      throw new Error("ChatGPT login is owned by the launcher; open lca-codex and use its Sign in step");
-    }
-    const result = await loginToChatGpt(config);
-    stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
-  } else if (command === "doctor" || command === "status") await doctorCommand(args);
-  else if (command === "route") await routeCommand(args);
-  else if (command === "browser") {
+    await runTui();
+  }
+  else if (command === "setup" && args.length === 0 && tuiSupported()) await runSetupWizard();
+  else if (command === "setup") await setupCommand(args);
+  else if (command === "auth") await authCommand(args);
+  else if (command === "status") await statusCommand(args);
+  else if (command === "doctor") await doctorCommand(args);
+  else if (command === "start" || command === "stop" || command === "restart") await runtimeLifecycleCommand([command, ...args]);
+  else if (command === "service") await serviceCommand(args);
+  else if (command === "tunnel") await tunnelCommand(args);
+  else if (command === "connector") connectorCommand(args);
+  else if (command === "api") apiCommand(args);
+  else if (command === "profile") profileCommand(args);
+  else if (command === "config") {
+    const action = args.shift();
+    assertNoArgs(args);
+    if (action !== "path") throw new Error("Config command must be: config path");
+    stdout.write(`${getConfigPath()}\n`);
+  } else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);
     if (action !== "check") throw new Error("Browser command must be: browser check");
-    const config = loadConfig();
-    if (config.browserHost === "launcher") {
-      await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
-      stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
-    } else {
-      await checkBrowserEngine(config);
-      stdout.write("Playwright can launch the configured Chrome executable.\n");
-    }
+    await checkBrowserEngine(loadConfig());
+    stdout.write("Playwright can launch the configured Chrome/Chromium executable.\n");
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
     const server = startServer(config);
-    stdout.write(`lca-codex ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
+    stdout.write(`${PRODUCT_ID} ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "mcp") await runChatGptMcpMain(args);
-  else if (command === "service") await serviceCommand(args);
-  else if (command === "tunnel") await tunnelCommand(args);
-  else if (command === "open") await openCommand(args);
   else if (command === "uninstall") await uninstallCommand(args);
-  else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
+  else if (command === "open") {
+    const target = args.shift();
+    assertNoArgs(args);
+    const urls: Record<string, string> = {
+      tunnels: "https://platform.openai.com/settings/organization/tunnels",
+      "runtime-keys": "https://platform.openai.com/settings/organization/api-keys",
+      connectors: "https://chatgpt.com/#settings/Connectors",
+    };
+    const url = target ? urls[target] : undefined;
+    if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
+    if (process.platform === "darwin") {
+      const result = runCommand("open", [url]);
+      if (result.status !== 0) throw new Error(result.stderr.trim() || `Could not open ${url}`);
+    } else stdout.write(`${url}\n`);
+  } else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }
 
 main().catch(error => {
-  process.stderr.write(`lca-codex: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${PRODUCT_ID}: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

@@ -44,8 +44,8 @@ interface ContextQueryResult {
 const turnTokenSchema = z.string()
   .regex(/^turn_[A-Za-z0-9_-]{32}$/, "turn_token must be the exact turn_ value supplied in the current Codex task context");
 const bindingSchema = z.string()
-  .regex(/^binding_[A-Za-z0-9_-]{32}$/, "binding_id must be the exact binding_ value returned by codex_bind_turn; never pass turn_token here")
-  .describe("Exact binding_ value returned by codex_bind_turn. This is not the turn_token.");
+  .regex(/^binding_[A-Za-z0-9_-]{32}$/, "binding_id must be the exact binding_ value returned by agent_bind_turn; never pass turn_token here")
+  .describe("Exact binding_ value returned by agent_bind_turn. This is not the turn_token.");
 const jsonArgumentsSchema = z.record(z.string(), z.unknown()).default({});
 const contextActionSchema = z.enum(["instructions", "recent", "search", "get", "full", "image"]);
 
@@ -176,7 +176,7 @@ function execGatewayProgram(
 }
 
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
-  const server = new McpServer({ name: "codex-native", version: "3.0.0" });
+  const server = new McpServer({ name: "lca-token-native", version: "3.0.0" });
   const readyGatewayTools = new Map<string, Set<string>>();
   const discoveredGatewayTools = new Map<string, Map<string, GatewayDiscoveredTool>>();
 
@@ -190,7 +190,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       ...(sourceTool ? { sourceTool } : {}),
     });
     const expiresAt = resolved.environment.expiresAt;
-    if (expiresAt !== undefined && expiresAt <= Date.now()) throw new Error("Codex turn binding expired");
+    if (expiresAt !== undefined && expiresAt <= Date.now()) throw new Error("turn binding expired");
     return resolved.environment;
   };
 
@@ -232,7 +232,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         gateway,
         { input: program },
         sourceTool,
-        "codex_nested_tool_readiness",
+        "agent_nested_tool_readiness",
       ),
     });
     if (!inspected.availability[nestedToolName]) {
@@ -281,7 +281,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
   ) => {
     const gateway = execGateway(bound);
     if (!gateway) {
-      throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);
+      throw new Error(`This harness turn did not advertise ${nestedToolName} or the native exec gateway`);
     }
     await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);
     return invoke(
@@ -295,9 +295,9 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
   };
 
   server.registerTool(
-    "codex_bind_turn",
+    "agent_bind_turn",
     {
-      title: "Bind this response to its Codex turn",
+      title: "Bind this response to its agent turn",
       description: "Idempotently exchange the current turn_token for a distinct binding_id. Copy the returned binding_ value exactly into every later connector call; never reuse the turn_ value as binding_id.",
       inputSchema: { turn_token: turnTokenSchema },
       outputSchema: {
@@ -305,7 +305,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         binding_status: z.literal("active"),
         valid_until: z.string(),
         bridge_protocol_version: z.literal(3),
-        execution: z.literal("outer_codex_native"),
+        execution: z.literal("outer_harness_native"),
         cwd: z.string(),
         roots: z.array(z.string()),
         writable_roots: z.array(z.string()),
@@ -322,11 +322,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ turn_token }, extra) => {
-      console.error(`[lca-codex-mcp] codex_bind_turn scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-token-mcp] agent_bind_turn scope=${requestScopeSummary(extra)}`);
       const claimed = await callTurnBroker<ClaimedTurn>(options.brokerSocketPath, {
         method: "claim",
         token: turn_token,
-        sourceTool: "codex_bind_turn",
+        sourceTool: "agent_bind_turn",
       });
       const commandTool = exactTool(claimed.environment, "exec_command") ?? exactTool(claimed.environment, "shell_command");
       const gateway = execGateway(claimed.environment);
@@ -338,7 +338,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         binding_status: "active",
         valid_until: expiresAt ?? "outer_turn_end",
         bridge_protocol_version: 3,
-        execution: "outer_codex_native",
+        execution: "outer_harness_native",
         cwd: claimed.environment.cwd,
         roots: claimed.environment.roots,
         writable_roots: claimed.environment.writableRoots,
@@ -350,16 +350,16 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         capabilities: ["native_tool_loop", "session_history", "lazy_context", "lazy_instructions", "lazy_images", "exec", "apply_patch", "images", "tool_registry"],
         context_transport: "mcp_lazy",
         context_required: false,
-        next_action: "Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool. Call codex_context selectively; for a named MCP/app/provider operation that is not a direct bridge tool, use a targeted codex_tool_inventory query before deciding that tool is unavailable.",
+        next_action: "Use this binding_id only if you need task instructions, historical context, or an authenticated harness tool. Call agent_context selectively; for a named MCP/app/provider operation that is not a direct bridge tool, use a targeted agent_tool_inventory query before deciding that tool is unavailable.",
       });
     },
   );
 
   server.registerTool(
-    "codex_context",
+    "agent_context",
     {
-      title: "Read historical Codex context on demand",
-      description: "Retrieve only the Codex context needed for the current request. Use instructions for Codex-generated skill/capability guidance, recent/search/get for older task history, full only when selective retrieval cannot preserve correctness, and image for an older attachment_ref.",
+      title: "Read historical task context on demand",
+      description: "Retrieve only the task context needed for the current request. Use instructions for harness-generated skill/capability guidance, recent/search/get for older task history, full only when selective retrieval cannot preserve correctness, and image for an older attachment_ref.",
       inputSchema: {
         binding_id: bindingSchema,
         action: contextActionSchema,
@@ -376,7 +376,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const context = await callTurnBroker<ContextQueryResult>(options.brokerSocketPath, {
         method: "context_query",
         bindingId: binding_id,
-        sourceTool: "codex_context",
+        sourceTool: "agent_context",
         action,
         ...(query !== undefined ? { query } : {}),
         ...(ids !== undefined ? { ids } : {}),
@@ -390,10 +390,10 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
   );
 
   server.registerTool(
-    "codex_exec",
+    "agent_exec",
     {
-      title: "Run a native Codex command",
-      description: "Invoke the command tool advertised by the current outer Codex harness for inspection, search, tests, builds, and other non-editing command work. Intentional repository edits must use codex_apply_patch instead so Codex receives a native file-change item. A long-running command returns its native session_id.",
+      title: "Run a native harness command",
+      description: "Invoke the command tool advertised by the current outer harness for inspection, search, tests, builds, and other non-editing command work. Intentional repository edits must use agent_apply_patch instead so the harness receives its native file-change item. A long-running command returns its native session_id.",
       inputSchema: {
         binding_id: bindingSchema,
         cmd: z.string().min(1).max(100_000),
@@ -405,7 +405,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ binding_id, cmd, workdir, yield_time_ms, max_output_tokens, tty }, extra) => {
-      console.error(`[lca-codex-mcp] codex_exec scope=${requestScopeSummary(extra)}`);
+      console.error(`[lca-token-mcp] agent_exec scope=${requestScopeSummary(extra)}`);
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "exec_command") ?? exactTool(bound, "shell_command");
       const commandName = tool?.name ?? "exec_command";
@@ -423,16 +423,16 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
             ...(yield_time_ms !== undefined ? { timeout_ms: yield_time_ms } : {}),
           };
       return tool
-        ? invokeNative(binding_id, bound, tool, { arguments: args }, "codex_exec")
-        : invokeNestedNative(binding_id, bound, commandName, false, { arguments: args }, "codex_exec");
+        ? invokeNative(binding_id, bound, tool, { arguments: args }, "agent_exec")
+        : invokeNestedNative(binding_id, bound, commandName, false, { arguments: args }, "agent_exec");
     },
   );
 
   server.registerTool(
-    "codex_write_stdin",
+    "agent_write_stdin",
     {
-      title: "Continue a native Codex command session",
-      description: "Write characters to, or poll, a session_id returned by codex_exec. Do not use a command session to substitute for codex_apply_patch when intentionally editing repository files.",
+      title: "Continue a native harness command session",
+      description: "Write characters to, or poll, a session_id returned by agent_exec. Do not use a command session to substitute for agent_apply_patch when intentionally editing repository files.",
       inputSchema: {
         binding_id: bindingSchema,
         session_id: z.number().int().nonnegative(),
@@ -452,16 +452,16 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         ...(max_output_tokens !== undefined ? { max_output_tokens } : {}),
       } };
       return tool
-        ? invokeNative(binding_id, bound, tool, payload, "codex_write_stdin")
-        : invokeNestedNative(binding_id, bound, "write_stdin", false, payload, "codex_write_stdin");
+        ? invokeNative(binding_id, bound, tool, payload, "agent_write_stdin")
+        : invokeNestedNative(binding_id, bound, "write_stdin", false, payload, "agent_write_stdin");
     },
   );
 
   server.registerTool(
-    "codex_apply_patch",
+    "agent_apply_patch",
     {
-      title: "Apply a native Codex patch",
-      description: "Required route for intentional repository edits. Invoke the outer Codex apply_patch tool, producing a native file-change item in the Codex task.",
+      title: "Apply a native harness patch",
+      description: "Required route for intentional repository edits. Invoke the outer harness apply_patch tool, producing a native file-change item in the active task.",
       inputSchema: { binding_id: bindingSchema, patch: z.string().min(1).max(5_000_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -474,19 +474,19 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         "apply_patch",
         true,
         { input: patch },
-        "codex_apply_patch",
+        "agent_apply_patch",
       );
       return tool.freeform
-        ? invokeNative(binding_id, bound, tool, { input: patch }, "codex_apply_patch")
-        : invokeNative(binding_id, bound, tool, { arguments: { input: patch } }, "codex_apply_patch");
+        ? invokeNative(binding_id, bound, tool, { input: patch }, "agent_apply_patch")
+        : invokeNative(binding_id, bound, tool, { arguments: { input: patch } }, "agent_apply_patch");
     },
   );
 
   server.registerTool(
-    "codex_view_image",
+    "agent_view_image",
     {
-      title: "View an image through native Codex",
-      description: "Invoke the outer Codex view_image tool and return its multimodal result to this same ChatGPT response.",
+      title: "View an image through the native harness",
+      description: "Invoke the outer harness view_image tool and return its multimodal result to this same ChatGPT response.",
       inputSchema: {
         binding_id: bindingSchema,
         path: z.string().min(1).max(16_384),
@@ -499,16 +499,16 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const tool = exactTool(bound, "view_image");
       const payload = { arguments: { path, ...(detail ? { detail } : {}) } };
       return tool
-        ? invokeNative(binding_id, bound, tool, payload, "codex_view_image")
-        : invokeNestedNative(binding_id, bound, "view_image", false, payload, "codex_view_image");
+        ? invokeNative(binding_id, bound, tool, payload, "agent_view_image")
+        : invokeNestedNative(binding_id, bound, "view_image", false, payload, "agent_view_image");
     },
   );
 
   server.registerTool(
-    "codex_tool_inventory",
+    "agent_tool_inventory",
     {
-      title: "Discover tools from the current Codex harness",
-      description: "Search the exact tool registry supplied to the current outer Codex turn, including configured MCP/app tools. Deferred results discovered here remain inside this selected Codex route; invoking them with codex_tool_call is not connector switching. Prefer a specific operation query when known (for example get_design_context) over a broad provider query.",
+      title: "Discover tools from the current agent harness",
+      description: "Search the exact tool registry supplied to the current outer harness turn, including configured MCP/app tools. Deferred results discovered here remain inside this selected connector route; invoking them with agent_tool_call is not connector switching. Prefer a specific operation query when known (for example get_design_context) over a broad provider query.",
       inputSchema: {
         binding_id: bindingSchema,
         query: z.string().max(500).optional(),
@@ -519,7 +519,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ binding_id, query, offset, limit, include_schema }) => {
-      const bound = await environment(binding_id, "codex_tool_inventory");
+      const bound = await environment(binding_id, "agent_tool_inventory");
       const needle = query?.trim().toLowerCase();
       const needleKey = needle?.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ?? "";
       const directExactNamespaceMatchExists = Boolean(needleKey) && bound.tools.some(
@@ -570,8 +570,8 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
               limit: offset + limit,
               includeSchema: include_schema,
             }) },
-            "codex_tool_inventory",
-            "codex_nested_tool_inventory",
+            "agent_tool_inventory",
+            "agent_nested_tool_inventory",
           ));
           nestedTotal = discovered.total;
           const cache = discoveredGatewayTools.get(binding_id) ?? new Map<string, GatewayDiscoveredTool>();
@@ -635,10 +635,10 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
   );
 
   server.registerTool(
-    "codex_tool_call",
+    "agent_tool_call",
     {
-      title: "Call any tool from the current Codex harness",
-      description: "Invoke an exact wire_name returned by codex_tool_inventory. Deferred calls remain inside the selected Codex connector route; the outer Codex runtime performs the call, approvals, and UI lifecycle.",
+      title: "Call any tool from the current agent harness",
+      description: "Invoke an exact wire_name returned by agent_tool_inventory. Deferred calls remain inside the selected connector route; the outer harness performs the call, approvals, and UI lifecycle.",
       inputSchema: {
         binding_id: bindingSchema,
         wire_name: z.string().min(1).max(1_000),
@@ -651,26 +651,26 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const bound = await environment(binding_id);
       const tool = bound.tools.find(candidate => wireName(candidate) === wire_name);
       if (tool?.freeform) {
-        if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
-        if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
-        return invokeNative(binding_id, bound, tool, { input }, "codex_tool_call");
+        if (input === undefined) throw new Error(`Freeform harness tool ${wire_name} requires input`);
+        if (args && Object.keys(args).length > 0) throw new Error(`Freeform harness tool ${wire_name} does not accept arguments`);
+        return invokeNative(binding_id, bound, tool, { input }, "agent_tool_call");
       }
       if (tool) {
-        if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-        return invokeNative(binding_id, bound, tool, { arguments: args ?? {} }, "codex_tool_call");
+        if (input !== undefined) throw new Error(`Function harness tool ${wire_name} does not accept freeform input`);
+        return invokeNative(binding_id, bound, tool, { arguments: args ?? {} }, "agent_tool_call");
       }
 
       const discovered = discoveredGatewayTools.get(binding_id)?.get(wire_name);
       if (!discovered) {
-        throw new Error(`Codex tool is not available in this turn or has not been returned by codex_tool_inventory: ${wire_name}`);
+        throw new Error(`Harness tool is not available in this turn or has not been returned by agent_tool_inventory: ${wire_name}`);
       }
       if (discovered.freeform) {
-        if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);
-        if (args && Object.keys(args).length > 0) throw new Error(`Freeform Codex tool ${wire_name} does not accept arguments`);
-        return invokeNestedNative(binding_id, bound, wire_name, true, { input }, "codex_tool_call");
+        if (input === undefined) throw new Error(`Freeform harness tool ${wire_name} requires input`);
+        if (args && Object.keys(args).length > 0) throw new Error(`Freeform harness tool ${wire_name} does not accept arguments`);
+        return invokeNestedNative(binding_id, bound, wire_name, true, { input }, "agent_tool_call");
       }
-      if (input !== undefined) throw new Error(`Function Codex tool ${wire_name} does not accept freeform input`);
-      return invokeNestedNative(binding_id, bound, wire_name, false, { arguments: args ?? {} }, "codex_tool_call");
+      if (input !== undefined) throw new Error(`Function harness tool ${wire_name} does not accept freeform input`);
+      return invokeNestedNative(binding_id, bound, wire_name, false, { arguments: args ?? {} }, "agent_tool_call");
     },
   );
 

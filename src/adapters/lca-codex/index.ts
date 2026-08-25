@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { agentTurnEnvironment } from "../../core/agent";
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
-import type { ProviderAdapter } from "../base";
+import type { AgentRequestTransport, ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { LcaCodexAdapterError } from "./adapter-error";
 import { activityDuration, logLcaCodexActivity } from "./activity";
@@ -12,7 +13,7 @@ import { resolveLcaCodexModelMode, type LcaCodexCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt } from "./prompt";
 import { resolveBrowserRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptAgentExecutionKey, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateLcaCodexUsage } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 
@@ -224,6 +225,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
     traceId: string,
     turnCapabilities: LcaCodexCapabilities,
     attempt: number,
+    harness: "codex" | "agent",
+    agentTransport: AgentRequestTransport,
     threadId?: string,
   ): ChatGptTurnRuntime => {
     const startedAt = Date.now();
@@ -280,7 +283,10 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
         capabilities: turnCapabilities,
-        prepare: async () => ({ ...compileLcaCodexPrompt(parsed, turnCapabilities, undefined, undefined, connectorName), release: () => {} }),
+        prepare: async () => ({
+          ...compileLcaCodexPrompt(parsed, turnCapabilities, undefined, undefined, connectorName, harness, agentTransport),
+          release: () => {},
+        }),
         abortSignal: browserAbort.signal,
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
@@ -319,7 +325,15 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         tokenSettled = true;
         token.resolve(turnToken);
         try {
-          const compiled = compileLcaCodexPrompt(parsed, turnCapabilities, turnToken, contextSnapshot, connectorName);
+          const compiled = compileLcaCodexPrompt(
+            parsed,
+            turnCapabilities,
+            turnToken,
+            contextSnapshot,
+            connectorName,
+            harness,
+            agentTransport,
+          );
           return { ...compiled, release: () => {} };
         } catch (error) {
           broker.revoke(turnToken);
@@ -355,6 +369,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
   return {
     name: "lca-codex",
     async runTurn(parsed, incoming, emitOuter) {
+      const harness = incoming.agentRequest ? "agent" as const : "codex" as const;
+      const agentTransport = incoming.agentRequest?.transport ?? "responses";
       let streamedFinalAnswer = false;
       const emit = (event: AdapterEvent) => {
         if (event.type === "text_delta" && event.phase === "final_answer" && event.text.length > 0) {
@@ -362,33 +378,41 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         }
         emitOuter(event);
       };
-      if (parsed._opaqueMultiAgentV2Payload) {
+      if (harness === "codex" && parsed._opaqueMultiAgentV2Payload) {
         throw new Error(
           "LCA Codex subagents currently require a V1-rooted task. "
           + "Start a new task with a LCA Codex model before spawning LCA Codex Pro. "
           + "Codex MultiAgent V2 currently encrypts cross-backend task payloads.",
         );
       }
-      const turnCapabilities = configuredCapabilities;
-      const identity = extractChatGptTurnIdentity(parsed);
+      // Connector/lazy-context availability belongs to the configured profile, not to whether a
+      // generic request happened to advertise structured tools. Agent tool authority remains the
+      // exact request registry because agentTurnEnvironment() receives only parsed.context.tools.
+      const turnCapabilities: LcaCodexCapabilities = configuredCapabilities;
+      const identity = harness === "codex" ? extractChatGptTurnIdentity(parsed) : {};
       const mode = resolveLcaCodexModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
       let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
       if (mode.localTools) {
         try {
-          environment = environmentStore.resolve(parsed);
+          environment = incoming.agentRequest
+            ? agentTurnEnvironment(parsed.context.tools ?? [])
+            : environmentStore.resolve(parsed);
         } catch (error) {
           console.warn(
-            `[lca-codex] trusted environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
+            `[lca-codex] trusted ${harness} environment unavailable (thread_id=${identity.threadId ? "present" : "missing"}, turn_id=${identity.turnId ? "present" : "missing"}, previous_response_id=${parsed.previousResponseId ?? "none"}, replay_prefix_items=${parsed._replayPrefixLen ?? 0}, context_messages=${parsed.context.messages.length})`,
           );
           throw error;
         }
       }
       if (parsed._compactionRequest) {
+        if (harness === "agent") throw new Error("Generic agent compaction is not enabled yet; start a new agent turn from the retained harness context");
         const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
         await chatGptTurnSessions.retireAndWait(responseExecutionKey);
       }
-      const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
-      if (!parsed._compactionRequest && identity.threadId && identity.turnId) {
+      const executionKey = `${executionNamespace}:${harness === "agent"
+        ? chatGptAgentExecutionKey(parsed, incoming.agentRequest!.executionId)
+        : chatGptTurnExecutionKey(parsed)}`;
+      if (harness === "codex" && !parsed._compactionRequest && identity.threadId && identity.turnId) {
         await chatGptTurnSessions.retireSupersededThreadTurns(identity.threadId, identity.turnId, executionKey);
       }
       await chatGptTurnSessions.waitForRetirement(executionKey);
@@ -396,7 +420,16 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
       const attempt = chatGptTurnSessions.retryAttempt(executionKey);
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
-        () => startRuntime(parsed, environment, traceId, turnCapabilities, attempt, identity.threadId),
+        () => startRuntime(
+          parsed,
+          environment,
+          traceId,
+          turnCapabilities,
+          attempt,
+          harness,
+          agentTransport,
+          identity.threadId,
+        ),
         {
           threadId: identity.threadId,
           turnId: identity.turnId,
@@ -420,7 +453,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
                 events.push(event);
                 emit(event);
               };
-              if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitCaptured);
+              if (!parsed._compactionRequest && harness === "codex") emitProContextWarning(parsed, turnCapabilities, emitCaptured);
               const trace = session.runtime.trace.drain();
               reasoning = trace.map(event => event.text);
               emitTraceEvents(trace, emitCaptured);
@@ -476,7 +509,7 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
               emitTraceEvents(trace, emitRound);
             };
             const emitNewText = (deltas: string[]) => emitTextDeltas(deltas, emitRound);
-            if (!parsed._compactionRequest) emitProContextWarning(parsed, turnCapabilities, emitRound);
+            if (!parsed._compactionRequest && harness === "codex") emitProContextWarning(parsed, turnCapabilities, emitRound);
             emitNewTrace(session.runtime.trace.drain());
             emitNewText(session.runtime.text.drain());
             const nextTools = turnToken

@@ -8,20 +8,18 @@ import {
 const lockfile = (packages: Record<string, unknown>) => JSON.stringify({ packages });
 
 describe("dependency audit lock coverage", () => {
-  test("merges every resolved version from root and launcher lockfiles", () => {
+  test("merges resolved versions from multiple lockfile snapshots", () => {
     const root = lockedPackages(lockfile({
       zod: ["zod@4.4.3"],
       "zod@3.25.76": ["zod@3.25.76"],
     }), "bun.lock");
-    const launcher = lockedPackages(lockfile({
-      electron: ["electron@41.10.4"],
+    const additional = lockedPackages(lockfile({
       "@types/node": ["@types/node@26.1.2"],
-    }), "launcher/bun.lock");
+    }), "additional.lock");
 
-    mergeLockedPackages(root, launcher);
+    mergeLockedPackages(root, additional);
 
     expect([...root.get("zod")!].sort()).toEqual(["3.25.76", "4.4.3"]);
-    expect([...root.get("electron")!]).toEqual(["41.10.4"]);
     expect([...root.get("@types/node")!]).toEqual(["26.1.2"]);
   });
 
@@ -31,14 +29,14 @@ describe("dependency audit lock coverage", () => {
   });
 
   test("retains actionable advisory details and audited versions", () => {
-    const packages = new Map([["electron", new Set(["41.7.1"])]]);
+    const packages = new Map([["zod", new Set(["4.4.3"])]]);
     expect(dependencyAdvisories({
-      electron: [{ severity: "high", title: "Sandbox bypass", url: "https://example.test/advisory" }],
+      zod: [{ severity: "high", title: "Example advisory", url: "https://example.test/advisory" }],
     }, packages)).toEqual([{
-      packageName: "electron",
-      versions: ["41.7.1"],
+      packageName: "zod",
+      versions: ["4.4.3"],
       severity: "high",
-      title: "Sandbox bypass",
+      title: "Example advisory",
       url: "https://example.test/advisory",
     }]);
   });

@@ -262,7 +262,7 @@ test("a drained runtime rejects new model-catalog work before shutdown", async (
     expect(await models.json()).toMatchObject({
       error: {
         type: "server_error",
-        message: "lca-codex is draining for a requested service operation",
+        message: "lca-token is draining for a requested service operation",
       },
     });
 

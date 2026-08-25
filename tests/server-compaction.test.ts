@@ -7,7 +7,7 @@ import type { CodexProviderConfig } from "../src/types";
 import { extractChatGptTurnIdentity } from "../src/adapters/lca-codex/environment";
 import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/lca-codex/turn-execution";
 
-const model = "lca-codex";
+const model = "lca-token";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
 
 function compactionAdapterFactory(seenProviders: CodexProviderConfig[] = []) {
@@ -133,7 +133,7 @@ test("returns exactly one native compaction item for a LCA Codex v2 request", as
       stream: false,
       tool_choice: "auto",
       parallel_tool_calls: true,
-      tools: [{ type: "function", name: "codex_exec", description: "Run", parameters: { type: "object" } }],
+      tools: [{ type: "function", name: "agent_exec", description: "Run", parameters: { type: "object" } }],
       input: [{ type: "compaction_trigger" }],
     }),
   }), config, compactionAdapterFactory(providers));
@@ -169,7 +169,7 @@ test("rejects an unknown routed compact model instead of treating it as LCA Code
   const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "lca-codex/not-enabled", input: [] }),
+    body: JSON.stringify({ model: "lca-token/not-enabled", input: [] }),
   }), defaultConfig());
 
   expect(response.status).toBe(400);

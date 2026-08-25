@@ -1,14 +1,12 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { AppConfig } from "./config";
-import { getConfigDir, getConfigPath, loadConfig } from "./config";
-import { join } from "node:path";
-import { inspectCodexIntegration } from "./codex-integration";
+import { getConfigPath, loadConfig } from "./config";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
 import { getTunnelServiceStatus } from "./tunnel-service";
-import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "./launcher-browser-host";
-import { processRunning } from "./process";
+import { PRODUCT_ID } from "./product";
+import { runCommand } from "./process";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -30,33 +28,6 @@ function secureFile(path: string): boolean {
   return (statSync(path).mode & 0o077) === 0;
 }
 
-function launcherOwnershipError(config: AppConfig, health: Record<string, unknown>): string | undefined {
-  if (config.browserHost !== "launcher") return undefined;
-  const path = join(getConfigDir(), "runtime", "launcher-supervisor.json");
-  if (!existsSync(path)) return `Launcher runtime ownership marker is missing: ${path}`;
-  let state: Record<string, unknown>;
-  try {
-    state = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  } catch (error) {
-    return `Launcher runtime ownership marker is invalid: ${error instanceof Error ? error.message : String(error)}`;
-  }
-  if (state.version !== 1
-    || !Number.isInteger(state.ownerPid)
-    || (state.ownerPid as number) < 1
-    || !Number.isInteger(state.daemonPid)
-    || (state.daemonPid as number) < 1
-    || state.status !== "ready") {
-    return "Launcher runtime ownership marker is incomplete or not ready";
-  }
-  if (!processRunning(state.ownerPid)) {
-    return `Launcher owner process is not running (pid ${String(state.ownerPid)})`;
-  }
-  if (health.pid !== state.daemonPid) {
-    return `Responses proxy pid ${String(health.pid)} does not match launcher-owned pid ${String(state.daemonPid)}`;
-  }
-  return undefined;
-}
-
 async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2_000);
@@ -64,7 +35,7 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
     const response = await fetch(`http://${config.host}:${config.port}/healthz`, { signal: controller.signal });
     if (!response.ok) return { id: "proxy", status: "error", message: `Responses proxy returned HTTP ${response.status}` };
     const body = await response.json() as Record<string, unknown>;
-    if (body.service !== "lca-codex" || body.status !== "ok") {
+    if (body.service !== PRODUCT_ID || body.status !== "ok") {
       return { id: "proxy", status: "error", message: "The configured port belongs to another service" };
     }
     if (body.mode !== config.mode) {
@@ -77,12 +48,8 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
       return {
         id: "proxy",
         status: "error",
-        message: "Responses proxy is still drained and is not accepting Codex turns",
+        message: "Responses proxy is still drained and is not accepting agent turns",
       };
-    }
-    const ownershipError = launcherOwnershipError(config, body);
-    if (ownershipError) {
-      return { id: "proxy", status: "error", message: "Responses proxy ownership could not be verified", detail: ownershipError };
     }
     return { id: "proxy", status: "ok", message: `Responses proxy is healthy on 127.0.0.1:${config.port}` };
   } catch (error) {
@@ -104,65 +71,43 @@ export async function runDoctor(): Promise<DoctorReport> {
     return { ok: false, checks };
   }
 
-  if (config.browserHost === "launcher") {
+  if (!existsSync(config.chromeExecutablePath)) {
+    checks.push({ id: "chrome", status: "error", message: `Chrome executable is missing: ${config.chromeExecutablePath}` });
+  } else {
+    checks.push({ id: "chrome", status: "ok", message: `Chrome executable found: ${config.chromeExecutablePath}` });
+  }
+  if (process.platform === "linux") {
     try {
-      const descriptor = readLauncherBrowserHostDescriptor(config.browserHostDescriptorPath!);
-      await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, { timeoutMs: 30_000 });
-      checks.push({
-        id: "browser-host",
-        status: "ok",
-        message: `Embedded launcher browser is authenticated and reachable (pid ${descriptor.pid})`,
-      });
+      const xvfb = runCommand("xvfb-run", ["--help"]);
+      checks.push(xvfb.status === 0
+        ? { id: "virtual-display", status: "ok", message: "xvfb-run is available for the headed background Chrome renderer" }
+        : { id: "virtual-display", status: "error", message: "xvfb-run is not usable; install Xvfb/xauth for Linux server inference" });
     } catch (error) {
       checks.push({
-        id: "browser-host",
+        id: "virtual-display",
         status: "error",
-        message: "Embedded launcher browser is unavailable",
+        message: "xvfb-run is missing; install Xvfb/xauth for Linux server inference",
         detail: error instanceof Error ? error.message : String(error),
       });
     }
-  } else {
-    if (!existsSync(config.chromeExecutablePath)) {
-      checks.push({ id: "chrome", status: "error", message: `Chrome executable is missing: ${config.chromeExecutablePath}` });
-    } else {
-      checks.push({ id: "chrome", status: "ok", message: `Chrome executable found: ${config.chromeExecutablePath}` });
-    }
-    if (!browserLoginStateExists(config)) {
-      checks.push({ id: "login", status: "error", message: "ChatGPT login state is missing or unverified; run `lca-codex login`" });
-    } else if (!secureFile(config.storageStatePath)) {
-      checks.push({ id: "login", status: "error", message: `ChatGPT login state is readable by other users: ${config.storageStatePath}` });
-    } else if (!secureFile(loginVerificationMarkerPath(config.storageStatePath))) {
-      checks.push({ id: "login", status: "error", message: "ChatGPT login verification marker is readable by other users" });
-    } else {
-      checks.push({ id: "login", status: "ok", message: "ChatGPT login state was verified in a fresh runtime context" });
-    }
   }
-
-  const codex = inspectCodexIntegration();
-  if (!codex.installed) {
-    checks.push({ id: "codex", status: "error", message: "Codex model route is not installed" });
-  } else if (codex.errors.length > 0) {
-    checks.push({ id: "codex", status: "error", message: "Codex integration is inconsistent", detail: codex.errors.join("; ") });
+  if (!browserLoginStateExists(config)) {
+    checks.push({ id: "login", status: "error", message: "ChatGPT login state is missing or unverified; use Control Center → ChatGPT authentication → Login to ChatGPT, or import verified storage state" });
+  } else if (!secureFile(config.storageStatePath)) {
+    checks.push({ id: "login", status: "error", message: `ChatGPT login state is readable by other users: ${config.storageStatePath}` });
+  } else if (!secureFile(loginVerificationMarkerPath(config.storageStatePath))) {
+    checks.push({ id: "login", status: "error", message: "ChatGPT login verification marker is readable by other users" });
   } else {
-    checks.push({ id: "codex", status: "ok", message: "Codex native model route is installed" });
+    checks.push({ id: "login", status: "ok", message: "ChatGPT login state was verified in a fresh runtime context" });
   }
 
   const service = getServiceStatus();
-  if (config.browserHost === "launcher") {
-    checks.push(service.installed || service.loaded
-      ? {
-          id: "service",
-          status: "warning",
-          message: "A terminal-owned OS background service still exists; rerun launcher setup to transfer ownership",
-          detail: JSON.stringify(service),
-        }
-      : { id: "service", status: "ok", message: "Launcher owns the background runtime" });
-  } else if (!service.supported) {
+  if (!service.supported) {
     checks.push({ id: "service", status: "warning", message: "Managed service is unavailable on this OS; keep `serve` running manually" });
   } else if (!service.installed || !service.loaded) {
-    checks.push({ id: "service", status: "error", message: "macOS background service is not installed and loaded" });
+    checks.push({ id: "service", status: "error", message: "Managed background service is not installed and running" });
   } else {
-    checks.push({ id: "service", status: "ok", message: "macOS background service is loaded" });
+    checks.push({ id: "service", status: "ok", message: "Managed background service is running" });
   }
   checks.push(await proxyCheck(config));
 
@@ -181,20 +126,9 @@ export async function runDoctor(): Promise<DoctorReport> {
       checks.push({ id: "tunnel-key", status: "ok", message: "Tunnel runtime key is stored privately" });
     }
     const tunnelService = getTunnelServiceStatus();
-    if (config.browserHost === "launcher") {
-      checks.push(tunnelService.installed || tunnelService.loaded
-        ? {
-            id: "tunnel-service",
-            status: "warning",
-            message: "A terminal-owned OS tunnel service still exists; rerun launcher MCP setup to transfer ownership",
-            detail: JSON.stringify(tunnelService),
-          }
-        : { id: "tunnel-service", status: "ok", message: "Launcher owns the tunnel runtime" });
-    } else {
-      checks.push(tunnelService.installed && tunnelService.loaded && tunnelService.running
-        ? { id: "tunnel-service", status: "ok", message: "macOS tunnel service is installed, loaded, and running" }
-        : { id: "tunnel-service", status: "error", message: "macOS tunnel service is not fully running", detail: JSON.stringify(tunnelService) });
-    }
+    checks.push(tunnelService.installed && tunnelService.loaded && tunnelService.running
+      ? { id: "tunnel-service", status: "ok", message: "Managed tunnel service is installed and running" }
+      : { id: "tunnel-service", status: "error", message: "Managed tunnel service is not fully running", detail: JSON.stringify(tunnelService) });
     const runtime = tunnelStatus(config);
     checks.push(runtime.ok
       ? { id: "tunnel-runtime", status: "ok", message: "Tunnel runtime reports healthy and ready" }

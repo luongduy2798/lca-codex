@@ -549,7 +549,7 @@ export class TurnBroker {
       );
       throw new Error(retiredTurn !== undefined
         ? `This binding_id belongs to ${retiredTurnLabel(retiredTurn)}, which has already finished.`
-        + " Call codex_bind_turn with the current turn_token and use the binding_id it returns."
+        + " Call agent_bind_turn with the current turn_token and use the binding_id it returns."
         : "binding id is invalid or expired");
     }
     if (request.method === "release") {
@@ -762,7 +762,7 @@ export class TurnBroker {
         gateway.name,
         true,
         { input: program },
-        "codex_tool_health_registry",
+        "agent_tool_health_registry",
       ),
     });
     for (const name of CODEX_TOOL_HEALTH_ROUTE_NAMES) {

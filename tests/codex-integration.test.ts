@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
-  test("expands a configured tilde Codex home consistently with launcher paths", () => {
+  test("expands a configured tilde Codex home consistently with runtime paths", () => {
     process.env.CODEX_HOME = "~/custom-codex-home";
     expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
   });

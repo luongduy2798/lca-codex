@@ -81,12 +81,9 @@ test("user-home expansion accepts native Unix and Windows separators", () => {
   expect(expandUserPath("~\\runtime")).toBe(join(homedir(), "runtime"));
 });
 
-test("launcher browser ownership is explicit in provider configuration", () => {
+test("provider configuration is pinned to managed Chrome", () => {
   const config = defaultConfig();
-  config.browserHost = "launcher";
-  config.browserHostDescriptorPath = "/Users/example/.lca-codex/runtime/launcher-browser.json";
   expect(providerConfig(config).lcaCodex).toMatchObject({
-    browserHost: "launcher",
-    browserHostDescriptorPath: config.browserHostDescriptorPath,
+    browserHost: "managed-chrome",
   });
 });

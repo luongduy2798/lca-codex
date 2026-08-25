@@ -118,7 +118,7 @@ export class ChatGptTextFeed {
 interface ChatGptTurnRuntimeBase {
   /** One-based browser generation number for a bounded native retry. */
   attempt?: number;
-  /** Wall-clock start shared with the launcher helper for end-to-end timings. */
+  /** Wall-clock start shared across the browser turn for end-to-end timings. */
   startedAt?: number;
   browser: Promise<string>;
   trace: ChatGptTraceFeed;
@@ -166,6 +166,14 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
     revision: parsed._compactionRequest
       ? compactionInputRevision(parsed)
       : extractChatGptTurnUserRevision(parsed),
+  });
+}
+
+/** Reuse one server-owned id across Responses tool rounds for the same generic logical turn. */
+export function chatGptAgentExecutionKey(parsed: CodexParsedRequest, executionId: string): string {
+  return executionKey(parsed, {
+    executionId,
+    purpose: parsed._compactionRequest ? "compaction" : "response",
   });
 }
 

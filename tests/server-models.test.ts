@@ -46,7 +46,7 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
   };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
-    "lca-codex",
+    "lca-token",
   ]);
   expect(body.models[0]!.max_context_window).toBe(900_000);
   const model = body.models[1]!;

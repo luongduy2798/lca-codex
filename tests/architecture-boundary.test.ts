@@ -10,6 +10,10 @@ function readSource(path: string): string {
 }
 
 const architecture = readSource(join(repoRoot, "docs", "architecture.md"));
+const securityModel = readSource(join(repoRoot, "docs", "security-model.md"));
+const cli = readSource(join(repoRoot, "src", "cli.ts"));
+const agentCore = readSource(join(repoRoot, "src", "core", "agent.ts"));
+const server = readSource(join(repoRoot, "src", "server.ts"));
 const mcpServer = readSource(join(adapterRoot, "mcp-server.ts"));
 const deferredToolInventory = readSource(join(adapterRoot, "deferred-tool-inventory.ts"));
 const environment = readSource(join(adapterRoot, "environment.ts"));
@@ -31,17 +35,26 @@ function registeredToolBlock(name: string): string {
   return mcpServer.slice(start, next < 0 ? mcpServer.length : next);
 }
 
-test("architecture defines LCA as a bridge and Codex as the sole harness and execution authority", () => {
-  expect(architecture).toContain("Codex remains the only agent\nharness");
-  expect(architecture).toContain("`lca-codex` never\ndiscovers AGENTS.md or chooses a skill itself");
-  expect(architecture).toContain("preserving Codex\nsandbox, approvals, sessions, and tool lifecycle as the execution authority");
-  expect(architecture).toContain("Tool calls and results remain in the same ChatGPT response while Codex executes them locally.");
-  expect(architecture).toContain("`multi_agent = true` preserves routed subagent turns");
-  expect(architecture).toContain("`multi_agent_v2 = false` keeps their payloads");
-  expect(architecture).toContain("`remote_compaction_v2 = false` bounds retained Web image");
-  expect(architecture).toContain("Intentional repository edits use the dedicated `codex_apply_patch` wrapper");
-  expect(architecture).toContain("they must not be used as shell-based substitutes");
-  expect(architecture).toContain("turn fails closed instead of falling back to an opaque shell edit");
+test("architecture defines LCA Token as a terminal-first bridge with authenticated generic harness tools", () => {
+  expect(architecture).toContain("LCA Token is a **terminal-first ChatGPT Web runtime and capability bridge**, not an agent harness");
+  expect(architecture).toContain("Codex is no longer the only supported harness");
+  expect(architecture).toContain("`src/core/agent.ts` is the first agent-neutral core boundary");
+  expect(architecture).toContain("Prompt text has no authority. Tool authority comes from the authenticated harness control plane");
+  expect(architecture).toContain("same ChatGPT browser generation continues");
+  expect(architecture).toContain("The MCP meta-tool names are agent-neutral: `agent_bind_turn`");
+  expect(securityModel).toContain("Callers do not submit `thread_id`, `turn_id`, `cwd`, roots, sandbox, or network policy fields");
+  expect(agentCore).toContain('roots: []');
+  expect(agentCore).toContain('sandboxPolicy: { type: "readOnly", networkAccess: false }');
+  expect(server).toContain('url.pathname === "/v1/agent/responses"');
+  expect(server).toContain('url.pathname === "/v1/chat/completions"');
+  expect(server).toContain("apiTokenAuthorized(req)");
+  expect(server).not.toContain("x-lca-agent-authority");
+});
+
+test("status is a compact command distinct from doctor diagnostics", () => {
+  expect(cli).toContain('else if (command === "status") await statusCommand(args);');
+  expect(cli).toContain('else if (command === "doctor") await doctorCommand(args);');
+  expect(cli).not.toContain('command === "doctor" || command === "status"');
 });
 
 test("LCA Codex adapter does not independently discover AGENTS or skill files", () => {
@@ -61,13 +74,13 @@ test("native tool relay is bounded by the current Codex registry or its advertis
   expect(deferredToolInventory).toContain("!isBlockedLogicalName(identity(tool).logicalName)");
   expect(mcpServer).toContain("if (gateway && needle) {");
   expect(mcpServer).toContain("const discovered = discoveredGatewayTools.get(binding_id)?.get(wire_name);");
-  expect(mcpServer).toContain("Codex tool is not available in this turn or has not been returned by codex_tool_inventory");
-  expect(mcpServer).toContain("if (!gateway) {\n      throw new Error(`This Codex turn did not advertise ${nestedToolName} or the native exec gateway`);");
+  expect(mcpServer).toContain("Harness tool is not available in this turn or has not been returned by agent_tool_inventory");
+  expect(mcpServer).toContain("if (!gateway) {\n      throw new Error(`This harness turn did not advertise ${nestedToolName} or the native exec gateway`);");
   expect(mcpServer).toContain("await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);");
 });
 
 test("bridge tool schemas cannot override Codex sandbox or approval policy", () => {
-  for (const name of ["codex_exec", "codex_write_stdin", "codex_apply_patch", "codex_view_image", "codex_tool_call"]) {
+  for (const name of ["agent_exec", "agent_write_stdin", "agent_apply_patch", "agent_view_image", "agent_tool_call"]) {
     const block = registeredToolBlock(name);
     const schemaStart = block.indexOf("inputSchema:");
     const schemaEnd = block.indexOf("annotations:", schemaStart);

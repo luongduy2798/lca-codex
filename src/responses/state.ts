@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
+import type { CodexProviderContinuationState } from "../types";
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
@@ -17,6 +18,7 @@ const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
 interface StoredResponseState {
   createdAt: number;
   items: unknown[];
+  providerState?: CodexProviderContinuationState;
   /** Approximate in-memory size, computed locally at insert time (never trusted from disk). */
   sizeBytes?: number;
 }
@@ -43,7 +45,7 @@ export function getStoredResponseBytesForTests(): number {
 function measuredEntry(entry: Omit<StoredResponseState, "sizeBytes">): StoredResponseState {
   let sizeBytes = 0;
   try {
-    sizeBytes = JSON.stringify(entry.items).length;
+    sizeBytes = JSON.stringify({ items: entry.items, providerState: entry.providerState }).length;
   } catch {
     /* unserializable items: weightless rather than fatal */
   }
@@ -70,6 +72,7 @@ function deleteEntry(id: string): void {
 // newly appended input suffix without adding an unknown field that native passthrough could send
 // upstream. The parser uses this boundary to acknowledge historical compaction markers exactly once.
 const replayedInputPrefixLengths = new WeakMap<object, number>();
+const replayedProviderStates = new WeakMap<object, CodexProviderContinuationState>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPersistPath: string | null = null;
@@ -107,6 +110,9 @@ function ensureLoaded(): void {
       setEntry(id, {
         createdAt: rec.createdAt,
         items: rec.items,
+        ...(rec.providerState && typeof rec.providerState === "object" && !Array.isArray(rec.providerState)
+          ? { providerState: rec.providerState }
+          : {}),
       });
     }
     pruneResponses();
@@ -202,6 +208,7 @@ export function expandPreviousResponseInput(body: unknown): unknown {
     input: [...previous.items, ...inputItems(request.input)],
   };
   replayedInputPrefixLengths.set(expanded, previous.items.length);
+  if (previous.providerState) replayedProviderStates.set(expanded, previous.providerState);
   return expanded;
 }
 
@@ -211,6 +218,12 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
   return replayedInputPrefixLengths.get(body) ?? 0;
 }
 
+/** Provider-private continuation metadata restored with this exact expanded request body. */
+export function previousResponseProviderState(body: unknown): CodexProviderContinuationState | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  return replayedProviderStates.get(body);
+}
+
 /**
  * Cache completed output and max_output_tokens partial output for previous_response_id replay.
  * Content-filtered incomplete and failed output are not authoritative replay history.
@@ -218,7 +231,7 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
 export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; providerState?: CodexProviderContinuationState },
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
@@ -238,6 +251,7 @@ export function rememberResponseState(
   setEntry(response.id, {
     createdAt: now(),
     items: [...inputItems(request.input), ...response.output],
+    ...(opts?.providerState ? { providerState: opts.providerState } : {}),
   });
   pruneResponses();
   schedulePersist();

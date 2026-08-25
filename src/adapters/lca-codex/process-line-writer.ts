@@ -22,7 +22,7 @@ export function createProcessLineWriter(
   };
 
   // A failed Windows anonymous pipe emits an error even when write() also receives
-  // an error callback. Keeping this listener installed prevents an Electron helper
+  // an error callback. Keeping this listener installed prevents a helper process
   // from turning an expected parent disconnect into an uncaught main-process error.
   stream.on("error", fail);
 

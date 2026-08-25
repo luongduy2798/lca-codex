@@ -12,8 +12,8 @@ large sections of the architecture documentation here.
 
 ## Runtime safety
 
-This repository may be used while an LCA Codex launcher/runtime is actively
-serving the current Codex task. Treat the live runtime as user state.
+This repository may be used while an LCA Token daemon is actively serving the
+current Codex task. Treat the live runtime as user state.
 
 ### Tests
 
@@ -29,25 +29,23 @@ Do not run test suites directly with commands such as:
 make test
 bun test
 bun run test
-bun run launcher:test
-node --test launcher/tests/*.test.cjs
 ```
 
-`make test-safe` isolates `HOME`, `LCA_CODEX_HOME`, and `CODEX_HOME` so tests
-cannot accidentally operate on live launcher/runtime state.
+`make test-safe` isolates `HOME`, `LCA_TOKEN_HOME`, `LCA_TOKEN_PROFILE`, and
+`CODEX_HOME` so tests cannot accidentally operate on live runtime state.
 
 Do not bypass this rule just to run a smaller or faster subset of tests.
 
 `make typecheck` is safe for type checking.
 
-Use `bun run verify` only when full repository/release-style verification is
-actually required; its test stages isolate runtime state internally.
+Use `bun run verify` only when full repository verification is actually
+required; its test stages isolate runtime state internally.
 
 ### Live processes
 
-Do not stop, restart, replace, or kill a running launcher, Responses daemon,
-browser helper, tunnel, Electron process, or Codex integration unless the user
-explicitly requests that lifecycle operation.
+Do not stop, restart, replace, or kill a running Responses daemon, managed
+browser, tunnel, or Codex integration unless the user explicitly requests that
+lifecycle operation.
 
 Do not use broad process commands such as `pkill`, `killall`, or unrelated
 `launchctl bootout` operations to make a test pass.
@@ -55,25 +53,6 @@ Do not use broad process commands such as `pkill`, `killall`, or unrelated
 If the current Codex turn depends on the live runtime, restarting that runtime
 can terminate the turn itself. Inspect process ownership and runtime state
 before lifecycle debugging.
-
-## Browser helper lifecycle
-
-Browser helper source lives under `src/adapters/lca-codex/`.
-
-A development helper bundle may be generated at
-`.launcher-runtime/browser-helper.cjs`. Rebuilding this file does **not** update
-code already loaded by an existing helper process.
-
-When validating a browser-helper change:
-
-1. Build/update the helper as needed.
-2. Do not kill a helper serving the active turn.
-3. Restart/reload the runtime only at a safe lifecycle boundary.
-4. Verify the running helper process actually started from the new code.
-5. Only then treat a real connector turn as runtime validation.
-
-Do not claim a browser/runtime fix works merely because the source bundle was
-rebuilt.
 
 ## Browser and connector invariants
 
@@ -118,7 +97,7 @@ Do not report a bug as fixed until the evidence covers the failure mode being
 discussed. Clearly distinguish:
 
 - unit/regression tests passing;
-- isolated helper probes passing;
+- isolated browser/runtime probes passing;
 - restarted-runtime validation;
 - real end-to-end connector validation.
 
@@ -164,10 +143,6 @@ equivalents because they encode project-specific safety behavior.
 
 Generated/runtime directories such as these should not be committed:
 
-- `.launcher-runtime/`
-- `launcher/build/`
-- `launcher/artifacts/`
-- `launcher/release/`
 - `node_modules/`
 - generated `dist/` output
 
@@ -177,34 +152,13 @@ Respect `.gitignore` and verify generated artifacts before staging.
 
 The root `package.json` version is the project version.
 
-`launcher/package.json` must remain synchronized with it. The repository's
-pre-commit hook contains version synchronization logic; do not work around that
-mechanism accidentally.
-
-When intentionally changing versions, verify both manifests afterward.
-
 Update `CHANGELOG.md` for notable behavior changes when the changelog exists on
 the branch. Do not bump versions unless the task calls for it.
 
 ## Release safety
 
-Release commands have external side effects.
-
-Do **not** run any of the following unless the user explicitly asks to perform a
-release:
-
-```bash
-make release
-make release-patch
-make release-minor
-make release-major
-bun run scripts/release.ts ...
-git tag ...
-git push ...
-```
-
-The release script may verify, create commits, create tags, push to `origin`,
-and trigger GitHub Release workflows.
+The repository does not have an automated package/release workflow. Publishing
+or tagging remains an explicit external side effect.
 
 A request to prepare code, bump a version, update a changelog, or create a
 release branch is **not** permission to publish a release.
@@ -232,9 +186,4 @@ In particular:
 - Core bridge/runtime code: `src/`
 - ChatGPT/Codex browser adapter: `src/adapters/lca-codex/`
 - Core tests: `tests/`
-- Electron launcher/runtime lifecycle: `launcher/electron/`
-- Launcher tests: `launcher/tests/`
 - Architecture and security contracts: `docs/`
-
-When changing behavior across these boundaries, check both the core and launcher
-side instead of assuming one layer owns the complete lifecycle.

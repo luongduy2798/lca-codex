@@ -1,11 +1,9 @@
 import { existsSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import type { AppConfig } from "./config";
 import {
   currentRuntimeCommand,
-  defaultBrokerEndpoint,
   defaultConfig,
   getConfigPath,
   loadConfig,
@@ -14,31 +12,25 @@ import {
 import {
   browserLoginStateExists,
   inspectBrowserLoginCapabilities,
-  loginToChatGpt,
   storedBrowserLoginCapabilities,
 } from "./browser-login";
-import { installCodexIntegration, preflightCodexIntegration } from "./codex-integration";
-import { inspectLauncherBrowserHost } from "./launcher-browser-host";
 import {
-  assertServiceIdle,
   getServiceStatus,
   installService,
-  restartService,
-  uninstallService,
+  serviceHealthIsReady,
+  stopService,
+  waitForServiceReady,
 } from "./service";
-import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, waitForTunnelReady } from "./tunnel";
-import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
+import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, tunnelAliasNeedsRebind, waitForTunnelReady } from "./tunnel";
+import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches } from "./tunnel-service";
+import { PRODUCT_ID } from "./product";
 import { VERSION } from "./version";
 
 export interface SetupOptions {
   port?: number;
   chromeExecutablePath?: string;
-  browserHostDescriptorPath?: string;
   appName?: string;
-  forceLogin?: boolean;
-  autoApproveToolCalls?: boolean;
   replaceCodexRoute?: boolean;
-  restartService?: boolean;
   acknowledgedUnofficial?: boolean;
   tunnelId?: string;
   runtimeKeyFile?: string;
@@ -48,20 +40,15 @@ export interface SetupOptions {
 export interface SetupResult {
   mode: "full";
   configPath: string;
-  loginCreated: boolean;
   serviceLoaded: boolean;
   tunnelReady: boolean | null;
-  codexRestartRequired: true;
+  codexRestartRequired: false;
   connectorSetupRequired: boolean;
 }
 
 export interface ExistingBridgeSetupCredentials {
   tunnelId: boolean;
   runtimeKey: boolean;
-}
-
-export function launcherCapabilityProbeRequired(existing: AppConfig | undefined): boolean {
-  return !(existing?.browserHost === "launcher" && typeof existing.proAvailable === "boolean");
 }
 
 export function existingBridgeSetupCredentials(existing: AppConfig | undefined): ExistingBridgeSetupCredentials {
@@ -75,46 +62,6 @@ export function existingBridgeSetupCredentials(existing: AppConfig | undefined):
 function loadExistingConfig(): AppConfig | undefined {
   if (!existsSync(getConfigPath())) return undefined;
   return loadConfig();
-}
-
-function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
-  return JSON.stringify({
-    mode: before.mode,
-    releaseVersion: before.releaseVersion,
-    host: before.host,
-    port: before.port,
-    contextWindow: before.contextWindow,
-    appName: before.appName,
-    browserHost: before.browserHost,
-    browserHostDescriptorPath: before.browserHostDescriptorPath,
-    chromeExecutablePath: before.chromeExecutablePath,
-    storageStatePath: before.storageStatePath,
-    brokerSocketPath: before.brokerSocketPath,
-    headed: before.headed,
-    proAvailable: before.proAvailable,
-    autoApproveToolCalls: before.autoApproveToolCalls,
-    controlToken: before.controlToken,
-    runtimeCommand: before.runtimeCommand,
-    tunnel: before.tunnel,
-  }) !== JSON.stringify({
-    mode: after.mode,
-    releaseVersion: after.releaseVersion,
-    host: after.host,
-    port: after.port,
-    contextWindow: after.contextWindow,
-    appName: after.appName,
-    browserHost: after.browserHost,
-    browserHostDescriptorPath: after.browserHostDescriptorPath,
-    chromeExecutablePath: after.chromeExecutablePath,
-    storageStatePath: after.storageStatePath,
-    brokerSocketPath: after.brokerSocketPath,
-    headed: after.headed,
-    proAvailable: after.proAvailable,
-    autoApproveToolCalls: after.autoApproveToolCalls,
-    controlToken: after.controlToken,
-    runtimeCommand: after.runtimeCommand,
-    tunnel: after.tunnel,
-  });
 }
 
 export function tunnelWorkerRuntimeChanged(before: AppConfig | undefined, after: AppConfig): boolean {
@@ -137,39 +84,7 @@ export function setupProxyIsReady(
   health: Record<string, unknown>,
   config: Pick<AppConfig, "mode" | "releaseVersion">,
 ): boolean {
-  return health.service === "lca-codex"
-    && health.status === "ok"
-    && health.mode === config.mode
-    && health.version === config.releaseVersion
-    && health.accepting_turns === true
-    && health.broker_ready === true;
-}
-
-async function waitForProxy(config: AppConfig, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = "not reachable";
-  while (Date.now() < deadline) {
-    const controller = new AbortController();
-    const requestTimeout = setTimeout(() => controller.abort(), 2_000);
-    try {
-      const response = await fetch(`http://${config.host}:${config.port}/healthz`, {
-        signal: controller.signal,
-      });
-      if (response.ok) {
-        const body = await response.json() as Record<string, unknown>;
-        if (setupProxyIsReady(body, config)) return;
-        lastError = `unexpected health payload: ${JSON.stringify(body)}`;
-      } else {
-        lastError = `HTTP ${response.status}`;
-      }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-    } finally {
-      clearTimeout(requestTimeout);
-    }
-    await new Promise(resolveWait => setTimeout(resolveWait, 250));
-  }
-  throw new Error(`Responses proxy did not become ready: ${lastError}`);
+  return serviceHealthIsReady(health, config);
 }
 
 function baseConfig(existing: AppConfig | undefined, options: SetupOptions): AppConfig {
@@ -182,16 +97,9 @@ function baseConfig(existing: AppConfig | undefined, options: SetupOptions): App
     config.port = options.port;
   }
   if (options.chromeExecutablePath) config.chromeExecutablePath = options.chromeExecutablePath;
-  if (options.browserHostDescriptorPath) {
-    config.browserHost = "launcher";
-    config.browserHostDescriptorPath = options.browserHostDescriptorPath;
-    config.brokerSocketPath = defaultBrokerEndpoint();
-  } else if (options.chromeExecutablePath) {
-    config.browserHost = "managed-chrome";
-    delete config.browserHostDescriptorPath;
-  }
+  config.browserHost = "managed-chrome";
   if (options.appName) config.appName = options.appName;
-  if (options.autoApproveToolCalls !== undefined) config.autoApproveToolCalls = options.autoApproveToolCalls;
+  config.autoApproveToolCalls = true;
   if (options.acknowledgedUnofficial) config.acknowledgedUnofficialAt = new Date().toISOString();
   if (!config.acknowledgedUnofficialAt) {
     throw new Error("Setup requires explicit acknowledgement that this is unofficial browser automation. Pass --acknowledge-unofficial.");
@@ -227,7 +135,7 @@ async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
   try {
     // `runtimes connect` writes the native profile and returns success only after its managed
     // runtime is running, healthy, and ready. Setup stops that validation runtime transactionally;
-    // the launcher supervisor reconnects the same alias after the new configuration is committed.
+    // the managed tunnel service reconnects the same alias after configuration is committed.
     connectTunnel(config);
   } catch (error) {
     bootstrapError = error;
@@ -248,135 +156,55 @@ async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
 export async function setup(options: SetupOptions): Promise<SetupResult> {
   const existing = loadExistingConfig();
   const config = baseConfig(existing, options);
-  const launcherOwned = config.browserHost === "launcher";
-  if (!launcherOwned && process.platform !== "darwin") {
-    throw new Error(
-      "Terminal-only managed Chrome setup currently requires macOS. "
-      + "Use the lca-codex launcher on Windows or Linux.",
-    );
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    throw new Error(`Managed headless setup is not supported on ${process.platform}; run ${PRODUCT_ID} serve directly`);
   }
-  preflightCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
   const refreshTunnelWorker = tunnelWorkerRuntimeChanged(existing, config);
-  if (existing && options.restartService) config.controlToken = randomBytes(32).toString("base64url");
   const beforeService = getServiceStatus();
-  if (launcherOwned && (beforeService.installed || beforeService.loaded)) {
-    if (!existing) {
-      throw new Error("A terminal-owned background service exists without a verifiable configuration; refusing automatic ownership transfer");
-    }
-    if (!options.restartService) {
-      throw new Error(
-        "Launcher ownership transfer must stop the terminal-owned background service. "
-        + "Retry from the launcher after the active Codex task finishes.",
-      );
-    }
-  }
-  if (beforeService.loaded && !existing) {
-    throw new Error("A lca-codex service is loaded but its configuration is missing; refusing to replace an unverifiable process");
-  }
 
-  let loginCreated = false;
-  let proAvailable: boolean | undefined;
-  if (config.browserHost === "launcher") {
-    if (options.forceLogin) throw new Error("Launcher browser login is owned by the launcher UI; --login cannot replace it");
-    const detectPro = launcherCapabilityProbeRequired(existing);
-    const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, {
-      detectPro,
-    });
-    proAvailable = detectPro ? inspected.proAvailable : existing!.proAvailable;
-  } else {
-    proAvailable = storedBrowserLoginCapabilities(config).proAvailable;
-    const loginRequired = options.forceLogin || !browserLoginStateExists(config);
-    const capabilityProbeRequired = !loginRequired && proAvailable === undefined;
-    if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
-      throw new Error(
-        "Setup must verify the browser account before changing the running daemon. "
-        + "Rerun from a normal terminal with --restart-service after the active task finishes.",
-      );
-    }
-    if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && existing) await assertServiceIdle(existing);
-    if (loginRequired) {
-      const login = await loginToChatGpt(config);
-      proAvailable = login.proAvailable;
-      loginCreated = true;
-    } else if (capabilityProbeRequired) {
-      proAvailable = (await inspectBrowserLoginCapabilities(config)).proAvailable;
-    }
+  let proAvailable = storedBrowserLoginCapabilities(config).proAvailable;
+  const hasLoginState = browserLoginStateExists(config);
+  const capabilityProbeRequired = hasLoginState && proAvailable === undefined;
+  if (capabilityProbeRequired) {
+    proAvailable = (await inspectBrowserLoginCapabilities(config)).proAvailable;
   }
   config.proAvailable = proAvailable === true;
-  const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
-  const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
-  if (beforeService.loaded && preliminaryChange && !options.restartService) {
-    throw new Error(
-      "The daemon is currently serving a Codex task and setup would change its runtime. "
-      + "Rerun from a normal terminal with --restart-service after the active task finishes.",
-    );
-  }
-  if (beforeService.loaded && preliminaryChange && existing) await assertServiceIdle(existing);
   await configureTunnel(config, existing, options);
 
-  const changedWhileLoaded = Boolean(existing && beforeService.loaded && meaningfulRuntimeChange(existing, config));
-  if (changedWhileLoaded && !options.restartService) {
-    throw new Error(
-      "The daemon is currently serving a Codex task and setup would change its runtime. "
-      + "Rerun from a normal terminal with --restart-service after the active task finishes.",
-    );
-  }
-  if (changedWhileLoaded && !preliminaryChange && existing) await assertServiceIdle(existing);
-  if (!beforeService.loaded) await assertPortAvailable(config.host, config.port);
+  // Setup owns the lifecycle for the selected profile. A loaded daemon is interrupted and stopped
+  // before tunnel/config replacement so stale browser turns cannot pin the old runtime forever.
+  if (beforeService.loaded) await stopService(existing);
+  await assertPortAvailable(config.host, config.port);
 
-  if (!launcherOwned) {
-    saveConfig(config);
-    installService(config);
-    if (changedWhileLoaded && options.restartService && existing) await restartService(existing);
-    await waitForProxy(config);
-  }
+  saveConfig(config);
 
   let tunnelReady: boolean | null = null;
   {
     const profilePath = join(config.tunnel!.profileDir, `${config.tunnel!.profileName}.yaml`);
     const tunnelService = getTunnelServiceStatus();
     const needsProfile = !existsSync(profilePath);
-    if (launcherOwned) {
-      if (tunnelService.installed || tunnelService.loaded) await uninstallTunnelService();
-      if (needsProfile || refreshTunnelWorker || explicitTunnelChange) {
-        await bootstrapTunnelProfile(config);
-      }
-    } else {
-      const needsOwnershipMigration = !tunnelService.installed || !tunnelService.loaded || !tunnelServiceDefinitionMatches(config);
-      if (needsOwnershipMigration || needsProfile) {
-        await assertServiceIdle(config);
-        if (tunnelService.loaded) await stopTunnelService();
-        await bootstrapTunnelProfile(config);
-        installTunnelService(config);
-      } else if (refreshTunnelWorker) {
-        await assertServiceIdle(config);
-        await restartTunnelService();
-      }
-      const status = await waitForTunnelReady(config);
-      if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
-      tunnelReady = true;
+    const needsTunnelRebind = tunnelAliasNeedsRebind(config);
+    const needsOwnershipMigration = !tunnelService.installed || !tunnelService.loaded || !tunnelServiceDefinitionMatches(config);
+    if (needsOwnershipMigration || needsProfile || needsTunnelRebind) {
+      if (tunnelService.loaded) await stopTunnelService();
+      await bootstrapTunnelProfile(config);
+      installTunnelService(config);
+    } else if (refreshTunnelWorker) {
+      await restartTunnelService();
     }
+    const status = await waitForTunnelReady(config);
+    if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
+    tunnelReady = true;
   }
-  if (launcherOwned && (beforeService.installed || beforeService.loaded)) {
-    await uninstallService(existing!);
-  }
-  if (launcherOwned) saveConfig(config);
-  installCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-    // The launcher starts and verifies its supervised runtime after this setup transaction. Keep
-    // Codex on its previous route until that readiness gate has passed.
-    activate: !launcherOwned,
-  });
 
+  installService(config);
+  await waitForServiceReady(config);
   return {
     mode: config.mode,
     configPath: getConfigPath(),
-    loginCreated,
-    serviceLoaded: launcherOwned ? false : getServiceStatus().loaded,
+    serviceLoaded: getServiceStatus().loaded,
     tunnelReady,
-    codexRestartRequired: true,
+    codexRestartRequired: false,
     connectorSetupRequired: true,
   };
 }

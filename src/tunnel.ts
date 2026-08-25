@@ -3,8 +3,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from
 import { basename, dirname, join } from "node:path";
 import { unzipSync } from "fflate";
 import type { AppConfig, TunnelConfig } from "./config";
-import { atomicWriteFile, getConfigDir } from "./config";
+import { atomicWriteFile, getConfigDir, getProfileName } from "./config";
+import { tunnelIdentity } from "./product";
 import { runCommand, runChecked } from "./process";
+import { getTunnelServiceStatus, tunnelServiceDefinitionMatches } from "./tunnel-service";
 
 const TUNNEL_VERSION = "0.0.10";
 const RELEASE_BASE = `https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_VERSION}`;
@@ -156,8 +158,9 @@ export function createTunnelConfig(options: {
   alias?: string;
 }): TunnelConfig {
   if (!/^tunnel_[a-f0-9]{32}$/.test(options.tunnelId)) throw new Error("--tunnel-id must be tunnel_ followed by 32 lowercase hexadecimal characters");
-  const profileName = options.profileName ?? "lca-codex";
-  const alias = options.alias ?? "lca-codex";
+  const identity = tunnelIdentity(getProfileName());
+  const profileName = options.profileName ?? identity;
+  const alias = options.alias ?? identity;
   if (!/^[A-Za-z0-9._-]+$/.test(profileName) || !/^[A-Za-z0-9._-]+$/.test(alias)) {
     throw new Error("Tunnel profile and alias may contain only letters, digits, dot, underscore, and dash");
   }
@@ -196,10 +199,97 @@ function tunnel(config: AppConfig): TunnelConfig {
   return config.tunnel;
 }
 
-export function connectTunnel(config: AppConfig): void {
+export interface TunnelAliasMetadata {
+  tunnelId?: string;
+  organizationId?: string;
+  organizationRequired: boolean;
+}
+
+function organizationIdFromCommand(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = value.match(/--organization-id(?:=|\s+)["']?(org-[A-Za-z0-9_-]+)/);
+  return match?.[1];
+}
+
+export function parseTunnelAliasMetadata(output: string): TunnelAliasMetadata {
+  try {
+    const parsed = JSON.parse(output) as Record<string, unknown>;
+    const process = nestedRecord(parsed, "process");
+    const tunnelId = typeof parsed.tunnel_id === "string" ? parsed.tunnel_id
+      : typeof process?.tunnel_id === "string" ? process.tunnel_id
+        : undefined;
+    const directOrganizationId = typeof parsed.organization_id === "string" ? parsed.organization_id : undefined;
+    const nextStepOrganizationId = Array.isArray(parsed.next_steps)
+      ? parsed.next_steps.map(organizationIdFromCommand).find(Boolean)
+      : undefined;
+    const repairOrganizationId = organizationIdFromCommand(parsed.repair_command)
+      ?? (Array.isArray(parsed.repair_actions)
+        ? parsed.repair_actions
+          .map(action => action && typeof action === "object" && !Array.isArray(action)
+            ? organizationIdFromCommand((action as Record<string, unknown>).command)
+            : undefined)
+          .find(Boolean)
+        : undefined);
+    const organizationId = directOrganizationId ?? nextStepOrganizationId ?? repairOrganizationId;
+    const remoteError = typeof parsed.remote_error === "string" ? parsed.remote_error
+      : typeof parsed.error === "string" ? parsed.error
+        : "";
+    return {
+      ...(tunnelId ? { tunnelId } : {}),
+      ...(organizationId ? { organizationId } : {}),
+      organizationRequired: /tunnel_active_organization_required|active organization context/i.test(remoteError),
+    };
+  } catch {
+    return { organizationRequired: false };
+  }
+}
+
+function tunnelAliasMetadata(settings: TunnelConfig): TunnelAliasMetadata {
+  const result = runCommand(
+    settings.binaryPath,
+    ["runtimes", "status", settings.alias, "--json"],
+    { timeout: 10_000 },
+  );
+  const structuredOutput = result.stdout.trim();
+  return structuredOutput ? parseTunnelAliasMetadata(structuredOutput) : { organizationRequired: false };
+}
+
+function tunnelOrganizationId(metadata: TunnelAliasMetadata): string | undefined {
+  for (const candidate of [
+    process.env.LCA_TOKEN_TUNNEL_ORGANIZATION_ID,
+    process.env.CONTROL_PLANE_ORGANIZATION_ID,
+    metadata.organizationId,
+  ]) {
+    const value = candidate?.trim();
+    if (value && /^org-[A-Za-z0-9_-]+$/.test(value)) return value;
+  }
+  return undefined;
+}
+
+function removeTunnelAlias(settings: TunnelConfig): void {
+  const stopResult = runCommand(
+    settings.binaryPath,
+    ["runtimes", "stop", settings.alias, "--json"],
+    { timeout: 15_000 },
+  );
+  if (stopResult.status !== 0
+    && !/not found|not running|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(`${stopResult.stdout}\n${stopResult.stderr}`)) {
+    throw new Error(`Failed to stop stale tunnel alias: ${safeTunnelDetail(tunnelCommandOutput(stopResult))}`);
+  }
+  const result = runCommand(
+    settings.binaryPath,
+    ["runtimes", "rm", settings.alias, "--json"],
+    { timeout: 15_000 },
+  );
+  if (result.status !== 0
+    && !/not found|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(`${result.stdout}\n${result.stderr}`)) {
+    throw new Error(`Failed to remove stale tunnel alias metadata: ${safeTunnelDetail(tunnelCommandOutput(result))}`);
+  }
+}
+
+function runTunnelConnect(config: AppConfig, organizationId?: string) {
   const settings = tunnel(config);
-  mkdirSync(settings.profileDir, { recursive: true, mode: 0o700 });
-  const result = runCommand(settings.binaryPath, [
+  return runCommand(settings.binaryPath, [
     "runtimes", "connect",
     "--alias", settings.alias,
     "--profile", settings.profileName,
@@ -207,20 +297,54 @@ export function connectTunnel(config: AppConfig): void {
     "--tunnel-client-bin", settings.binaryPath,
     "--tunnel-id", settings.tunnelId,
     "--runtime-api-key", `file:${settings.runtimeKeyFile}`,
+    ...(organizationId ? ["--organization-id", organizationId] : []),
     "--mcp-command", mcpCommand(config),
     "--json",
   ], { timeout: TUNNEL_READY_TIMEOUT_MS });
+}
+
+function tunnelConnectError(result: ReturnType<typeof runCommand>): string | undefined {
   const structuredOutput = result.stdout.trim();
-  const launchError = structuredOutput
-    ? tunnelConnectLaunchError(structuredOutput)
-    : undefined;
+  const launchError = structuredOutput ? tunnelConnectLaunchError(structuredOutput) : undefined;
   if (result.status !== 0) {
-    const detail = launchError && launchError !== "tunnel-client returned non-JSON connect output"
+    return launchError && launchError !== "tunnel-client returned non-JSON connect output"
       ? launchError
       : safeTunnelDetail(tunnelCommandOutput(result) || `exit ${result.status}`);
-    throw new Error(`Tunnel managed startup failed: ${detail}`);
   }
-  if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
+  return launchError;
+}
+
+export function tunnelAliasNeedsRebind(config: AppConfig): boolean {
+  const settings = tunnel(config);
+  if (!existsSync(settings.binaryPath)) return false;
+  const metadata = tunnelAliasMetadata(settings);
+  return metadata.organizationRequired
+    || Boolean(metadata.tunnelId && metadata.tunnelId !== settings.tunnelId);
+}
+
+export function connectTunnel(config: AppConfig): void {
+  const settings = tunnel(config);
+  mkdirSync(settings.profileDir, { recursive: true, mode: 0o700 });
+  const existing = tunnelAliasMetadata(settings);
+  const staleAlias = existing.organizationRequired
+    || Boolean(existing.tunnelId && existing.tunnelId !== settings.tunnelId);
+  if (staleAlias) removeTunnelAlias(settings);
+
+  let organizationId = tunnelOrganizationId(existing);
+  let result = runTunnelConnect(config, organizationId);
+  let launchError = tunnelConnectError(result);
+
+  if (launchError && !organizationId) {
+    const retryMetadata = parseTunnelAliasMetadata(result.stdout.trim());
+    const discoveredOrganizationId = tunnelOrganizationId(retryMetadata);
+    if (discoveredOrganizationId) {
+      removeTunnelAlias(settings);
+      organizationId = discoveredOrganizationId;
+      result = runTunnelConnect(config, organizationId);
+      launchError = tunnelConnectError(result);
+    }
+  }
+  if (launchError) throw new Error(`Tunnel managed startup failed: ${launchError}`);
 }
 
 export function stopTunnel(config: AppConfig): void {
@@ -312,31 +436,57 @@ export function tunnelConnectLaunchError(output: string): string | undefined {
   ].join("; "));
 }
 
-export function parseTunnelStatus(output: string, exitStatus = 0): TunnelRuntimeStatus {
+export function parseTunnelStatus(
+  output: string,
+  exitStatus = 0,
+  managedProcessRunning = false,
+): TunnelRuntimeStatus {
   if (exitStatus !== 0) {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: safeTunnelDetail(output) };
   }
   try {
     const parsed = JSON.parse(output) as Record<string, unknown>;
-    const processRunning = parsed.process_running === true;
+    const runtimeProcessRunning = parsed.process_running === true;
     const healthy = parsed.healthy === true;
-    const ready = parsed.ready === true;
-    const state = typeof parsed.runtime_state === "string" ? parsed.runtime_state
+    const reportedState = typeof parsed.runtime_state === "string" ? parsed.runtime_state
       : typeof parsed.status === "string" ? parsed.status
         : undefined;
+    const remoteError = typeof parsed.remote_error === "string" && parsed.remote_error.trim()
+      ? parsed.remote_error.trim()
+      : undefined;
+    const remoteLookupFailed = parsed.remote_lookup_attempted === true
+      && (parsed.remote == null || Boolean(remoteError));
+    const explicitlyStopped = reportedState === "stopped";
+    // `tunnel-client runtimes status` tracks runtimes started by `runtimes connect`.
+    // Once LCA Token hands ownership to launchd/systemd, that bookkeeping can remain
+    // `stopped` even while the exact managed `tunnel-client run` process is alive and
+    // its effective health/ready probes are both passing. Accept that one case only
+    // when the service definition matches and the remote tunnel lookup also succeeded.
+    const managedProcessIsUsable = managedProcessRunning
+      && healthy
+      && parsed.ready === true
+      && !remoteLookupFailed;
+    const processRunning = runtimeProcessRunning || managedProcessIsUsable;
+    const ready = parsed.ready === true
+      && !remoteLookupFailed
+      && (!explicitlyStopped || managedProcessIsUsable);
+    const state = managedProcessIsUsable && explicitlyStopped ? "ready" : reportedState;
     const issues = parsed.local && typeof parsed.local === "object" && Array.isArray((parsed.local as { issues?: unknown }).issues)
       ? ((parsed.local as { issues: unknown[] }).issues).filter(issue => typeof issue === "string").slice(0, 3)
       : [];
-    const explicitError = typeof parsed.error === "string" && parsed.error ? parsed.error : undefined;
+    const explicitError = typeof parsed.error === "string" && parsed.error && parsed.error !== remoteError
+      ? parsed.error
+      : undefined;
     const logTail = runtimeLogTail(parsed);
     const ok = processRunning && healthy && ready;
     const detail = ok
-      ? "process_running=true healthy=true ready=true"
+      ? `process_running=true${managedProcessRunning && !runtimeProcessRunning ? " source=managed-service" : ""} healthy=true ready=true`
       : safeTunnelDetail([
         `process_running=${processRunning}`,
         `healthy=${healthy}`,
         `ready=${ready}`,
         ...(state ? [`state=${state}`] : []),
+        ...(remoteError ? [`remote_error=${remoteError}`] : []),
         ...(explicitError ? [explicitError] : []),
         ...issues,
         ...(logTail ? [`runtime_log=${logTail}`] : []),
@@ -352,12 +502,14 @@ export function tunnelStatus(config: AppConfig): TunnelRuntimeStatus {
   if (!existsSync(settings.binaryPath)) {
     return { ok: false, processRunning: false, healthy: false, ready: false, detail: `Missing ${settings.binaryPath}` };
   }
+  const service = getTunnelServiceStatus();
+  const managedProcessRunning = service.running && tunnelServiceDefinitionMatches(config);
   const result = runCommand(
     settings.binaryPath,
     ["runtimes", "status", settings.alias, "--json"],
     { timeout: 10_000 },
   );
-  return parseTunnelStatus(tunnelCommandOutput(result), result.status);
+  return parseTunnelStatus(tunnelCommandOutput(result), result.status, managedProcessRunning);
 }
 
 export async function waitForTunnelReady(

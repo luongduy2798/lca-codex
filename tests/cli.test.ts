@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { defaultBrokerEndpoint } from "../src/config";
 
 async function runCli(args: string[], env: Record<string, string | undefined>) {
   const child = Bun.spawn([
@@ -22,182 +21,104 @@ async function runCli(args: string[], env: Record<string, string | undefined>) {
   return { exitCode, stdout, stderr };
 }
 
+function isolatedEnv(root: string): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    HOME: join(root, "home"),
+    LCA_TOKEN_HOME: join(root, "lca-token"),
+    LCA_TOKEN_PROFILE: undefined,
+    CODEX_HOME: join(root, "codex"),
+  };
+}
+
+test("CLI identifies itself as LCA Token and does not expose Codex route or Electron lifecycle", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-token-cli-help-"));
+  try {
+    const result = await runCli(["--help"], isolatedEnv(root));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("lca-token");
+    expect(result.stdout).toContain("Headless ChatGPT Web runtime");
+    expect(result.stdout).toContain("Control Center TUI");
+    expect(result.stdout).toContain("Setup Wizard TUI");
+    expect(result.stdout).toContain("auth <status|login|import|export|logout>");
+    expect(result.stdout).toContain("api key <status|create|rotate|revoke|path>");
+    expect(result.stdout).toContain("start|stop|restart");
+    expect(result.stdout).toContain("service <status|install|cancel-turns>");
+    expect(result.stdout).toContain("tunnel <status|key-import>");
+    expect(result.stdout).not.toContain("service <status|install|start|restart|stop|cancel-turns>");
+    expect(result.stdout).not.toContain("tunnel <status|start|restart|stop|key-import>");
+    expect(result.stdout).not.toContain("api token <status|create|rotate|revoke|path>");
+    expect(result.stdout).not.toContain("--public-url");
+    expect(result.stdout).not.toContain("route <");
+    expect(result.stdout).not.toContain("Electron");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-interactive default invocation prints help instead of entering the TUI", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-token-cli-default-"));
+  try {
+    const result = await runCli([], isolatedEnv(root));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Control Center TUI");
+    expect(result.stdout).toContain("Usage:");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit TUI command fails closed without an interactive terminal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-token-cli-tui-"));
+  try {
+    const result = await runCli(["tui"], isolatedEnv(root));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("TUI requires an interactive terminal");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("setup validates the port before performing runtime work", async () => {
-  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-"));
+  const root = mkdtempSync(join(tmpdir(), "lca-token-cli-"));
   try {
     const result = await runCli([
       "setup",
       "--port",
       "0",
       "--acknowledge-unofficial",
-    ], {
-      ...process.env,
-      CODEX_HOME: join(root, "codex"),
-      LCA_CODEX_HOME: join(root, "app"),
-    });
-    const { stderr } = result;
+    ], isolatedEnv(root));
     expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("--port must be an integer from 1 to 65535");
-    expect(stderr).not.toContain("Unknown arguments");
+    expect(result.stderr).toContain("--port must be an integer from 1 to 65535");
+    expect(result.stderr).not.toContain("Unknown arguments");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("route install preserves an existing Codex route unless replacement is explicit", async () => {
-  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-route-"));
-  const codexHome = join(root, "codex");
-  const configPath = join(codexHome, "config.toml");
-  const original = 'model = "gpt-5.6-sol"\nopenai_base_url = "https://native.example/v1"\n';
-  mkdirSync(codexHome, { recursive: true });
-  writeFileSync(configPath, original);
+test("profiles are isolated under the LCA Token home and can be made active", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lca-token-cli-profile-"));
   try {
-    const result = await runCli(["route", "install"], {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      LCA_CODEX_HOME: join(root, "app"),
-    });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("--replace-codex-route");
-    expect(await Bun.file(configPath).text()).toBe(original);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    const env = isolatedEnv(root);
+    const create = await runCli(["profile", "create", "work"], env);
+    expect(create.exitCode).toBe(0);
+    expect(create.stdout).toContain("Created profile work");
 
-test("route install remains disconnected unless activation is explicit", async () => {
-  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-route-disconnected-"));
-  const codexHome = join(root, "codex");
-  mkdirSync(codexHome, { recursive: true });
-  try {
-    const result = await runCli(["route", "install"], {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      LCA_CODEX_HOME: join(root, "app"),
-    });
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ installed: true, active: false });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    const use = await runCli(["profile", "use", "work"], env);
+    expect(use.exitCode).toBe(0);
+    expect(use.stdout).toContain("Active profile: work");
 
-test("terminal uninstall refuses to race a launcher-owned runtime", async () => {
-  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-uninstall-"));
-  const appHome = join(root, "app");
-  const configPath = join(appHome, "config.json");
-  mkdirSync(appHome, { recursive: true });
-  writeFileSync(configPath, `${JSON.stringify({
-    version: 3,
-    releaseVersion: "0.2.0",
-    mode: "full",
-    host: "127.0.0.1",
-    port: 17841,
-    contextWindow: 256_000,
-    appName: "lca-codex",
-    browserHost: "launcher",
-    browserHostDescriptorPath: join(appHome, "runtime", "launcher-browser.json"),
-    chromeExecutablePath: process.execPath,
-    storageStatePath: join(appHome, "browser", "storage-state.json"),
-    brokerSocketPath: defaultBrokerEndpoint(appHome),
-    headed: true,
-    proAvailable: false,
-    autoApproveToolCalls: false,
-    controlToken: "launcher-uninstall-control-token-0123456789abcdef",
-    runtimeCommand: [process.execPath],
-    tunnel: {
-      binaryPath: process.execPath,
-      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
-      runtimeKeyFile: join(appHome, "runtime.key"),
-      profileDir: join(appHome, "profiles"),
-      profileName: "lca-codex",
-      alias: "lca-codex",
-    },
-  })}\n`);
-  try {
-    const result = await runCli([
-      "uninstall",
-      "--yes",
-    ], {
-      ...process.env,
-      CODEX_HOME: join(root, "codex"),
-      LCA_CODEX_HOME: appHome,
-    });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("must be removed from lca-codex Settings");
-    expect(existsSync(configPath)).toBe(true);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    const show = await runCli(["profile", "show"], env);
+    expect(show.exitCode).toBe(0);
+    expect(show.stdout.trim()).toBe("work");
 
-test("authorized launcher uninstall does not re-probe an already stopped bridge runtime", async () => {
-  const root = mkdtempSync(join(tmpdir(), "lca-codex-cli-launcher-uninstall-"));
-  const appHome = join(root, "app");
-  const codexHome = join(root, "codex");
-  const descriptorPath = join(appHome, "runtime", "launcher-browser.json");
-  const helperScript = join(root, "helper.cjs");
-  const runtimeKeyFile = join(appHome, "secrets", "runtime.key");
-  const token = "launcher-uninstall-control-token-0123456789abcdef";
-  mkdirSync(join(appHome, "runtime"), { recursive: true });
-  mkdirSync(join(appHome, "secrets"), { recursive: true });
-  mkdirSync(codexHome, { recursive: true });
-  writeFileSync(helperScript, "module.exports = {};\n");
-  writeFileSync(runtimeKeyFile, "test-key\n");
-  writeFileSync(descriptorPath, `${JSON.stringify({
-    version: 1,
-    kind: "lca-codex-launcher",
-    pid: process.pid,
-    endpoint: "http://127.0.0.1:48111",
-    control: { endpoint: "http://127.0.0.1:48112", token },
-    helper: { executable: process.execPath, script: helperScript },
-    partition: "persist:lca-codex-chatgpt",
-    idleUrl: "about:blank#lca-codex-browser-host",
-    surfaceId: "a".repeat(32),
-    createdAt: new Date().toISOString(),
-  })}\n`, { mode: 0o600 });
-  writeFileSync(join(appHome, "config.json"), `${JSON.stringify({
-    version: 3,
-    releaseVersion: "0.2.0",
-    mode: "full",
-    host: "127.0.0.1",
-    port: 17841,
-    contextWindow: 256_000,
-    appName: "lca-codex",
-    browserHost: "launcher",
-    browserHostDescriptorPath: descriptorPath,
-    chromeExecutablePath: process.execPath,
-    storageStatePath: join(appHome, "browser", "storage-state.json"),
-    brokerSocketPath: defaultBrokerEndpoint(appHome),
-    headed: true,
-    proAvailable: false,
-    autoApproveToolCalls: false,
-    controlToken: "runtime-control-token-0123456789abcdef0123456789",
-    runtimeCommand: [process.execPath],
-    tunnel: {
-      binaryPath: join(root, "missing-tunnel-client"),
-      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
-      runtimeKeyFile,
-      profileDir: join(appHome, "tunnel", "profiles"),
-      profileName: "lca-codex",
-      alias: "lca-codex",
-    },
-  })}\n`);
-  try {
-    const result = await runCli([
-      "uninstall",
-      "--yes",
-      "--launcher-control",
-    ], {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      LCA_CODEX_HOME: appHome,
-      LCA_CODEX_BROWSER_HOST_DESCRIPTOR: descriptorPath,
-      LCA_CODEX_LAUNCHER_CONTROL_TOKEN: token,
-    });
-    expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 0, stderr: "" });
-    expect(result.stdout).toContain("Uninstalled and removed private application data");
-    expect(existsSync(appHome)).toBe(false);
+    const path = await runCli(["config", "path"], env);
+    expect(path.exitCode).toBe(0);
+    expect(path.stdout.trim()).toBe(join(root, "lca-token", "profiles", "work", "config.json"));
+
+    const explicit = await runCli(["--profile", "personal", "config", "path"], env);
+    expect(explicit.exitCode).toBe(0);
+    expect(explicit.stdout.trim()).toBe(join(root, "lca-token", "profiles", "personal", "config.json"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

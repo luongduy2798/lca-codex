@@ -9,7 +9,7 @@ function isHealthProbeActivity(detail: LcaCodexActivityDetail): boolean {
 }
 
 /**
- * Emit a bounded, payload-minimized activity record. The launcher recognizes this prefix and stores
+ * Emit a bounded, payload-minimized activity record. The runtime recognizes this prefix and stores
  * the JSON as a first-class Activity entry; other hosts still receive a readable diagnostic line.
  * Logging is deliberately best-effort and must never affect a browser turn or native tool call.
  */

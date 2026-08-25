@@ -22,10 +22,10 @@ import {
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
+  assertManagedChromeDisplayAvailable,
+  chatGptManagedChromeArgs,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
-import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
-import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { LcaCodexAdapterError } from "./adapter-error";
 import { activityDuration, logLcaCodexActivity } from "./activity";
@@ -56,6 +56,25 @@ const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dia
   .last();
 
 const CHATGPT_TOOL_CONFIRMATION_DIALOG_TEXT = /^Allow ChatGPT to use .+\?/i;
+
+export async function throwIfChatGptHumanVerificationChallenge(page: Page): Promise<void> {
+  const title = await page.title().catch(() => "");
+  const cloudflareChallenge = page.locator('iframe[src*="challenges.cloudflare.com"]').last();
+  const challengeVisible = await cloudflareChallenge.isVisible().catch(() => false);
+  if (!/^Just a moment\.\.\.$/i.test(title.trim()) && !challengeVisible) return;
+
+  throw new LcaCodexAdapterError(
+    "ChatGPT presented a human-verification challenge to the managed browser runtime. "
+    + "The stored ChatGPT login may still be valid. LCA Token does not attempt to solve or bypass human verification; "
+    + "complete any required account/browser verification through the normal ChatGPT UI, then retry.",
+    {
+      status: 409,
+      errorType: "invalid_request_error",
+      code: "chatgpt_human_verification_challenge",
+      retryable: false,
+    },
+  );
+}
 
 interface ChatGptSafeSystemDialogRule {
   matches: (text: string) => boolean;
@@ -175,7 +194,7 @@ const chatGptSessionFailureAlert = (page: Page): Locator => page
 export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<void> {
   if (!await chatGptSessionFailureAlert(page).isVisible().catch(() => false)) return;
   throw new LcaCodexAdapterError(
-    "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
+    "ChatGPT could not load the account subscription. Refresh the managed ChatGPT session and retry; sign out only if the error persists.",
     { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true },
   );
 }
@@ -289,12 +308,10 @@ export interface BrowserTurn {
 
 export interface ResolvedBrowserConfig {
   appName: string;
-  browserHost: "managed-chrome" | "launcher";
-  browserHostDescriptorPath?: string;
+  browserHost: "managed-chrome";
   storageStatePath: string;
   chromeExecutablePath: string;
   turnTimeoutMs?: number;
-  headed: boolean;
   autoApproveToolCalls: boolean;
 }
 
@@ -1000,24 +1017,17 @@ class ChatGptBrowserDiagnostics {
 
 export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
   const configured = provider.lcaCodex ?? {};
-  const browserHost = configured.browserHost ?? "managed-chrome";
-  const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
   const turnTimeoutMs = configured.turnTimeoutMs;
-  if (browserHost === "launcher" && !browserHostDescriptorPath) {
-    throw new Error("Launcher browser host requires lcaCodex.browserHostDescriptorPath");
-  }
   if (turnTimeoutMs !== undefined
     && (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0)) {
     throw new Error("LCA Codex turnTimeoutMs must be a positive finite number");
   }
   return {
     appName: configured.appName?.trim() || "lca-codex",
-    browserHost,
-    ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
+    browserHost: "managed-chrome",
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
     chromeExecutablePath: resolve(expandUserPath(configured.chromeExecutablePath?.trim() || defaultChromeExecutable())),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
-    headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
   };
 }
@@ -1073,7 +1083,6 @@ export class ChatGptBrowserWorker {
   private context?: BrowserContext;
   private page?: Page;
   private managedBrowserReady?: Promise<{ browser: Browser; context: BrowserContext }>;
-  private launcherHelper?: LauncherBrowserHelperClient;
   private verificationTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
 
@@ -1088,11 +1097,7 @@ export class ChatGptBrowserWorker {
         `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
       ));
     }
-    const useHelper = this.config.browserHost === "launcher" && process.env.LCA_CODEX_BROWSER_HELPER_PROCESS !== "1";
-    if (useHelper) {
-      this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
-    }
-    const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+    const run = Promise.resolve().then(() => this.runExclusive(turn));
     this.activeRuns.set(turn.traceId, run);
     void run.finally(() => {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
@@ -1112,11 +1117,6 @@ export class ChatGptBrowserWorker {
   }
 
   async close(): Promise<void> {
-    if (this.launcherHelper) {
-      const helper = this.launcherHelper;
-      this.launcherHelper = undefined;
-      await helper.close();
-    }
     await Promise.allSettled([...this.activeRuns.values()]);
     await this.verificationTail;
     const browser = this.browser;
@@ -1124,9 +1124,6 @@ export class ChatGptBrowserWorker {
     this.context = undefined;
     this.page = undefined;
     this.managedBrowserReady = undefined;
-    // For connectOverCDP, Playwright implements Browser.close as a transport disconnect; it does
-    // not close the launcher-owned Electron process. Always release that connection and its
-    // artifact directory instead of leaking one per timeout/helper lifecycle.
     if (browser) await browser.close();
   }
 
@@ -1178,25 +1175,10 @@ export class ChatGptBrowserWorker {
 
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
-    if (this.config.browserHost === "launcher") {
-      const connection = await connectLauncherBrowserHost(this.config.browserHostDescriptorPath!);
-      this.browser = connection.browser;
-      this.context = connection.context;
-      this.page = connection.page;
-      return this.page;
-    }
-    if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-      throw new Error(`LCA Codex login state is missing: ${this.config.storageStatePath}`);
-    }
-    if (!existsSync(this.config.chromeExecutablePath)) {
-      throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
-    }
-    this.browser = await chromium.launch({
-      executablePath: this.config.chromeExecutablePath,
-      headless: !this.config.headed,
-    });
-    this.context = await this.browser.newContext({ storageState: this.config.storageStatePath });
-    this.page = await this.context.newPage();
+    // Verification shares the managed BrowserContext used by isolated inference pages. Launching
+    // a second browser here would overwrite worker ownership and orphan the active context.
+    const { context } = await this.ensureManagedBrowser();
+    this.page = await context.newPage();
     return this.page;
   }
 
@@ -1209,9 +1191,11 @@ export class ChatGptBrowserWorker {
       if (!existsSync(this.config.chromeExecutablePath)) {
         throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
       }
+      assertManagedChromeDisplayAvailable();
       const browser = await chromium.launch({
         executablePath: this.config.chromeExecutablePath,
-        headless: !this.config.headed,
+        headless: false,
+        args: chatGptManagedChromeArgs(false),
       });
       const context = await browser.newContext({ storageState: this.config.storageStatePath });
       this.browser = browser;
@@ -1228,14 +1212,11 @@ export class ChatGptBrowserWorker {
   }
 
   /**
-   * A Codex turn owns one isolated Temporary Chat document. Reusing the same
-   * ChatGPT SPA page can retain the previous transcript and autocomplete DOM,
-   * so an @app lookup may select stale UI from the preceding turn.
+   * Every browser generation owns one isolated Temporary Chat document. Reusing a ChatGPT SPA
+   * page can leak the preceding prompt/transcript into an unrelated logical turn, so never retain
+   * a page across completed generations.
    */
   private async pageForNewTurn(): Promise<Page> {
-    if (this.config.browserHost === "launcher") {
-      throw new Error("Launcher turns require an explicitly leased browser surface");
-    }
     const { context } = await this.ensureManagedBrowser();
     return await context.newPage();
   }
@@ -1639,7 +1620,7 @@ export class ChatGptBrowserWorker {
     if (!localTools) {
       const composer = await this.activeComposer(page);
       // Playwright's multiline fill maps through an input action that ChatGPT's Lexical editor can
-      // collapse to the first paragraph on the launcher-owned Electron surface. Clear separately,
+      // collapse to the first paragraph on the managed ChatGPT surface. Clear separately,
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
       await composer.focus();
@@ -1665,9 +1646,11 @@ export class ChatGptBrowserWorker {
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
       await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
+    await throwIfChatGptHumanVerificationChallenge(page);
     try {
       await this.activeComposer(page);
     } catch {
+      await throwIfChatGptHumanVerificationChallenge(page);
       throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
     }
     await assertAuthenticatedChatGptPage(page);
@@ -1958,44 +1941,10 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
-    if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
-
-    const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-      phase: "start",
-      traceId: turn.traceId,
-      helperPid: process.pid,
-    });
-    const surfaceId = lease.surfaceId;
-    if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
-    let terminal: "completed" | "failed" | "aborted" = "completed";
-    let terminalMessage: string | undefined;
-    let originalError: unknown;
-    try {
-      return await this.runBrowserTurn(turn, surfaceId);
-    } catch (error) {
-      originalError = error;
-      terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
-      terminalMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
-      throw error;
-    } finally {
-      try {
-        await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-          phase: "end",
-          traceId: turn.traceId,
-          helperPid: process.pid,
-          status: terminal,
-          ...(terminalMessage ? { message: terminalMessage } : {}),
-        });
-      } catch (controlError) {
-        if (!originalError) throw controlError;
-        console.error(
-          `[lca-codex] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
-        );
-      }
-    }
+    return this.runBrowserTurn(turn);
   }
 
-  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
+  private async runBrowserTurn(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     const startedAt = Number.isFinite(turn.startedAt) && turn.startedAt! <= Date.now()
       ? turn.startedAt!
@@ -2027,7 +1976,6 @@ export class ChatGptBrowserWorker {
         ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
       });
     });
-    let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
     try {
@@ -2040,29 +1988,15 @@ export class ChatGptBrowserWorker {
       const deadline = this.config.turnTimeoutMs === undefined
         ? undefined
         : Date.now() + this.config.turnTimeoutMs;
-      let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
-        if (!launcherSurfaceId) {
-          const managed = await this.pageForNewTurn();
-          if (abortSignal.aborted) {
-            await managed.close().catch(() => {});
-            throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
-          }
-          return managed;
-        }
-        const connection = await connectLauncherBrowserHost(
-          this.config.browserHostDescriptorPath!,
-          browserStageTimeouts.browserPage,
-          launcherSurfaceId,
-          abortSignal,
-        );
+      const page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (abortSignal) => {
+        const managed = await this.pageForNewTurn();
         if (abortSignal.aborted) {
-          await connection.browser.close().catch(() => {});
+          await managed.close().catch(() => {});
           throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
         }
-        turnConnection = connection.browser;
-        return connection.page;
+        return managed;
       }, turn.abortSignal);
-      if (!launcherSurfaceId) managedPage = page;
+      managedPage = page;
       diagnosticPage = page;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
@@ -2072,6 +2006,7 @@ export class ChatGptBrowserWorker {
         page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
       ), turn.abortSignal);
       await diagnostics.capture(page, "temporary-chat-navigation-complete");
+      await throwIfChatGptHumanVerificationChallenge(page);
       await resolveChatGptBlockingSystemDialogs(
         page,
         async checkpoint => { await diagnostics.capture(page, checkpoint); },
@@ -2081,10 +2016,12 @@ export class ChatGptBrowserWorker {
           this.activeComposer(page)
         ), turn.abortSignal);
       } catch {
+        await throwIfChatGptHumanVerificationChallenge(page);
         throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
       }
       await diagnostics.capture(page, "composer-ready");
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
+        await throwIfChatGptHumanVerificationChallenge(page);
         await resolveChatGptBlockingSystemDialogs(
           page,
           async checkpoint => { await diagnostics.capture(page, checkpoint); },
@@ -2186,66 +2123,7 @@ export class ChatGptBrowserWorker {
       const pollScheduler = new ChatGptAdaptivePollScheduler();
       let lastResponseVisibleText = "";
       let previousActivitySignature = "";
-      const reattachLauncherSurface = async (): Promise<boolean> => {
-        if (!launcherSurfaceId || !turnConnection || turnConnection.isConnected()) return false;
-        if (turn.abortSignal?.aborted) {
-          throw new DOMException("LCA Codex turn aborted", "AbortError");
-        }
-        const staleConnection = turnConnection;
-        let connection: Awaited<ReturnType<typeof connectLauncherBrowserHost>>;
-        try {
-          connection = await connectLauncherBrowserHost(
-            this.config.browserHostDescriptorPath!,
-            browserStageTimeouts.browserPage,
-            launcherSurfaceId,
-            turn.abortSignal,
-          );
-        } catch (error) {
-          if (turn.abortSignal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-            throw new DOMException("LCA Codex turn aborted", "AbortError");
-          }
-          console.warn(
-            `[lca-codex] browser turn ${turn.traceId} could not reattach its launcher surface after a CDP disconnect: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          return false;
-        }
-        turnConnection = connection.browser;
-        page = connection.page;
-        diagnosticPage = page;
-        responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last();
-        try {
-          await networkObserver.attach(page);
-          logLcaCodexActivity("lca_codex.network_observer_reattached", {
-            traceId: turn.traceId,
-            attempt,
-            elapsedMs: activityDuration(startedAt),
-            ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
-          });
-        } catch (error) {
-          logLcaCodexActivity("lca_codex.network_observer_unavailable", {
-            traceId: turn.traceId,
-            attempt,
-            elapsedMs: activityDuration(startedAt),
-            ...(networkArmedAt === undefined ? {} : { sinceSendMs: activityDuration(networkArmedAt) }),
-            status: "reattach_failed",
-            reason: error instanceof Error ? error.name : "Error",
-          }, "warning");
-          // The browser surface itself is live, so do not kill or replay the in-flight generation
-          // merely because its replacement CDP network session could not attach. Preserve the
-          // existing tracker state and keep rendering this exact page; DOM state never substitutes
-          // for the missing network lifecycle completion signal.
-          console.warn(
-            `[lca-codex] browser turn ${turn.traceId} continuing generation after network observer reattach failed; network completion remains authoritative`,
-          );
-        }
-        await staleConnection.close().catch(() => {});
-        console.warn(
-          `[lca-codex] browser turn ${turn.traceId} reattached to its launcher surface after a CDP disconnect`,
-        );
-        return true;
-      };
       for (;;) {
-        if (await reattachLauncherSurface()) continue;
         if (page.isClosed()) {
           throw new Error("ChatGPT browser tab was closed; the Codex turn was terminated");
         }
@@ -2279,28 +2157,14 @@ export class ChatGptBrowserWorker {
           async checkpoint => { await diagnostics.capture(page, checkpoint); },
         );
 
-        let snapshot: ChatGptResponseDomSnapshot;
-        try {
-          snapshot = await this.responseDomSnapshot(responseTurn);
-        } catch (error) {
-          // A CDP transport can disappear between the loop's liveness check and the DOM evaluate.
-          // Reconnect to the same launcher-owned WebContents surface rather than replaying the
-          // ChatGPT turn (which could duplicate already-executed local tool side effects).
-          if (await reattachLauncherSurface()) continue;
-          throw error;
-        }
+        let snapshot = await this.responseDomSnapshot(responseTurn);
         const networkState = networkObserver.snapshot();
         if (networkState.completed) {
           // Probe data shows the owned conversation-turn-complete arrives after the final answer
           // has rendered. Re-read the DOM once at that authoritative terminal edge so finish()
           // serializes the newest canonical root without imposing a fixed post-network delay.
           // DOM still cannot create completion; this read only protects the final render tail.
-          try {
-            snapshot = await this.responseDomSnapshot(responseTurn);
-          } catch (error) {
-            if (await reattachLauncherSurface()) continue;
-            throw error;
-          }
+          snapshot = await this.responseDomSnapshot(responseTurn);
         }
         if (snapshot.visibleText) lastResponseVisibleText = snapshot.visibleText;
         const activitySignature = [
@@ -2389,7 +2253,7 @@ export class ChatGptBrowserWorker {
         await new Promise(resolveSleep => setTimeout(resolveSleep, nextPollMs));
       }
 
-      if (this.context && this.config.browserHost === "managed-chrome") {
+      if (this.context) {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
@@ -2421,13 +2285,7 @@ export class ChatGptBrowserWorker {
     } finally {
       prepared.release();
       await networkObserver.detach();
-      if (turnConnection) {
-        await turnConnection.close().catch(error => {
-          console.error(
-            `[lca-codex] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
-      } else if (managedPage && !managedPage.isClosed()) {
+      if (managedPage && !managedPage.isClosed()) {
         await managedPage.close().catch(error => {
           console.error(
             `[lca-codex] failed to close managed browser tab for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,

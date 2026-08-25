@@ -41,7 +41,7 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
-  test("preserves every native model in order and appends one LCA Codex model with reasoning choices", () => {
+  test("preserves every native model in order and appends one LCA Token model with reasoning choices", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig();
@@ -55,8 +55,8 @@ describe("native /models augmentation", () => {
     const routed = models[3]!;
     const limits = resolveLcaCodexContextLimits("low", 320_000);
     expect(routed).toMatchObject({
-      slug: "lca-codex",
-      display_name: "LCA-5.6 Sol",
+      slug: "lca-token",
+      display_name: "LCA Token",
       tool_mode: "code_mode_only",
       default_reasoning_level: "high",
       supported_reasoning_levels: [
@@ -89,7 +89,7 @@ describe("native /models augmentation", () => {
       .slice(0, 5)
       .map(model => model.slug);
 
-    expect(spawnOverrides).toEqual(["lca-codex", "gpt-5.6-sol"]);
+    expect(spawnOverrides).toEqual(["lca-token", "gpt-5.6-sol"]);
   });
 
   test("is idempotent, reserves the routed namespace, and hides Pro-only reasoning when unavailable", () => {
@@ -98,13 +98,13 @@ describe("native /models augmentation", () => {
     const polluted = source();
     (polluted.models as unknown[]).push(
       { slug: "foreign/gpt-5.6-sol", display_name: "foreign generic route" },
-      { slug: "lca-codex/pro", display_name: "unsupported namespaced route" },
-      { slug: "lca-codex", display_name: "existing shared route" },
+      { slug: "lca-token/pro", display_name: "unsupported namespaced route" },
+      { slug: "lca-token", display_name: "existing shared route" },
     );
     const first = augmentNativeModelCatalog(polluted, config);
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
-    const routed = models.filter(model => model.slug === "lca-codex");
+    const routed = models.filter(model => model.slug === "lca-token");
     expect(routed).toHaveLength(1);
     expect(routed[0]!.tool_mode).toBe("code_mode_only");
     expect(routed[0]!.multi_agent_version).toBe("v1");
@@ -117,14 +117,14 @@ describe("native /models augmentation", () => {
       context_window: 320_000,
       auto_compact_token_limit: 288_000,
     });
-    expect(models.some(model => model.slug === "lca-codex/pro")).toBe(false);
+    expect(models.some(model => model.slug === "lca-token/pro")).toBe(false);
   });
 
   test("honors an explicit Codex context override without replacing or reordering native models", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const result = augmentNativeModelCatalog(native, defaultConfig(), {
-      model: "lca-codex",
+      model: "lca-token",
       contextWindow: 371_851,
     });
     const models = result.models as Array<Record<string, unknown>>;
@@ -138,7 +138,7 @@ describe("native /models augmentation", () => {
     ]);
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[3]).toMatchObject({
-      slug: "lca-codex",
+      slug: "lca-token",
       context_window: 320_000,
       max_context_window: 320_000,
       auto_compact_token_limit: 288_000,
@@ -152,7 +152,7 @@ describe("native /models augmentation", () => {
 
     const result = augmentNativeModelCatalog(native, defaultConfig());
     const routed = (result.models as Array<Record<string, unknown>>)
-      .find(model => model.slug === "lca-codex");
+      .find(model => model.slug === "lca-token");
 
     expect(routed).toMatchObject({
       context_window: 872_000,
@@ -196,7 +196,7 @@ describe("native /models augmentation", () => {
 
     const result = augmentNativeModelCatalog(native, defaultConfig());
     const routed = (result.models as Array<Record<string, unknown>>)
-      .find(model => model.slug === "lca-codex");
+      .find(model => model.slug === "lca-token");
     expect(routed?.shell_type).toBe("shell_command");
     expect(routed?.tool_mode).toBe("code_mode_only");
   });
@@ -215,7 +215,7 @@ describe("native /models augmentation", () => {
 
     const result = augmentNativeModelCatalog(native, defaultConfig());
     const routed = (result.models as Array<Record<string, unknown>>)
-      .find(model => model.slug === "lca-codex");
+      .find(model => model.slug === "lca-token");
     expect(routed?.shell_type).toBe("terra-shell");
   });
 

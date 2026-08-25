@@ -1,7 +1,7 @@
 import { createLcaCodexAdapter } from "./adapters/lca-codex";
 import { closeChatGptBrowserWorkers } from "./adapters/lca-codex/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/lca-codex/turn-broker";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/lca-codex/turn-execution";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
@@ -27,11 +27,190 @@ import {
   extractCompactUserMessages,
 } from "./responses/compaction";
 import { parseRequest } from "./responses/parser";
-import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
-import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
+import {
+  expandPreviousResponseInput,
+  flushResponseState,
+  previousResponseProviderState,
+  rememberResponseState,
+} from "./responses/state";
+import {
+  namespacedToolName,
+  type AdapterEvent,
+  type CodexParsedRequest,
+  type CodexProviderContinuationState,
+} from "./types";
 import type { CodexProviderConfig } from "./types";
-import type { ProviderAdapter } from "./adapters/base";
+import type { AgentRequestTransport, ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import { PRODUCT_ID } from "./product";
+import { apiTokenAuthorized } from "./api-auth";
+import {
+  chatCompletionsToResponses,
+  responsesSseToChatCompletions,
+  responsesToChatCompletion,
+} from "./chat-completions";
+
+const AGENT_PROVIDER_STATE_KEY = "lca-token-agent";
+export const AGENT_TASK_ID_HEADER = "x-lca-task-id";
+const AGENT_TASK_ID_METADATA_KEY = "lca_task_id";
+const MAX_AGENT_TASK_ID_LENGTH = 512;
+const CHAT_TOOL_EXECUTION_TTL_MS = 30 * 60_000;
+const MAX_CHAT_TOOL_EXECUTIONS = 1_024;
+
+interface ChatToolExecution {
+  executionId: string;
+  conversationId: string;
+  updatedAt: number;
+}
+
+const chatToolExecutions = new Map<string, ChatToolExecution>();
+const chatExecutionCallKeys = new Map<string, Set<string>>();
+
+function chatToolExecutionKey(conversationId: string, callId: string): string {
+  return `${conversationId}:${callId}`;
+}
+
+function forgetChatToolExecutionKey(key: string): void {
+  const entry = chatToolExecutions.get(key);
+  if (!entry) return;
+  chatToolExecutions.delete(key);
+  const keys = chatExecutionCallKeys.get(entry.executionId);
+  keys?.delete(key);
+  if (keys?.size === 0) chatExecutionCallKeys.delete(entry.executionId);
+}
+
+function pruneChatToolExecutions(): void {
+  const cutoff = Date.now() - CHAT_TOOL_EXECUTION_TTL_MS;
+  for (const [key, entry] of chatToolExecutions) {
+    if (entry.updatedAt >= cutoff) continue;
+    forgetChatToolExecutionKey(key);
+  }
+  while (chatToolExecutions.size > MAX_CHAT_TOOL_EXECUTIONS) {
+    const oldest = chatToolExecutions.keys().next();
+    if (oldest.done) return;
+    forgetChatToolExecutionKey(oldest.value);
+  }
+}
+
+function rememberChatToolExecution(conversationId: string, executionId: string, callId: string): void {
+  pruneChatToolExecutions();
+  const key = chatToolExecutionKey(conversationId, callId);
+  forgetChatToolExecutionKey(key);
+  chatToolExecutions.set(key, { executionId, conversationId, updatedAt: Date.now() });
+  const keys = chatExecutionCallKeys.get(executionId) ?? new Set<string>();
+  keys.add(key);
+  chatExecutionCallKeys.set(executionId, keys);
+}
+
+function forgetChatToolExecution(executionId: string): void {
+  const keys = chatExecutionCallKeys.get(executionId);
+  if (!keys) return;
+  for (const key of [...keys]) forgetChatToolExecutionKey(key);
+}
+
+function trailingChatToolResultCallIds(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return [];
+  const callIds: string[] = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object" || Array.isArray(message)) break;
+    const item = message as { role?: unknown; tool_call_id?: unknown };
+    if (item.role !== "tool") break;
+    if (typeof item.tool_call_id !== "string" || item.tool_call_id.length === 0) return [];
+    callIds.push(item.tool_call_id);
+  }
+  return callIds.reverse();
+}
+
+function chatToolContinuationExecutionId(body: unknown, conversationId: string): string | undefined {
+  pruneChatToolExecutions();
+  const callIds = trailingChatToolResultCallIds(body);
+  if (callIds.length === 0) return undefined;
+  const entries = callIds.map(callId => chatToolExecutions.get(chatToolExecutionKey(conversationId, callId)));
+  if (entries.some(entry => !entry)) return undefined;
+  const executionIds = new Set(entries.map(entry => entry!.executionId));
+  return executionIds.size === 1 ? entries[0]!.executionId : undefined;
+}
+
+function agentTaskIdValue(value: unknown, source: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${source} must be a string`);
+  const trimmed = value.trim();
+  if (trimmed.length === 0) throw new Error(`${source} must not be empty`);
+  if (trimmed.length > MAX_AGENT_TASK_ID_LENGTH) {
+    throw new Error(`${source} must be at most ${MAX_AGENT_TASK_ID_LENGTH} characters`);
+  }
+  // Returned task ids are already opaque and safe to reuse verbatim. External harness ids are
+  // hashed so task-affinity map keys do not retain caller-provided identifiers or arbitrary text.
+  if (/^lca-task-[0-9a-f]{32}$/i.test(trimmed)) return trimmed.toLowerCase();
+  return `lca-task-${createHash("sha256").update(trimmed).digest("hex").slice(0, 32)}`;
+}
+
+function requestAgentTaskId(req: Request, body: unknown): string | undefined {
+  const raw = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : undefined;
+  const metadata = raw?.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata)
+    ? raw.metadata as Record<string, unknown>
+    : undefined;
+  const conversation = raw?.conversation;
+  const conversationId = typeof conversation === "string"
+    ? conversation
+    : conversation && typeof conversation === "object" && !Array.isArray(conversation)
+      ? (conversation as { id?: unknown }).id
+      : undefined;
+  const candidates = [
+    agentTaskIdValue(req.headers.get(AGENT_TASK_ID_HEADER), AGENT_TASK_ID_HEADER),
+    agentTaskIdValue(metadata?.[AGENT_TASK_ID_METADATA_KEY], `metadata.${AGENT_TASK_ID_METADATA_KEY}`),
+    agentTaskIdValue(conversationId, "conversation"),
+  ].filter((value): value is string => Boolean(value));
+  const unique = new Set(candidates);
+  if (unique.size > 1) {
+    throw new Error(
+      `${AGENT_TASK_ID_HEADER}, metadata.${AGENT_TASK_ID_METADATA_KEY}, and conversation must identify the same task when combined`,
+    );
+  }
+  return candidates[0];
+}
+
+function agentExecutionIdFromState(body: unknown): string | undefined {
+  const state = previousResponseProviderState(body)?.[AGENT_PROVIDER_STATE_KEY];
+  const value = state?.execution_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function agentConversationIdFromState(body: unknown): string | undefined {
+  const state = previousResponseProviderState(body)?.[AGENT_PROVIDER_STATE_KEY];
+  const value = state?.conversation_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function agentProviderState(
+  executionId: string | undefined,
+  conversationId: string | undefined,
+): CodexProviderContinuationState | undefined {
+  return executionId || conversationId
+    ? {
+        [AGENT_PROVIDER_STATE_KEY]: {
+          ...(executionId ? { execution_id: executionId } : {}),
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        },
+      }
+    : undefined;
+}
+
+function isAgentToolContinuation(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const input = (body as { input?: unknown }).input;
+  if (!Array.isArray(input) || input.length === 0) return false;
+  return input.every(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const type = (item as { type?: unknown }).type;
+    return type === "function_call_output" || type === "custom_tool_call_output";
+  });
+}
 
 export class HttpTurnCounter {
   private active = 0;
@@ -213,7 +392,18 @@ export async function responseRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: LcaCodexAdapterFactory = createLcaCodexAdapter,
+  options: {
+    agentOnly?: boolean;
+    agentTransport?: AgentRequestTransport;
+    agentConversationId?: string;
+    agentExecutionId?: string;
+    onAgentToolCall?: (callId: string, executionId: string, conversationId?: string) => void;
+    onAgentExecutionFinished?: (executionId: string) => void;
+  } = {},
 ): Promise<Response> {
+  if (options.agentOnly && !apiTokenAuthorized(req)) {
+    return formatErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+  }
   const nativeRequest = req.clone();
   let raw: unknown;
   try {
@@ -228,6 +418,9 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  if (options.agentOnly && (typeof requestedModel !== "string" || !isLcaCodexModelSlug(requestedModel))) {
+    return formatErrorResponse(400, "invalid_request_error", `The agent API supports only the ${PRODUCT_ID} model`);
+  }
   if (typeof requestedModel === "string" && !isLcaCodexModelSlug(requestedModel)) {
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
@@ -238,12 +431,28 @@ export async function responseRequest(
   const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
+  const agentToolContinuation = options.agentOnly && isAgentToolContinuation(raw);
   const expanded = expandPreviousResponseInput(raw);
+  const restoredAgentExecutionId = agentToolContinuation ? agentExecutionIdFromState(expanded) : undefined;
+  const restoredAgentConversationId = options.agentOnly ? agentConversationIdFromState(expanded) : undefined;
   let parsed: CodexParsedRequest;
   let route: LcaCodexModelDescriptor;
+  let agentExecutionId: string | undefined;
+  let agentConversationId: string | undefined;
   try {
+    const explicitAgentTaskId = options.agentOnly ? requestAgentTaskId(req, raw) : undefined;
     parsed = parseRequest(expanded);
     route = routeLcaCodexRequest(parsed, config);
+    if (options.agentOnly) {
+      if (explicitAgentTaskId && restoredAgentConversationId && explicitAgentTaskId !== restoredAgentConversationId) {
+        throw new Error(`${AGENT_TASK_ID_HEADER} conflicts with the task restored by previous_response_id`);
+      }
+      agentExecutionId = restoredAgentExecutionId ?? options.agentExecutionId ?? randomUUID();
+      agentConversationId = explicitAgentTaskId
+        ?? restoredAgentConversationId
+        ?? options.agentConversationId
+        ?? `lca-task-${randomUUID().replace(/-/g, "").slice(0, 32)}`;
+    }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -252,6 +461,13 @@ export async function responseRequest(
       409,
       "invalid_request_error",
       "Local continuation state for previous_response_id is unavailable; refusing to run LCA Codex with partial Codex context. Compact the Codex task or start a new task before retrying.",
+    );
+  }
+  if (agentToolContinuation && !restoredAgentExecutionId) {
+    return formatErrorResponse(
+      409,
+      "invalid_request_error",
+      "Private agent execution state for this tool continuation is unavailable; start a new agent turn instead of resuming the old tool call.",
     );
   }
 
@@ -273,7 +489,25 @@ export async function responseRequest(
   else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
   const run = async () => {
     try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => queue.push(event));
+      await adapter.runTurn!(parsed, {
+        headers: req.headers,
+        abortSignal: abort.signal,
+        ...(agentExecutionId ? {
+          agentRequest: {
+            executionId: agentExecutionId,
+            transport: options.agentTransport ?? "responses",
+            ...(agentConversationId ? { conversationId: agentConversationId } : {}),
+          },
+        } : {}),
+      }, event => {
+        if (agentExecutionId && event.type === "tool_call_start") {
+          options.onAgentToolCall?.(event.id, agentExecutionId, agentConversationId);
+        }
+        if (agentExecutionId && ((event.type === "done" && event.endTurn) || event.type === "error")) {
+          options.onAgentExecutionFinished?.(agentExecutionId);
+        }
+        queue.push(event);
+      });
     } catch (error) {
       queue.push({ type: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -296,7 +530,12 @@ export async function responseRequest(
       {
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         ...(compaction ? { compaction: true } : {
-          onCompletedResponse: (response: Record<string, unknown>) => rememberResponseState(parsed._rawBody, response, { force: true }),
+          onCompletedResponse: (response: Record<string, unknown>, providerState) => rememberResponseState(parsed._rawBody, response, {
+            force: true,
+            ...(providerState || agentExecutionId || agentConversationId
+              ? { providerState: { ...(providerState ?? {}), ...(agentProviderState(agentExecutionId, agentConversationId) ?? {}) } }
+              : {}),
+          }),
         }),
       },
     );
@@ -306,21 +545,128 @@ export async function responseRequest(
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
+        ...(agentConversationId ? { [AGENT_TASK_ID_HEADER]: agentConversationId } : {}),
       },
     });
   }
 
   await run();
   const events = await queue.collect();
+  let providerState: CodexProviderContinuationState | undefined;
   const json = buildResponseJSON(events, responseModel, {
     hideThinkingSummary: parsed.options.hideThinkingSummary,
     toolNsMap: maps.toolNsMap,
     freeformToolNames: maps.freeformToolNames,
     toolSearchToolNames: maps.toolSearchToolNames,
     ...(compaction ? { compaction: true } : {}),
+    onProviderState: state => { providerState = state; },
   });
-  if (!compaction) rememberResponseState(parsed._rawBody, json, { force: true });
-  return Response.json(json);
+  if (!compaction) rememberResponseState(parsed._rawBody, json, {
+    force: true,
+    ...(providerState || agentExecutionId || agentConversationId
+      ? { providerState: { ...(providerState ?? {}), ...(agentProviderState(agentExecutionId, agentConversationId) ?? {}) } }
+      : {}),
+  });
+  return Response.json(json, agentConversationId
+    ? { headers: { [AGENT_TASK_ID_HEADER]: agentConversationId } }
+    : undefined);
+}
+
+export function agentModelsRequest(req: Request): Response {
+  if (!apiTokenAuthorized(req)) {
+    return formatErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+  }
+  return Response.json({
+    object: "list",
+    data: [{
+      id: PRODUCT_ID,
+      object: "model",
+      created: 0,
+      owned_by: PRODUCT_ID,
+    }],
+  });
+}
+
+export async function chatCompletionsRequest(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: LcaCodexAdapterFactory = createLcaCodexAdapter,
+): Promise<Response> {
+  if (!apiTokenAuthorized(req)) {
+    return formatErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+  }
+  let conversion: ReturnType<typeof chatCompletionsToResponses>;
+  let chatBody: unknown;
+  let chatTaskId: string | undefined;
+  try {
+    chatBody = await readJsonRequestBody(req);
+    chatTaskId = requestAgentTaskId(req, chatBody);
+    conversion = chatCompletionsToResponses(chatBody);
+  } catch (error) {
+    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  const headers = new Headers(req.headers);
+  headers.set("content-type", "application/json");
+  if (chatTaskId) headers.set(AGENT_TASK_ID_HEADER, chatTaskId);
+  const conversationId = chatTaskId ?? conversion.conversationId;
+  const continuedExecutionId = conversationId
+    ? chatToolContinuationExecutionId(chatBody, conversationId)
+    : undefined;
+  const internal = new Request("http://127.0.0.1/v1/agent/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(conversion.responsesBody),
+    signal: req.signal,
+  });
+  const response = await responseRequest(internal, config, adapterFactory, {
+    agentOnly: true,
+    agentTransport: "chat_completions",
+    ...(conversion.conversationId ? { agentConversationId: conversion.conversationId } : {}),
+    ...(continuedExecutionId ? { agentExecutionId: continuedExecutionId } : {}),
+    onAgentToolCall: (callId, executionId, activeConversationId) => {
+      if (activeConversationId) rememberChatToolExecution(activeConversationId, executionId, callId);
+    },
+    onAgentExecutionFinished: forgetChatToolExecution,
+  });
+  if (!response.ok) return response;
+  const taskId = response.headers.get(AGENT_TASK_ID_HEADER);
+  const requestedModel = String(conversion.responsesBody.model);
+  if (conversion.stream) {
+    if (!response.body) return formatErrorResponse(502, "invalid_response_error", "Responses core returned an empty stream");
+    return new Response(responsesSseToChatCompletions(
+      response.body,
+      requestedModel,
+      conversion.includeUsage,
+      conversion.textualXmlToolProtocol,
+    ), {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        ...(taskId ? { [AGENT_TASK_ID_HEADER]: taskId } : {}),
+      },
+    });
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await response.json() as Record<string, unknown>;
+  } catch {
+    return formatErrorResponse(502, "invalid_response_error", "Responses core returned invalid JSON");
+  }
+  if (body.error && typeof body.error === "object") {
+    const error = body.error as { message?: unknown; type?: unknown; code?: unknown };
+    const normalized = {
+      message: typeof error.message === "string" ? error.message : "Chat Completions turn failed",
+      type: typeof error.type === "string" ? error.type : "server_error",
+      code: typeof error.code === "string" ? error.code : null,
+    };
+    return Response.json({ error: normalized }, { status: httpStatusFromTerminalError(normalized) });
+  }
+  return Response.json(
+    responsesToChatCompletion(body, requestedModel, conversion.textualXmlToolProtocol),
+    taskId ? { headers: { [AGENT_TASK_ID_HEADER]: taskId } } : undefined,
+  );
 }
 
 export async function compactRequest(
@@ -431,7 +777,7 @@ export function startServer(
   const turnBroker = TurnBroker.forSocket(config.brokerSocketPath);
   void turnBroker.listen().catch(error => {
     console.error(
-      `[lca-codex] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      `[${PRODUCT_ID}] turn broker endpoint is unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   });
   let draining = false;
@@ -460,7 +806,7 @@ export function startServer(
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
-          service: "lca-codex",
+          service: PRODUCT_ID,
           version: VERSION,
           mode: config.mode,
           pid: process.pid,
@@ -486,7 +832,7 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/admin/codex-lifecycle") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
-        return readJsonRequestBody(req).then(raw => {
+        return readJsonRequestBody(req).then(async raw => {
           if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
             return formatErrorResponse(400, "invalid_request_error", "Codex lifecycle event must be an object");
           }
@@ -506,7 +852,12 @@ export function startServer(
           } else if (method !== "turn/start" && method !== "turn/started") {
             return formatErrorResponse(400, "invalid_request_error", `Unsupported Codex lifecycle method: ${method || "missing"}`);
           }
-          return Response.json({ status: "ok", method, cancelled_browser_turns: cancelled, ...activity() });
+          return Response.json({
+            status: "ok",
+            method,
+            cancelled_browser_turns: cancelled,
+            ...activity(),
+          });
         }).catch(error => formatErrorResponse(
           400,
           "invalid_request_error",
@@ -534,7 +885,7 @@ export function startServer(
           return formatErrorResponse(
             503,
             "server_error",
-            "lca-codex is draining for a requested service operation",
+            `${PRODUCT_ID} is draining for a requested service operation`,
           );
         }
         return httpTurns.track(async () => {
@@ -551,6 +902,9 @@ export function startServer(
           return response;
         }, req.signal);
       }
+      if (req.method === "GET" && url.pathname === "/v1/agent/models") {
+        return agentModelsRequest(req);
+      }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
           status: 426,
@@ -558,15 +912,23 @@ export function startServer(
         });
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
         return httpTurns.track(() => responseRequest(req, config), req.signal);
       }
+      if (req.method === "POST" && url.pathname === "/v1/agent/responses") {
+        if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
+        return httpTurns.track(() => responseRequest(req, config, createLcaCodexAdapter, { agentOnly: true }), req.signal);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+        if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
+        return httpTurns.track(() => chatCompletionsRequest(req, config), req.signal);
+      }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
         return httpTurns.track(() => compactRequest(req, config), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
-        if (draining) return formatErrorResponse(503, "server_error", "lca-codex is draining for a requested service operation");
+        if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
         return httpTurns.track(() => nativeSearchRequest(req, dependencies.fetchUpstream), req.signal);
       }
       return new Response("Not found", { status: 404 });
@@ -588,13 +950,13 @@ export function startServer(
       if (failures.length > 0) {
         process.exitCode = 1;
         for (const failure of failures) {
-          console.error(`[lca-codex] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+          console.error(`[${PRODUCT_ID}] shutdown cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
         }
       }
       await server.stop(true);
     })().catch(error => {
       process.exitCode = 1;
-      console.error(`[lca-codex] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[${PRODUCT_ID}] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
   process.once("SIGINT", shutdown);

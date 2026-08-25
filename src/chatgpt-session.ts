@@ -1,6 +1,36 @@
 import type { Locator, Page } from "playwright-core";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+const CHATGPT_BACKGROUND_WINDOW_ARGS = [
+  "--window-position=-10000,-10000",
+  "--window-size=1440,1000",
+] as const;
+
+export function chatGptHeadlessChromeArgs(): string[] {
+  return [
+    "--no-first-run",
+    "--no-default-browser-check",
+  ];
+}
+
+export function chatGptManagedChromeArgs(showWindow = false): string[] {
+  return [
+    ...chatGptHeadlessChromeArgs(),
+    ...(showWindow ? [] : CHATGPT_BACKGROUND_WINDOW_ARGS),
+  ];
+}
+
+export function assertManagedChromeDisplayAvailable(
+  platform = process.platform,
+  display = process.env.DISPLAY,
+): void {
+  if (platform !== "linux" || display?.trim()) return;
+  throw new Error(
+    "Managed ChatGPT Chrome runs headed on Linux and requires a display. "
+    + "Run LCA Token under Xvfb (for example `xvfb-run -a make serve`) or provide DISPLAY.",
+  );
+}
+
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -38,13 +68,22 @@ async function anyVisible(locator: Locator): Promise<boolean> {
   return false;
 }
 
-export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> {
-  const composer = page.locator(
-    CHATGPT_COMPOSER_SELECTOR,
-  );
-  if (!await anyVisible(composer)) {
-    throw new Error("ChatGPT authentication could not be verified: no visible composer is present");
-  }
+export async function assertAuthenticatedChatGptPage(page: Page, timeoutMs = 10_000): Promise<void> {
+  const composer = page.locator(CHATGPT_COMPOSER_SELECTOR);
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await anyVisible(composer)) {
+      // ChatGPT hydrates the composer in more than one DOM pass. A visible editor can be
+      // replaced immediately after Playwright observes it, which made login verification
+      // fail even though the authenticated composer reappeared a moment later. Require the
+      // evidence to survive one short follow-up sample, but keep the check fail-closed.
+      await page.waitForTimeout(100);
+      if (await anyVisible(composer)) return;
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(Math.min(100, Math.max(1, deadline - Date.now())));
+  } while (Date.now() <= deadline);
+  throw new Error("ChatGPT authentication could not be verified: no visible composer is present");
 }
 
 export async function assertTemporaryChatPage(page: Page): Promise<void> {

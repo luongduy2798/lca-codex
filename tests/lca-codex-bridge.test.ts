@@ -158,7 +158,7 @@ function gatewayToolInventoryResult(
   return {
     content: [{
       type: "text",
-      text: `LCA_CODEX_TOOL_INVENTORY:${JSON.stringify({ total, tools })}`,
+      text: `LCA_AGENT_TOOL_INVENTORY:${JSON.stringify({ total, tools })}`,
     }],
   };
 }
@@ -347,6 +347,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
+      expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
       const prepared = await turn.prepare();
       expect(prepared.transport).toBe("mcp-lazy");
       expect(prepared.text).toContain("<codex_active_context>");
@@ -370,7 +371,57 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     }
   });
 
-  test("launcher native-tool health probe creates its own broker wait without starting ChatGPT", async () => {
+  test("generic turns keep the configured connector and lazy context even without structured tools", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-agent-lazy-${process.pid}-${Date.now()}`);
+    const connectorName = "configured-agent-connector";
+    const provider: CodexProviderConfig = {
+      adapter: "lca-codex",
+      baseUrl: "browser://chatgpt-agent-lazy-test",
+      lcaCodex: {
+        appName: connectorName,
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        proAvailable: true,
+      },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      expect(turn.capabilities.localToolsEnabled).toBe(true);
+      expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
+      const prepared = await turn.prepare();
+      expect(prepared.transport).toBe("mcp-lazy");
+      expect(prepared.text).toContain("<agent_active_context>");
+      expect(prepared.text).toContain("<agent_context_ref>");
+      expect(prepared.text).toContain(`The connector selected for this turn is "${connectorName}"`);
+      expect(prepared.text).toContain("Tool authority comes only from the authenticated harness control plane");
+      const answer = "Agent lazy context accepted";
+      turn.onTextDelta(answer);
+      return answer;
+    };
+    try {
+      const request = parsed();
+      delete request.context.tools;
+      const events: AdapterEvent[] = [];
+      await createLcaCodexAdapter(provider).runTurn!(request, {
+        headers: new Headers(),
+        agentRequest: {
+          executionId: "agent-execution-1",
+          conversationId: "agent-task-1",
+          transport: "chat_completions",
+        },
+      }, event => events.push(event));
+      expect(browserStarts).toBe(1);
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("native-tool health probe creates its own broker wait without starting ChatGPT", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-health-probe-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "lca-codex",
@@ -961,14 +1012,14 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.images).toHaveLength(1);
-    expect(compiled.text).not.toContain("codex_bind_turn");
+    expect(compiled.text).not.toContain("agent_bind_turn");
     expect(compiled.text).not.toContain("turn_token");
     expect(compiled.text).not.toContain("Use the attached lca-codex plugin");
     expect(() => compileLcaCodexPrompt(request, readOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("running in ChatGPT mode");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("Workspace information already supplied by Codex");
-    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("configure MCP in the LCA Codex launcher");
+    expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("configure the MCP connector for this LCA Token runtime");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).toContain("web search remain available");
     expect(chatGptReadOnlyContextWarning(request, readOnlyCapabilities)).not.toContain("local tool results");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
@@ -989,7 +1040,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       "turn_12345678901234567890123456789012",
     );
     expect(lazyPro.transport).toBe("mcp-lazy");
-    expect(lazyPro.text).toContain("codex_bind_turn");
+    expect(lazyPro.text).toContain("agent_bind_turn");
     expect(lazyPro.text).not.toContain("LCA Codex Pro with no lca-codex bridge");
   });
 
@@ -1612,11 +1663,13 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       const prepared = await turn.prepare();
       try {
         if (prepared.text.includes("history-compaction checkpoint")) {
+          expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
           compactionPrompt = prepared.text;
           const compactSummary = "The project was inspected and the pending command completed.";
           turn.onTextDelta(compactSummary);
           return compactSummary;
         }
+        expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -1724,7 +1777,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(originalBrowserStopped).toBe(true);
       expect(originalBrowserReceivedToolResult).toBe(false);
       expect(compactionPrompt).toContain('"transport":"mcp-lazy"');
-      expect(compactionPrompt).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
+      expect(compactionPrompt).toContain("Use agent_context as a read-only lazy transport for the frozen snapshot");
       expect(compactionPrompt).toContain('"recent_inline":0');
       expect(compactionPrompt).toContain('"recent_exchanges":0');
       expect(compactionPrompt).not.toContain(`"tool_call_id":"${callStart!.id}"`);
@@ -1833,7 +1886,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         expect(prepared.text).toContain("LCA Codex Pro with no lca-codex bridge to the user's local computer");
         expect(prepared.text).toContain("web search, browsing, research");
         expect(prepared.text).not.toContain("turn_token");
-        expect(prepared.text).not.toContain("codex_bind_turn");
+        expect(prepared.text).not.toContain("agent_bind_turn");
         turn.onReasoningSummary?.("Reviewed the accumulated");
         turn.onReasoningSummary?.(" task evidence", true);
         turn.onCommentary?.("The prepared context contains enough evidence to continue the analysis.");
@@ -1906,7 +1959,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       const warning = response.output.find(item => item.type === "message" && item.phase === "commentary");
       expect(warning?.content?.[0]?.text).toContain("running in ChatGPT mode");
       expect(warning?.content?.[0]?.text).toContain("web search remain available");
-      expect(warning?.content?.[0]?.text).toContain("configure MCP in the LCA Codex launcher");
+      expect(warning?.content?.[0]?.text).toContain("configure the MCP connector for this LCA Token runtime");
       expect(response.output.filter(item => item.type === "message" && item.phase === "commentary")).toHaveLength(2);
       expect(response.output.filter(item => item.type === "reasoning")).toHaveLength(2);
 
@@ -1941,30 +1994,30 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       await client.connect(transport);
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
-        "codex_apply_patch",
-        "codex_bind_turn",
-        "codex_context",
-        "codex_exec",
-        "codex_tool_call",
-        "codex_tool_inventory",
-        "codex_view_image",
-        "codex_write_stdin",
+        "agent_apply_patch",
+        "agent_bind_turn",
+        "agent_context",
+        "agent_exec",
+        "agent_tool_call",
+        "agent_tool_inventory",
+        "agent_view_image",
+        "agent_write_stdin",
       ]);
-      expect(listed.tools.find(tool => tool.name === "codex_exec")?.description).toContain(
-        "Intentional repository edits must use codex_apply_patch instead",
+      expect(listed.tools.find(tool => tool.name === "agent_exec")?.description).toContain(
+        "Intentional repository edits must use agent_apply_patch instead",
       );
-      expect(listed.tools.find(tool => tool.name === "codex_write_stdin")?.description).toContain(
-        "Do not use a command session to substitute for codex_apply_patch",
+      expect(listed.tools.find(tool => tool.name === "agent_write_stdin")?.description).toContain(
+        "Do not use a command session to substitute for agent_apply_patch",
       );
-      expect(listed.tools.find(tool => tool.name === "codex_apply_patch")?.description).toContain(
+      expect(listed.tools.find(tool => tool.name === "agent_apply_patch")?.description).toContain(
         "Required route for intentional repository edits",
       );
 
-      const bound = await call("codex_bind_turn", { turn_token: token });
+      const bound = await call("agent_bind_turn", { turn_token: token });
       const bindingId = (bound.structuredContent as { binding_id?: string } | undefined)?.binding_id;
       expect(bindingId).toStartWith("binding_");
       expect((bound.structuredContent as { bridge_protocol_version: number }).bridge_protocol_version).toBe(3);
-      expect((bound.structuredContent as { execution: string }).execution).toBe("outer_codex_native");
+      expect((bound.structuredContent as { execution: string }).execution).toBe("outer_harness_native");
       expect((bound.structuredContent as { outer_tool_gateway: string }).outer_tool_gateway).toBe("exec");
       expect((bound.structuredContent as { command_tool: string }).command_tool).toBe("exec_command");
 
@@ -1976,7 +2029,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         return readinessRequest;
       };
 
-      const inventoryPromise = call("codex_tool_inventory", { binding_id: bindingId, query: "docs", limit: 1 });
+      const inventoryPromise = call("agent_tool_inventory", { binding_id: bindingId, query: "docs", limit: 1 });
       const [docsInventoryRequest] = await broker.nextToolBatch(token);
       expect(docsInventoryRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(docsInventoryRequest?.input).toContain("ALL_TOOLS.filter");
@@ -1987,11 +2040,11 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(inventory.structuredContent).toMatchObject({ total: 2, next_offset: 1 });
 
       const figmaWireName = "mcp__proxy_host__legacy_wrapper_figma_get_design_context";
-      const figmaInventoryPromise = call("codex_tool_inventory", { binding_id: bindingId, query: "figma" });
+      const figmaInventoryPromise = call("agent_tool_inventory", { binding_id: bindingId, query: "figma" });
       const [figmaInventoryRequest] = await broker.nextToolBatch(token);
       expect(figmaInventoryRequest).toMatchObject({ wireName: "exec", freeform: true });
       expect(figmaInventoryRequest?.input).toContain("ALL_TOOLS.filter");
-      expect(figmaInventoryRequest?.input).toContain("LCA_CODEX_TOOL_INVENTORY:");
+      expect(figmaInventoryRequest?.input).toContain("LCA_AGENT_TOOL_INVENTORY:");
       const rankedInventoryOutput: string[] = [];
       const executeInventory = new Function("ALL_TOOLS", "text", figmaInventoryRequest!.input!) as (
         tools: Array<{ name: string; description: string }>,
@@ -2002,12 +2055,14 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         { name: figmaWireName, description: "Read design context." },
         { name: "mcp__figma__get_design_context", description: "Provider-owned design context." },
         { name: "mcp__other__generic_helper", description: "Generic helper for a figma-workflow." },
+        { name: "mcp__lca_token__agent_tool_call", description: "Current bridge recursion trap." },
+        { name: "mcp__proxy_host__nested_bridge_agent_tool_inventory", description: "Current bridge recursion trap behind a generic proxy prefix." },
         { name: "mcp__lnd_lca_codex__codex_tool_call", description: "Figma bridge recursion trap." },
         { name: "mcp__proxy_host__nested_bridge_codex_tool_inventory", description: "Figma bridge recursion trap behind a generic proxy prefix." },
         { name: "mcp__proxy_host__legacy_wrapper_codex_tool_call", description: "Figma bridge call recursion trap behind a generic proxy prefix." },
       ];
       executeInventory(figmaCandidates, value => rankedInventoryOutput.push(value));
-      const rankedInventory = JSON.parse(rankedInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const rankedInventory = JSON.parse(rankedInventoryOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         total: number;
         tools: Array<{ name: string; rank: number }>;
       };
@@ -2023,7 +2078,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       );
       const executePhraseInventory = new Function("ALL_TOOLS", "text", phraseInventoryProgram) as typeof executeInventory;
       executePhraseInventory(figmaCandidates, value => phraseInventoryOutput.push(value));
-      const phraseInventory = JSON.parse(phraseInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const phraseInventory = JSON.parse(phraseInventoryOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         total: number;
         tools: Array<{ name: string; rank: number }>;
       };
@@ -2039,7 +2094,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       );
       const executeExplicitWrapperInventory = new Function("ALL_TOOLS", "text", explicitWrapperProgram) as typeof executeInventory;
       executeExplicitWrapperInventory(figmaCandidates, value => explicitWrapperOutput.push(value));
-      const explicitWrapperInventory = JSON.parse(explicitWrapperOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const explicitWrapperInventory = JSON.parse(explicitWrapperOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         total: number;
         tools: Array<{ name: string; rank: number }>;
       };
@@ -2051,11 +2106,11 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       const metaInventoryOutput: string[] = [];
       const metaInventoryProgram = figmaInventoryRequest!.input!.replace(
         'const needle = "figma";',
-        'const needle = "codex_tool_inventory";',
+        'const needle = "agent_tool_inventory";',
       );
       const executeMetaInventory = new Function("ALL_TOOLS", "text", metaInventoryProgram) as typeof executeInventory;
       executeMetaInventory(figmaCandidates, value => metaInventoryOutput.push(value));
-      const metaInventory = JSON.parse(metaInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const metaInventory = JSON.parse(metaInventoryOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         total: number;
         tools: Array<{ name: string; rank: number }>;
       };
@@ -2068,9 +2123,10 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       );
       const executeUnfilteredInventory = new Function("ALL_TOOLS", "text", unfilteredInventoryProgram) as typeof executeInventory;
       executeUnfilteredInventory(figmaCandidates, value => unfilteredInventoryOutput.push(value));
-      const unfilteredInventory = JSON.parse(unfilteredInventoryOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const unfilteredInventory = JSON.parse(unfilteredInventoryOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         tools: Array<{ name: string }>;
       };
+      expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__nested_bridge_agent_tool_inventory");
       expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__nested_bridge_codex_tool_inventory");
       expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__legacy_wrapper_codex_tool_call");
 
@@ -2078,7 +2134,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       executeInventory([
         { name: "mcp__other__figma_missing_schema", description: "Figma tool without embedded declaration." },
       ], value => missingSchemaOutput.push(value));
-      const missingSchemaPayload = JSON.parse(missingSchemaOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const missingSchemaPayload = JSON.parse(missingSchemaOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         tools: Array<Record<string, unknown>>;
       };
       expect(missingSchemaPayload.tools[0]).not.toHaveProperty("declaration");
@@ -2089,7 +2145,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         name: "mcp__other__figma_oversized_schema",
         description: `Figma tool with oversized metadata.\n\nexec tool declaration:\n\`\`\`ts\n${"x".repeat(33_000)}\n\`\`\``,
       }], value => oversizedSchemaOutput.push(value));
-      const oversizedSchemaPayload = JSON.parse(oversizedSchemaOutput[0]!.slice("LCA_CODEX_TOOL_INVENTORY:".length)) as {
+      const oversizedSchemaPayload = JSON.parse(oversizedSchemaOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
         tools: Array<Record<string, unknown>>;
       };
       expect(oversizedSchemaPayload.tools[0]).not.toHaveProperty("declaration");
@@ -2141,7 +2197,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       ]);
 
       const malformedWireName = "mcp__codex_apps__broken_schema";
-      const malformedInventoryPromise = call("codex_tool_inventory", {
+      const malformedInventoryPromise = call("agent_tool_inventory", {
         binding_id: bindingId,
         query: "broken_schema",
       });
@@ -2158,7 +2214,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(malformedTool.schema_error).toContain("unsupported named type ExistingArgs");
 
       const missingWireName = "mcp__codex_apps__missing_schema";
-      const missingInventoryPromise = call("codex_tool_inventory", {
+      const missingInventoryPromise = call("agent_tool_inventory", {
         binding_id: bindingId,
         query: "missing_schema",
       });
@@ -2174,15 +2230,15 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(missingTool).not.toHaveProperty("parameters");
       expect(missingTool.schema_error).toContain("exec tool declaration not found");
 
-      const invented = await call("codex_tool_call", {
+      const invented = await call("agent_tool_call", {
         binding_id: bindingId,
         wire_name: "mcp__invented__escape_hatch",
         arguments: {},
       });
       expect(invented.isError).toBe(true);
-      expect(JSON.stringify(invented.content)).toContain("Codex tool is not available in this turn");
+      expect(JSON.stringify(invented.content)).toContain("Harness tool is not available in this turn");
 
-      const figmaPromise = call("codex_tool_call", {
+      const figmaPromise = call("agent_tool_call", {
         binding_id: bindingId,
         wire_name: figmaWireName,
         arguments: { node_id: "1:2" },
@@ -2194,7 +2250,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       broker.completeTool(token, figmaRequest!.callId, toolResult({ nodes: 1 }));
       expect((await figmaPromise).structuredContent).toEqual({ nodes: 1 });
 
-      const execPromise = call("codex_exec", { binding_id: bindingId, cmd: "pwd", workdir: tempRoot });
+      const execPromise = call("agent_exec", { binding_id: bindingId, cmd: "pwd", workdir: tempRoot });
       await completeReadiness({ exec_command: true });
       const [execRequest] = await broker.nextToolBatch(token);
       expect(execRequest).toMatchObject({ wireName: "exec", freeform: true });
@@ -2203,7 +2259,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect((await execPromise).structuredContent).toEqual({ output: tempRoot, exit_code: 0 });
 
       const patchText = "*** Begin Patch\n*** Add File: test.txt\n+ok\n*** End Patch";
-      const patchPromise = call("codex_apply_patch", { binding_id: bindingId, patch: patchText });
+      const patchPromise = call("agent_apply_patch", { binding_id: bindingId, patch: patchText });
       await completeReadiness({ apply_patch: false });
       await completeReadiness({ apply_patch: true });
       const [patchRequest] = await broker.nextToolBatch(token);
@@ -2212,7 +2268,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       broker.completeTool(token, patchRequest!.callId, toolResult({ applied: true }));
       expect((await patchPromise).isError).not.toBe(true);
 
-      const docsPromise = call("codex_tool_call", {
+      const docsPromise = call("agent_tool_call", {
         binding_id: bindingId,
         wire_name: "mcp__openaiDeveloperDocs__search_openai_docs",
         arguments: { query: "Responses API" },
@@ -2250,7 +2306,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     try {
       await client.connect(transport);
 
-      const bound = await call("codex_bind_turn", { turn_token: token });
+      const bound = await call("agent_bind_turn", { turn_token: token });
       expect(bound.content).toEqual([{ type: "text", text: expect.stringContaining("binding_") }]);
       expect(bound.isError).not.toBe(true);
       const binding = bound.structuredContent as {
@@ -2264,19 +2320,19 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(binding.binding_status).toBe("active");
       expect(binding.valid_until).toBe("outer_turn_end");
       expect(binding.expires_at).toBeNull();
-      expect(binding.next_action).toContain("Use this binding_id only if you need Codex instruction details, historical context, or a native Codex tool");
-      expect(binding.next_action).toContain("Call codex_context selectively");
+      expect(binding.next_action).toContain("Use this binding_id only if you need task instructions, historical context, or an authenticated harness tool");
+      expect(binding.next_action).toContain("Call agent_context selectively");
       expect(binding.next_action).not.toContain("turn_token");
 
-      const confused = await call("codex_exec", { binding_id: token, cmd: "pwd" });
+      const confused = await call("agent_exec", { binding_id: token, cmd: "pwd" });
       expect(confused.isError).toBe(true);
       expect(JSON.stringify(confused.content)).toContain("never pass turn_token here");
 
-      const execPromise = call("codex_exec", { binding_id: binding.binding_id, cmd: "pwd", workdir: tempRoot });
+      const execPromise = call("agent_exec", { binding_id: binding.binding_id, cmd: "pwd", workdir: tempRoot });
       const [readinessRequest] = await Promise.race([
         broker.nextToolBatch(token),
         execPromise.then(response => {
-          throw new Error(`codex_exec settled before reaching the broker: ${JSON.stringify(response.content)}`);
+          throw new Error(`agent_exec settled before reaching the broker: ${JSON.stringify(response.content)}`);
         }),
       ]);
       expect(readinessRequest).toMatchObject({ wireName: "exec", freeform: true });

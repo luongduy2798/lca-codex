@@ -3,8 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = mkdtempSync(join(tmpdir(), "lca-codex-verify-"));
-const runtimeBundle = join(scratch, "runtime");
+const scratch = mkdtempSync(join(tmpdir(), "lca-token-verify-"));
 const verificationHome = join(scratch, "home");
 const verificationLcaHome = join(scratch, "lca");
 const verificationCodexHome = join(scratch, "codex");
@@ -16,7 +15,8 @@ const verificationEnv = {
   ...process.env,
   HOME: verificationHome,
   USERPROFILE: verificationHome,
-  LCA_CODEX_HOME: verificationLcaHome,
+  LCA_TOKEN_HOME: verificationLcaHome,
+  LCA_TOKEN_PROFILE: "verify",
   CODEX_HOME: verificationCodexHome,
 };
 
@@ -37,17 +37,6 @@ try {
   await run(["run", "audit"]);
   await run(["run", "typecheck"]);
   await run(["run", "test"], true);
-  await run(["run", "launcher:typecheck"]);
-  await run(["run", "launcher:test"], true);
-  await run(["run", "launcher:build"]);
-  await run(["run", "scripts/build-runtime-bundle.ts", runtimeBundle]);
-  await run([
-    "run",
-    "scripts/generate-third-party-notices.ts",
-    join(scratch, "THIRD_PARTY_NOTICES.txt"),
-    "--include-launcher",
-  ]);
-  await run(["run", "scripts/smoke-release.ts", runtimeBundle]);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

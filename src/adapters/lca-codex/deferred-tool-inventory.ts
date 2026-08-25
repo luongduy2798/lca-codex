@@ -7,8 +7,18 @@ export interface GatewayDiscoveredTool {
   schemaError?: string;
 }
 
-const CODEX_TOOL_INVENTORY_MARKER = "LCA_CODEX_TOOL_INVENTORY:";
+const AGENT_TOOL_INVENTORY_MARKER = "LCA_AGENT_TOOL_INVENTORY:";
 const DEFERRED_GATEWAY_BLOCKED_LOGICAL_NAMES = [
+  "agent_bind_turn",
+  "agent_context",
+  "agent_exec",
+  "agent_write_stdin",
+  "agent_apply_patch",
+  "agent_view_image",
+  "agent_tool_inventory",
+  "agent_tool_call",
+  // Keep the previous public names blocked too so a deferred registry cannot recurse through a
+  // stale/legacy bridge exposed by another connector or proxy.
   "codex_bind_turn",
   "codex_context",
   "codex_exec",
@@ -324,7 +334,7 @@ export function gatewayToolInventoryProgram({
     `const schemaBudget = Math.min(${DEFERRED_TOOL_SCHEMA_MAX_BUDGET}, Math.max(1024, Math.floor(${DEFERRED_TOOL_SCHEMA_TOTAL_BUDGET} / Math.max(1, page.length))));`,
     `const includeSchema = ${includeSchema ? "true" : "false"};`,
     "const payload = { total: selected.length, tools: page.map(({ tool, rank }) => { const full = tool.description || \"\"; const declarationMatch = /exec tool declaration:\\s*```ts\\s*([\\s\\S]*?)```/i.exec(full); const description = full.split(/\\n\\nexec tool declaration:/i)[0].slice(0, descriptionBudget); const freeform = /\\bFREEFORM tool\\b/i.test(full); const declaration = declarationMatch?.[1]; const schemaError = includeSchema && !freeform ? (!declaration ? \"exec tool declaration not found in deferred tool description\" : declaration.length > schemaBudget ? `exec tool declaration exceeds ${schemaBudget}-character schema budget; narrow the query or lower limit` : undefined) : undefined; return { name: tool.name, description, freeform, rank, ...(includeSchema && !schemaError && declaration ? { declaration } : {}), ...(schemaError ? { schema_error: schemaError } : {}) }; }) };",
-    `text(${JSON.stringify(CODEX_TOOL_INVENTORY_MARKER)} + JSON.stringify(payload));`,
+    `text(${JSON.stringify(AGENT_TOOL_INVENTORY_MARKER)} + JSON.stringify(payload));`,
   ].join("\n");
 }
 
@@ -353,14 +363,14 @@ function toolResultText(value: unknown): string {
 
 export function parseGatewayToolInventory(value: unknown): { total: number; tools: GatewayDiscoveredTool[] } {
   const text = toolResultText(value);
-  const markerIndex = text.indexOf(CODEX_TOOL_INVENTORY_MARKER);
-  if (markerIndex < 0) throw new Error("Codex exec gateway did not return its nested tool inventory");
-  const payload = JSON.parse(text.slice(markerIndex + CODEX_TOOL_INVENTORY_MARKER.length).trim()) as {
+  const markerIndex = text.indexOf(AGENT_TOOL_INVENTORY_MARKER);
+  if (markerIndex < 0) throw new Error("agent exec gateway did not return its nested tool inventory");
+  const payload = JSON.parse(text.slice(markerIndex + AGENT_TOOL_INVENTORY_MARKER.length).trim()) as {
     total?: unknown;
     tools?: unknown;
   };
   if (!Number.isSafeInteger(payload.total) || (payload.total as number) < 0 || !Array.isArray(payload.tools)) {
-    throw new Error("Codex exec gateway returned an invalid nested tool inventory");
+    throw new Error("agent exec gateway returned an invalid nested tool inventory");
   }
   const tools: GatewayDiscoveredTool[] = [];
   for (const candidate of payload.tools) {

@@ -303,10 +303,8 @@ export interface CodexProviderConfig {
   lcaCodex?: {
     /** ChatGPT custom connector attached to tool-capable temporary chats. */
     appName?: string;
-    /** Explicit browser owner. Launcher mode attaches to the embedded Electron ChatGPT surface. */
-    browserHost?: "managed-chrome" | "launcher";
-    /** Owner-only descriptor containing the launcher's loopback CDP and control endpoints. */
-    browserHostDescriptorPath?: string;
+    /** LCA Token owns a dedicated managed Chrome/Chromium runtime. */
+    browserHost?: "managed-chrome";
     /** Playwright storage-state file created by the explicit browser login. */
     storageStatePath?: string;
     /** System Chrome executable. The runtime never downloads a browser. */
@@ -317,8 +315,6 @@ export interface CodexProviderConfig {
     threadEnvironmentStatePath?: string;
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
-    /** Keep the single controlled browser visible. */
-    headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for non-Pro efforts. */
     localToolsEnabled?: boolean;
     /** Account capability proven by the authenticated browser probe. */

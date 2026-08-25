@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTunnelStatus, tunnelCommandOutput, tunnelConnectLaunchError } from "../src/tunnel";
+import { parseTunnelAliasMetadata, parseTunnelStatus, tunnelCommandOutput, tunnelConnectLaunchError } from "../src/tunnel";
 
 describe("tunnel status boundary", () => {
   test("requires the managed runtime process, health, and readiness together", () => {
@@ -22,6 +22,93 @@ describe("tunnel status boundary", () => {
       ready: true,
       runtime_state: "ready",
     }))).toMatchObject({ ok: false, processRunning: false, healthy: true, ready: true });
+  });
+
+  test("accepts a healthy ready service-owned runtime when connect bookkeeping says stopped", () => {
+    expect(parseTunnelStatus(JSON.stringify({
+      process_running: false,
+      healthy: true,
+      ready: true,
+      runtime_state: "stopped",
+      remote_lookup_attempted: true,
+      remote: { id: "tunnel_0123456789abcdef0123456789abcdef" },
+      local: {
+        issues: ["runtime log exists but no active runtime is running"],
+      },
+    }), 0, true)).toEqual({
+      ok: true,
+      processRunning: true,
+      healthy: true,
+      ready: true,
+      state: "ready",
+      detail: "process_running=true source=managed-service healthy=true ready=true",
+    });
+  });
+
+  test("keeps an explicitly stopped unmanaged runtime not ready", () => {
+    expect(parseTunnelStatus(JSON.stringify({
+      process_running: false,
+      healthy: true,
+      ready: true,
+      runtime_state: "stopped",
+    }))).toMatchObject({
+      ok: false,
+      processRunning: false,
+      healthy: true,
+      ready: false,
+      state: "stopped",
+    });
+  });
+
+  test("still accepts a service-owned runtime when status says ready and only process bookkeeping is stale", () => {
+    expect(parseTunnelStatus(JSON.stringify({
+      process_running: false,
+      healthy: true,
+      ready: true,
+      runtime_state: "ready",
+    }), 0, true)).toEqual({
+      ok: true,
+      processRunning: true,
+      healthy: true,
+      ready: true,
+      state: "ready",
+      detail: "process_running=true source=managed-service healthy=true ready=true",
+    });
+  });
+
+  test("fails closed when local health is stale but the remote tunnel lookup failed", () => {
+    const result = parseTunnelStatus(JSON.stringify({
+      process_running: false,
+      healthy: true,
+      ready: true,
+      runtime_state: "stopped",
+      remote: null,
+      remote_lookup_attempted: true,
+      remote_error: "403 tunnel_active_organization_required for tunnel_0123456789abcdef0123456789abcdef",
+    }), 0, true);
+
+    expect(result).toMatchObject({
+      ok: false,
+      processRunning: false,
+      healthy: true,
+      ready: false,
+      state: "stopped",
+    });
+    expect(result.detail).toContain("remote_error=403 tunnel_active_organization_required for [tunnel-id]");
+  });
+
+  test("extracts stale tunnel identity and organization repair hints from tunnel-client status", () => {
+    expect(parseTunnelAliasMetadata(JSON.stringify({
+      tunnel_id: "tunnel_0123456789abcdef0123456789abcdef",
+      remote_error: "403 tunnel_active_organization_required: active organization context required",
+      next_steps: [
+        "tunnel-client runtimes connect --alias lca-token-test --organization-id org-Test123 --mcp-command test",
+      ],
+    }))).toEqual({
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      organizationId: "org-Test123",
+      organizationRequired: true,
+    });
   });
 
   test("redacts tunnel ids and keys from safe diagnostics", () => {
