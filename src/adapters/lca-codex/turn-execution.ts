@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
+import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import type { BrokerToolRequest } from "./turn-broker";
 import {
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
   extractChatGptTurnUserRevision,
 } from "./environment";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
 export type ChatGptBrowserOutcome =
   | { type: "final"; answer: string }
@@ -133,6 +133,8 @@ export type ChatGptTurnRuntime =
 export interface ChatGptTurnSessionScope {
   threadId?: string;
   turnId?: string;
+  agentConversationId?: string;
+  agentExecutionId?: string;
   purpose: "response" | "compaction";
 }
 
@@ -327,7 +329,7 @@ export class ChatGptTurnSessions {
     const active = [...this.entries.values()].filter(session => session.isActive()).length;
     if (active >= MAX_CHATGPT_BROWSER_TABS) {
       throw new Error(
-        `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+        `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; wait for an execution to finish or cancel one explicitly before starting another`,
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`LCA Codex session registry is full (${this.maxEntries} entries)`);
@@ -372,6 +374,30 @@ export class ChatGptTurnSessions {
     if (keys.length === 0) return 0;
     await Promise.all(keys.map(key => this.retireAndWait(key)));
     return keys.length;
+  }
+
+  retireAgentExecution(executionId: string): number {
+    let retired = 0;
+    for (const [key, session] of [...this.entries]) {
+      if (session.scope?.agentExecutionId !== executionId) continue;
+      session.cancel();
+      this.entries.delete(key);
+      this.retryAttempts.delete(key);
+      retired += 1;
+    }
+    return retired;
+  }
+
+  retireAgentConversation(conversationId: string): number {
+    let retired = 0;
+    for (const [key, session] of [...this.entries]) {
+      if (session.scope?.agentConversationId !== conversationId) continue;
+      session.cancel();
+      this.entries.delete(key);
+      this.retryAttempts.delete(key);
+      retired += 1;
+    }
+    return retired;
   }
 
   async waitForRetirement(key: string): Promise<void> {

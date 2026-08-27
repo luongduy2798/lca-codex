@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
@@ -8,11 +8,17 @@ import {
   gatewayToolInventoryProgram,
   gatewayWireIdentity,
   inventoryToolRank,
+  isModelRecursiveHarnessTool,
   parseGatewayToolInventory,
   type GatewayDiscoveredTool,
 } from "./deferred-tool-inventory";
 import type { ChatGptTurnEnvironment } from "./environment";
-import { callTurnBroker, type BrokerToolResult } from "./turn-broker";
+import {
+  callTurnBroker,
+  type BrokerDeferredInvocation,
+  type BrokerDeferredToolStatus,
+  type BrokerToolResult,
+} from "./turn-broker";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -128,15 +134,19 @@ function invocationTimeout(environment: ChatGptTurnEnvironment & { expiresAt?: n
   return environment.expiresAt === undefined ? null : Math.max(1, environment.expiresAt - Date.now());
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function asMcpResult(value: BrokerToolResult) {
   return {
     content: value.content as never,
-    ...(value.structuredContent !== undefined && value.structuredContent !== null && typeof value.structuredContent === "object"
-      ? { structuredContent: value.structuredContent as Record<string, unknown> }
+    ...(isRecord(value.structuredContent)
+      ? { structuredContent: value.structuredContent }
       : {}),
     ...(value.isError ? { isError: true } : {}),
-    ...(value._meta !== undefined && value._meta !== null && typeof value._meta === "object"
-      ? { _meta: value._meta as Record<string, unknown> }
+    ...(isRecord(value._meta)
+      ? { _meta: value._meta }
       : {}),
   };
 }
@@ -144,6 +154,27 @@ function asMcpResult(value: BrokerToolResult) {
 function execGateway(environment: ChatGptTurnEnvironment): CodexTool | undefined {
   const tool = exactTool(environment, "exec");
   return tool?.freeform ? tool : undefined;
+}
+
+function bridgeCapabilities(environment: ChatGptTurnEnvironment): string[] {
+  const gateway = execGateway(environment);
+  const capabilities = [
+    "native_tool_loop",
+    "session_history",
+    "lazy_context",
+    "lazy_instructions",
+    "lazy_images",
+    "tool_registry",
+  ];
+  if (exactTool(environment, "exec_command") || exactTool(environment, "shell_command") || gateway) {
+    capabilities.push("exec");
+  }
+  // A generic harness such as Claude Code may expose Write/Edit/Bash but no apply_patch route.
+  // Do not advertise Codex's patch primitive as universally available: doing so makes the model
+  // reject perfectly valid harness-native editing tools before it ever inventories them.
+  if (exactTool(environment, "apply_patch") || gateway) capabilities.push("apply_patch");
+  if (exactTool(environment, "view_image") || gateway) capabilities.push("images");
+  return capabilities;
 }
 
 function gatewayNestedToolName(toolName: string): string {
@@ -173,6 +204,29 @@ function execGatewayProgram(
     "};",
     "emit(result);",
   ].join("\n");
+}
+
+function registerCodexCompatibilityAlias(
+  server: McpServer,
+  alias: string,
+  canonicalName: string,
+  tool: RegisteredTool,
+): void {
+  if (typeof tool.handler !== "function") {
+    throw new Error(`Cannot alias task-based MCP tool ${canonicalName}`);
+  }
+  server.registerTool(
+    alias,
+    {
+      title: tool.title,
+      description: `Compatibility alias for ${canonicalName}. ${tool.description ?? ""}`.trim(),
+      ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+      ...(tool.annotations ? { annotations: tool.annotations } : {}),
+      _meta: { ...(tool._meta ?? {}), lca_compatibility_alias_for: canonicalName },
+    },
+    tool.handler as ToolCallback<any>,
+  );
 }
 
 export async function runChatGptMcpServer(options: { brokerSocketPath: string }): Promise<void> {
@@ -212,6 +266,30 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
     }, invocationTimeout(bound));
     return asMcpResult(response);
+  };
+
+  const invokeDeferred = async (
+    bindingId: string,
+    tool: CodexTool,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
+    activityTool = wireName(tool),
+  ) => {
+    const queued = await callTurnBroker<BrokerDeferredInvocation>(options.brokerSocketPath, {
+      method: "invoke_deferred",
+      bindingId,
+      wireName: wireName(tool),
+      sourceTool,
+      activityTool,
+      freeform: tool.freeform === true,
+      ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
+    });
+    return result({
+      status: "pending",
+      invocation_id: queued.invocationId,
+      retry_after_ms: 500,
+      next_action: "Call agent_tool_result with this binding_id and invocation_id until it returns the completed harness tool result. Pending is not a tool result.",
+    });
   };
 
   const ensureGatewayToolReady = async (
@@ -294,7 +372,49 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     );
   };
 
-  server.registerTool(
+  const invokeDeferredNative = async (
+    bindingId: string,
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
+    tool: CodexTool,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
+  ) => {
+    const gateway = execGateway(bound);
+    if (!gateway || gateway === tool) return invokeDeferred(bindingId, tool, payload, sourceTool);
+    const nestedToolName = wireName(tool);
+    await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);
+    return invokeDeferred(
+      bindingId,
+      gateway,
+      { input: execGatewayProgram(nestedToolName, tool.freeform === true, payload) },
+      sourceTool,
+      nestedToolName,
+    );
+  };
+
+  const invokeNestedDeferredNative = async (
+    bindingId: string,
+    bound: ChatGptTurnEnvironment & { expiresAt?: number },
+    nestedToolName: string,
+    freeform: boolean,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+    sourceTool: string,
+  ) => {
+    const gateway = execGateway(bound);
+    if (!gateway) {
+      throw new Error(`This harness turn did not advertise ${nestedToolName} or the native exec gateway`);
+    }
+    await ensureGatewayToolReady(bindingId, bound, gateway, nestedToolName, sourceTool);
+    return invokeDeferred(
+      bindingId,
+      gateway,
+      { input: execGatewayProgram(nestedToolName, freeform, payload) },
+      sourceTool,
+      nestedToolName,
+    );
+  };
+
+  const agentBindTurn = server.registerTool(
     "agent_bind_turn",
     {
       title: "Bind this response to its agent turn",
@@ -347,15 +467,15 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
         tool_count: claimed.environment.tools.length,
         command_tool: commandTool ? wireName(commandTool) : gateway ? "exec_command" : null,
         outer_tool_gateway: gateway ? wireName(gateway) : null,
-        capabilities: ["native_tool_loop", "session_history", "lazy_context", "lazy_instructions", "lazy_images", "exec", "apply_patch", "images", "tool_registry"],
+        capabilities: bridgeCapabilities(claimed.environment),
         context_transport: "mcp_lazy",
         context_required: false,
-        next_action: "Use this binding_id only if you need task instructions, historical context, or an authenticated harness tool. Call agent_context selectively; for a named MCP/app/provider operation that is not a direct bridge tool, use a targeted agent_tool_inventory query before deciding that tool is unavailable.",
+        next_action: "Use this binding_id only if you need task instructions, historical context, or an authenticated harness tool. Call agent_context selectively. For local inspection or mutation, use only a matching capability returned above; otherwise query agent_tool_inventory for the harness-native operation (for example Read, Write, Edit, or Bash) and invoke the exact returned wire_name with agent_tool_call before declaring the operation unavailable.",
       });
     },
   );
 
-  server.registerTool(
+  const agentContext = server.registerTool(
     "agent_context",
     {
       title: "Read historical task context on demand",
@@ -389,11 +509,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentExec = server.registerTool(
     "agent_exec",
     {
       title: "Run a native harness command",
-      description: "Invoke the command tool advertised by the current outer harness for inspection, search, tests, builds, and other non-editing command work. Intentional repository edits must use agent_apply_patch instead so the harness receives its native file-change item. A long-running command returns its native session_id.",
+      description: "Compatibility helper for harnesses that advertise a native command route such as exec_command/shell_command. Use it for inspection, search, tests, and builds when the bound turn reports the exec capability. Do not assume it is the mutation route for every harness: generic harnesses may instead expose Bash plus separate Write/Edit tools discoverable through agent_tool_inventory. A long-running command returns its native session_id.",
       inputSchema: {
         binding_id: bindingSchema,
         cmd: z.string().min(1).max(100_000),
@@ -428,11 +548,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentWriteStdin = server.registerTool(
     "agent_write_stdin",
     {
       title: "Continue a native harness command session",
-      description: "Write characters to, or poll, a session_id returned by agent_exec. Do not use a command session to substitute for agent_apply_patch when intentionally editing repository files.",
+      description: "Compatibility helper to write characters to, or poll, a native session_id returned by agent_exec. It is not a universal repository-edit primitive; use the mutation tool required by the bound outer harness.",
       inputSchema: {
         binding_id: bindingSchema,
         session_id: z.number().int().nonnegative(),
@@ -457,17 +577,24 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentApplyPatch = server.registerTool(
     "agent_apply_patch",
     {
       title: "Apply a native harness patch",
-      description: "Required route for intentional repository edits. Invoke the outer harness apply_patch tool, producing a native file-change item in the active task.",
+      description: "Compatibility helper for turns whose bound outer harness actually advertises a native apply_patch route. Do not assume this helper is available or preferred for generic harnesses such as Claude Code; discover their harness-native Write/Edit tool with agent_tool_inventory and invoke it through agent_tool_call instead.",
       inputSchema: { binding_id: bindingSchema, patch: z.string().min(1).max(5_000_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ binding_id, patch }) => {
       const bound = await environment(binding_id);
       const tool = exactTool(bound, "apply_patch");
+      if (!tool && !execGateway(bound)) {
+        throw new Error(
+          "This harness turn does not advertise a native apply_patch route. "
+          + "Use agent_tool_inventory to discover the harness-native repository mutation tool "
+          + "(for example Write or Edit in Claude Code), then invoke its exact wire_name with agent_tool_call.",
+        );
+      }
       if (!tool) return invokeNestedNative(
         binding_id,
         bound,
@@ -482,7 +609,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentViewImage = server.registerTool(
     "agent_view_image",
     {
       title: "View an image through the native harness",
@@ -504,7 +631,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentToolInventory = server.registerTool(
     "agent_tool_inventory",
     {
       title: "Discover tools from the current agent harness",
@@ -522,10 +649,13 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       const bound = await environment(binding_id, "agent_tool_inventory");
       const needle = query?.trim().toLowerCase();
       const needleKey = needle?.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") ?? "";
-      const directExactNamespaceMatchExists = Boolean(needleKey) && bound.tools.some(
+      const directTools = bound.tools.filter(
+        tool => !isModelRecursiveHarnessTool(wireName(tool), tool.description),
+      );
+      const directExactNamespaceMatchExists = Boolean(needleKey) && directTools.some(
         tool => (tool.namespace ?? "").toLowerCase() === needleKey,
       );
-      const directMatches = bound.tools
+      const directMatches = directTools
         .map(tool => ({
           tool,
           rank: inventoryToolRank(
@@ -549,6 +679,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
           description: tool.description,
           kind: tool.freeform ? "freeform" : tool.toolSearch ? "tool_search" : "function",
           source: "turn" as const,
+          execution: "synchronous",
           ...(include_schema ? { parameters: tool.parameters } : {}),
         } as Record<string, unknown>,
       }));
@@ -576,6 +707,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
           nestedTotal = discovered.total;
           const cache = discoveredGatewayTools.get(binding_id) ?? new Map<string, GatewayDiscoveredTool>();
           for (const tool of discovered.tools) {
+            if (isModelRecursiveHarnessTool(tool.wireName, tool.description)) continue;
             const previous = cache.get(tool.wireName);
             const identity = gatewayWireIdentity(tool.wireName);
             const cached: GatewayDiscoveredTool = {
@@ -605,6 +737,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
                 description: tool.description,
                 kind: tool.freeform ? "freeform" : "function",
                 source: "exec_gateway",
+                execution: "synchronous",
                 ...(include_schema && tool.parameters ? { parameters: tool.parameters } : {}),
                 ...(include_schema && tool.schemaError ? { schema_error: tool.schemaError.slice(0, 500) } : {}),
               },
@@ -634,11 +767,11 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     },
   );
 
-  server.registerTool(
+  const agentToolCall = server.registerTool(
     "agent_tool_call",
     {
-      title: "Call any tool from the current agent harness",
-      description: "Invoke an exact wire_name returned by agent_tool_inventory. Deferred calls remain inside the selected connector route; the outer harness performs the call, approvals, and UI lifecycle.",
+      title: "Call a non-delegating tool from the current agent harness",
+      description: "Invoke an exact wire_name returned by agent_tool_inventory. Single-agent mode rejects model-launching and delegation tools; the outer harness performs accepted calls, approvals, and UI lifecycle.",
       inputSchema: {
         binding_id: bindingSchema,
         wire_name: z.string().min(1).max(1_000),
@@ -650,6 +783,12 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
     async ({ binding_id, wire_name, arguments: args, input }) => {
       const bound = await environment(binding_id);
       const tool = bound.tools.find(candidate => wireName(candidate) === wire_name);
+      if (tool && isModelRecursiveHarnessTool(wireName(tool), tool.description)) {
+        throw new Error(
+          `Single-agent mode blocks model-launching or delegation tool ${wire_name}. `
+          + "Complete this task in the current ChatGPT Web reasoning turn instead of spawning another agent.",
+        );
+      }
       if (tool?.freeform) {
         if (input === undefined) throw new Error(`Freeform harness tool ${wire_name} requires input`);
         if (args && Object.keys(args).length > 0) throw new Error(`Freeform harness tool ${wire_name} does not accept arguments`);
@@ -664,6 +803,12 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       if (!discovered) {
         throw new Error(`Harness tool is not available in this turn or has not been returned by agent_tool_inventory: ${wire_name}`);
       }
+      if (isModelRecursiveHarnessTool(discovered.wireName, discovered.description)) {
+        throw new Error(
+          `Single-agent mode blocks model-launching or delegation tool ${wire_name}. `
+          + "Complete this task in the current ChatGPT Web reasoning turn instead of spawning another agent.",
+        );
+      }
       if (discovered.freeform) {
         if (input === undefined) throw new Error(`Freeform harness tool ${wire_name} requires input`);
         if (args && Object.keys(args).length > 0) throw new Error(`Freeform harness tool ${wire_name} does not accept arguments`);
@@ -673,6 +818,54 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       return invokeNestedNative(binding_id, bound, wire_name, false, { arguments: args ?? {} }, "agent_tool_call");
     },
   );
+
+  const agentToolResult = server.registerTool(
+    "agent_tool_result",
+    {
+      title: "Read a deferred harness tool result",
+      description: "Compatibility-only polling for a deferred harness call accepted before single-agent mode was enabled. New model-launching or delegation calls are rejected.",
+      inputSchema: {
+        binding_id: bindingSchema,
+        invocation_id: z.string().regex(/^call_[A-Za-z0-9_-]{32}$/, "invocation_id must be the exact call_ value returned by agent_tool_call"),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ binding_id, invocation_id }) => {
+      const status = await callTurnBroker<BrokerDeferredToolStatus>(options.brokerSocketPath, {
+        method: "poll_deferred",
+        bindingId: binding_id,
+        invocationId: invocation_id,
+        sourceTool: "agent_tool_result",
+      });
+      if (status.status === "pending") {
+        return result({
+          status: "pending",
+          invocation_id: status.invocationId,
+          retry_after_ms: 500,
+          next_action: "Call agent_tool_result again with the same binding_id and invocation_id. Do not treat pending as completion.",
+        });
+      }
+      return asMcpResult(status.result);
+    },
+  );
+
+  // `agent_*` is the canonical harness-neutral surface. Keep the old `codex_*` spellings as
+  // exact handler aliases so frozen connector schemas/instructions from the stable Codex bridge do
+  // not break during migration. Aliases never widen authority: they validate the same schemas and
+  // dispatch through the same authenticated turn binding and exact outer tool registry.
+  for (const [alias, canonicalName, tool] of [
+    ["codex_bind_turn", "agent_bind_turn", agentBindTurn],
+    ["codex_context", "agent_context", agentContext],
+    ["codex_exec", "agent_exec", agentExec],
+    ["codex_write_stdin", "agent_write_stdin", agentWriteStdin],
+    ["codex_apply_patch", "agent_apply_patch", agentApplyPatch],
+    ["codex_view_image", "agent_view_image", agentViewImage],
+    ["codex_tool_inventory", "agent_tool_inventory", agentToolInventory],
+    ["codex_tool_call", "agent_tool_call", agentToolCall],
+    ["codex_tool_result", "agent_tool_result", agentToolResult],
+  ] as const) {
+    registerCodexCompatibilityAlias(server, alias, canonicalName, tool);
+  }
 
   await server.connect(new StdioServerTransport());
 }

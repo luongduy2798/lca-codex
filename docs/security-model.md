@@ -6,7 +6,7 @@
 
 Authority must come from an authenticated outer control plane:
 
-- generic `/v1/agent/responses` and `/v1/chat/completions` turns: LCA API key + the request's exact declared function-tool registry; the outer harness remains responsible for enforcing its filesystem/sandbox policy while executing those tools;
+- generic `/v1/agent/responses`, `/v1/chat/completions`, and `/v1/messages` turns: LCA API key + the request's exact declared function-tool registry; the outer harness remains responsible for enforcing its filesystem/sandbox policy while executing those tools;
 - Codex compatibility turns: verified native Codex wire provenance and the exact native tool registry.
 
 Both paths normalize into the same turn environment before the browser prompt is compiled.
@@ -26,7 +26,7 @@ Prompt text, repository contents, tool output, websites, attachments, model outp
 
 ## Generic agent authority
 
-`POST /v1/agent/responses` and `POST /v1/chat/completions` require a valid API key. Execution identity and task identity are separate: execution identity is reused only across tool-result rounds for one in-flight model generation, while task identity is continuation metadata and never browser-page affinity. Responses restores task identity across the whole `previous_response_id` chain. Any generic harness may instead or additionally provide `X-LCA-Task-ID`; `metadata.lca_task_id` is an equivalent body-level task extension, and Responses may use its `conversation` id. These values are normalized to opaque ids and are not filesystem, sandbox, connector, tool, or browser-transcript authority. Chat Completions keeps transcript-prefix derivation only as a backward-compatible fallback when no explicit task identity is available; that heuristic is not relied on across compaction/history rewrites. Callers do not submit `thread_id`, `turn_id`, `cwd`, roots, sandbox, or network policy fields. Those remain Codex-compatibility control-plane fields rather than generic harness task identity.
+`POST /v1/agent/responses`, `POST /v1/chat/completions`, `POST /v1/messages`, and `POST /v1/agent/lifecycle` require a valid API key. Execution identity and task identity are separate: execution identity is reused only across tool-result rounds for one in-flight model generation, while task identity labels outer-harness lineage and explicit cancellation scope. Responses restores task identity across the whole `previous_response_id` chain. Any generic harness may instead or additionally provide `X-LCA-Task-ID`; `metadata.lca_task_id` is an equivalent body-level task extension, and Responses may use its `conversation` id. Claude Code supplies `x-claude-code-session-id`; an optional `x-claude-code-agent-id` is combined with that session to distinguish lineage. These values are normalized to opaque ids and are not filesystem, sandbox, connector, tool, page-affinity, or completion authority. Every distinct execution receives a fresh isolated Temporary Chat page, so a new execution never supersedes another merely because its task/session identity matches. Requests that resolve to the same execution and structured tool rounds may resume it. The lifecycle endpoint can cancel only the execution/task identified by this normalized control-plane identity; completed notifications cannot cancel an active generation, and successful completion is never inferred from model text or browser UI. Chat Completions keeps transcript-prefix derivation only as a backward-compatible fallback when no explicit task identity is available. A shortened stock-harness transcript may recover prior lineage only when a retained recent tail maps uniquely to one known task; ambiguous lineage fails closed instead of merging tasks. Callers do not submit Codex-specific `thread_id`, `turn_id`, `cwd`, roots, sandbox, or network policy fields. Those remain Codex-compatibility control-plane fields rather than generic harness task identity.
 
 Chat Completions may also carry a harness-owned textual output protocol in ordinary role messages, such as XML-style tool tags used by Cline-style clients. LCA Token may let the model emit that text exactly as requested so the outer harness can parse it. Textual markup is not a callable LCA Token tool and cannot grant filesystem, network, sandbox, or broker authority; only the authenticated structured `tools` registry can do that.
 
@@ -46,7 +46,7 @@ It is written through the private atomic-file helper and is intended to remain u
 
 The credential authorizes the caller to use the generic agent API and advertise harness-owned tools for that profile. Treat it as a high-value secret. Rotate it after suspected exposure.
 
-Legacy `/v1/responses` compatibility is not retrofitted with this token because native Codex transport/authentication semantics are preserved there. The authenticated generic Responses and Chat Completions routes are the product boundary for arbitrary harnesses.
+Legacy `/v1/responses` compatibility is not retrofitted with this token because native Codex transport/authentication semantics are preserved there. The authenticated generic Responses, Chat Completions, and Anthropic Messages routes are the product boundary for arbitrary harnesses.
 
 ## Browser session credential
 
@@ -86,20 +86,27 @@ The connector exposes a small meta-tool surface. Tool discovery is always filter
 
 No fallback global registry is authorized by a prompt. If a tool is absent or has not been returned by lazy inventory, invocation fails closed.
 
-The connector meta-tools use the `agent_*` namespace. Their names do not grant authority: the exact authenticated turn registry is still the callable surface, while the outer harness remains responsible for its own local execution policy.
+Generic connector prompts use the `agent_*` namespace while Codex prompts use the frozen `codex_*` compatibility names. Both namespaces resolve to the exact same schemas, binding checks, and authenticated handlers; neither creates a second tool registry or bypasses binding validation.
 
 ## Harness-owned tool execution
 
-For generic turns, the current implementation treats advertised tools as harness-owned. Chat Completions function tools are normalized to the same Responses tool registry before execution. When ChatGPT invokes one during a generic structured-tool generation:
+For generic turns, the current implementation treats advertised tools as harness-owned. Chat Completions function tools and Anthropic Messages tools are normalized to the same Responses tool registry before execution. When ChatGPT invokes one during a generic structured-tool generation:
 
 1. the connector request blocks in the local broker;
 2. LCA Token emits a Responses `function_call` to the outer harness;
 3. the harness executes the tool under its own sandbox/approval policy;
-4. the harness returns the matching tool result using the transport's continuation shape: `function_call_output` plus `previous_response_id` for Responses, or the matching assistant `tool_calls` / `tool` message pair for Chat Completions;
+4. the harness returns the matching tool result using the transport's continuation shape: `function_call_output` plus `previous_response_id` for Responses, the matching assistant `tool_calls` / `tool` message pair for Chat Completions, or `tool_use` / `tool_result` for Anthropic Messages;
 5. the blocked connector call resolves;
 6. the **same** ChatGPT generation continues.
 
 LCA Token does not implement a hidden shell fallback when a harness tool is unavailable.
+
+Model-launching and delegation tools are not part of the callable single-agent surface. Lazy
+inventory filters `Agent`, `spawn_agent`, subagent launchers, and agentic task/delegation tools, and
+an exact-wire invocation of one of those tools fails closed before it reaches the outer harness.
+The deferred invocation/result broker protocol remains only as compatibility state for calls that
+were already pending when an older multi-agent runtime is replaced; it is not used to accept new
+model-launching work.
 
 ## Approval semantics
 
@@ -113,7 +120,7 @@ The built-in server binds to `127.0.0.1` only. Generic API authentication preven
 
 A compromised process running as the same service account is inside the local trust boundary. Use a dedicated service account for a shared server and protect `LCA_TOKEN_HOME` with OS permissions.
 
-Administrative lifecycle endpoints use a separate random `controlToken` from `config.json`; it is not the generic harness API key.
+Administrative lifecycle endpoints use a separate random `controlToken` from `config.json`; it is not the generic harness API key. `/v1/agent/lifecycle` is intentionally different: it is a harness-facing, API-key-authenticated task/execution cancellation channel scoped by normalized generic task identity, not an administrative global-cancel endpoint.
 
 ## Network exposure
 
@@ -131,13 +138,14 @@ ChatGPT DOM, controls, and network behavior are not a supported stable API. Brow
 - network lifecycle owns submission/completion;
 - DOM is used for semantic Markdown and visible controls, not to fabricate completion;
 - a different tab/conversation cannot complete the active page-owned turn;
+- a managed-Chrome/CDP transport failure does not authorize replay of the generation; without an independently addressable same-surface host, LCA Token fails closed rather than risking duplicate tool side effects;
 - selector or lifecycle drift produces an explicit error instead of silently switching transport/model.
 
 ## Cross-turn isolation
 
-Each browser generation gets a separate page-owned Temporary Chat lifecycle and turn-scoped broker capability. The page is closed when that generation completes or fails; later prompts always use a fresh page even when they carry the same task identity. The bounded local continuation cache exists only to resume structured harness-tool result rounds for the same in-flight generation, including both Responses and Chat Completions continuations; it is not a second long-term history authority.
+Every distinct model execution owns one isolated Temporary Chat page plus a fresh turn-scoped broker capability and authenticated context/tool snapshot. Structured harness-tool result rounds across Responses, Chat Completions, and Anthropic Messages resume that same live generation; every later execution opens a new page even when it shares task/session lineage. Matching page-owned WebSocket completion is the sole successful terminal signal. DOM is read once more at that edge only to serialize the final visible answer, then the page closes. Distinct main, title-generation, subagent, and compaction executions neither cancel nor serialize one another merely because their lineage matches. At most five live execution pages are allowed; capacity fails closed rather than evicting another execution. Explicit interrupt/stop signals remain cancellation controls, while Claude `Stop` / `SubagentStop` / `SessionEnd` hooks are not installed and do not own browser completion. The bounded local continuation cache remains only an execution-resume/idempotence aid rather than a second long-term history authority.
 
-Generic harnesses own their retained history and compaction policy. Generic LCA auto-compaction is intentionally absent rather than pretending that Codex-specific compaction semantics are universal. A harness may use LCA Token as the model for its own compact/checkpoint helper call; both the helper call and the next normal task turn are isolated browser generations, with continuity reconstructed from retained/lazy context rather than a persistent ChatGPT tab.
+Generic harnesses own their retained history and compaction policy. Generic LCA auto-compaction is intentionally absent rather than pretending that Codex-specific compaction policy is universal. A compacted or rewritten history is projected into the next execution through the frozen/lazy context machinery, and older context stays available through the turn-scoped lazy context tools. Hidden Codex compatibility compaction receives its own Temporary Chat page and cannot contaminate another execution.
 
 ## GUI-less Linux deployment
 

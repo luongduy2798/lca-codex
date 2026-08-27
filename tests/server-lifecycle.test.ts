@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/lca-codex/turn-execution";
+import { ensureApiToken } from "../src/api-auth";
 import { callTurnBroker, closeTurnBrokers } from "../src/adapters/lca-codex/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig } from "../src/config";
 import { HttpTurnCounter, startServer } from "../src/server";
@@ -189,6 +190,173 @@ test("authenticated Codex lifecycle interrupt cancels only the matching browser 
   }
 });
 
+test("completed lifecycle routes never cancel a live WebSocket-owned generation", async () => {
+  const config = { ...defaultConfig(), port: 0 };
+  const server = startServer(config);
+  const token = ensureApiToken().token;
+  let cancelled = 0;
+  chatGptTurnSessions.clear();
+  const runtime = () => ({
+    mode: "read-only" as const,
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; },
+  });
+  chatGptTurnSessions.getOrCreate("codex-completed", runtime, {
+    threadId: "thread-completed",
+    turnId: "turn-completed",
+    purpose: "response",
+  });
+  chatGptTurnSessions.getOrCreate("agent-completed", runtime, {
+    agentConversationId: `lca-task-${"c".repeat(32)}`,
+    agentExecutionId: "execution-completed",
+    purpose: "response",
+  });
+
+  try {
+    const codexResponse = await fetch(`http://127.0.0.1:${server.port}/admin/codex-lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.controlToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        method: "turn/completed",
+        threadId: "thread-completed",
+        turnId: "turn-completed",
+      }),
+    });
+    expect(codexResponse.status).toBe(200);
+    expect(await codexResponse.json()).toMatchObject({ cancelled_browser_turns: 0 });
+
+    const agentResponse = await fetch(`http://127.0.0.1:${server.port}/v1/agent/lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ method: "execution/completed", execution_id: "execution-completed" }),
+    });
+    expect(agentResponse.status).toBe(200);
+    expect(await agentResponse.json()).toMatchObject({ cancelled_browser_turns: 0 });
+    expect(cancelled).toBe(0);
+    expect(chatGptTurnSessions.activeCount()).toBe(2);
+  } finally {
+    chatGptTurnSessions.clear();
+    await server.stop(true);
+  }
+});
+
+test("authenticated generic lifecycle stop cancels only the matching logical task", async () => {
+  const config = { ...defaultConfig(), port: 0 };
+  const server = startServer(config);
+  const token = ensureApiToken().token;
+  const taskId = `lca-task-${"a".repeat(32)}`;
+  const otherTaskId = `lca-task-${"b".repeat(32)}`;
+  const cancelled: string[] = [];
+  chatGptTurnSessions.clear();
+  const runtime = (name: string) => ({
+    mode: "read-only" as const,
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled.push(name); },
+  });
+  chatGptTurnSessions.getOrCreate("agent-a", () => runtime("agent-a"), {
+    agentConversationId: taskId,
+    agentExecutionId: "execution-a",
+    purpose: "response",
+  });
+  chatGptTurnSessions.getOrCreate("agent-b", () => runtime("agent-b"), {
+    agentConversationId: otherTaskId,
+    agentExecutionId: "execution-b",
+    purpose: "response",
+  });
+
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${server.port}/v1/agent/lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer invalid",
+        "content-type": "application/json",
+        "x-lca-task-id": taskId,
+      },
+      body: JSON.stringify({ method: "task/stop" }),
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/agent/lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-lca-task-id": taskId,
+      },
+      body: JSON.stringify({ method: "task/stop" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      method: "task/stop",
+      task_id: taskId,
+      cancelled_browser_turns: 1,
+      active_browser_turns: 1,
+    });
+    expect(cancelled).toEqual(["agent-a"]);
+  } finally {
+    chatGptTurnSessions.clear();
+    await server.stop(true);
+  }
+});
+
+test("generic lifecycle accepts Claude Code session identity for task cancellation", async () => {
+  const config = { ...defaultConfig(), port: 0 };
+  const server = startServer(config);
+  const token = ensureApiToken().token;
+  const sessionId = "claude-session-lifecycle-test";
+  const normalizedTaskId = `lca-task-${new Bun.CryptoHasher("sha256")
+    .update(`claude-code:${sessionId}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+  let cancelled = 0;
+  chatGptTurnSessions.clear();
+  chatGptTurnSessions.getOrCreate("claude-agent", () => ({
+    mode: "read-only",
+    browser: new Promise<string>(() => {}),
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    cancel: () => { cancelled += 1; },
+  }), {
+    agentConversationId: normalizedTaskId,
+    agentExecutionId: "claude-execution",
+    purpose: "response",
+  });
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/agent/lifecycle`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-claude-code-session-id": sessionId,
+      },
+      body: JSON.stringify({ method: "task/stop" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      method: "task/stop",
+      task_id: normalizedTaskId,
+      cancelled_browser_turns: 1,
+    });
+    expect(cancelled).toBe(1);
+  } finally {
+    chatGptTurnSessions.clear();
+    await server.stop(true);
+  }
+});
+
 test("the bridge runtime exposes its broker endpoint before any turn registers", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-serve-"));
   // The endpoint is a Unix socket on POSIX and a named pipe on Windows, so liveness is proven by
@@ -286,7 +454,9 @@ test("health proves that Codex received a successful augmented model catalog", a
         visibility: "list",
         supported_in_api: true,
         supported_reasoning_levels: [],
-        tool_mode: "code_mode_only",
+        tool_mode: null,
+        shell_type: "shell_command",
+        apply_patch_tool_type: "freeform",
         max_context_window: 872_000,
       }],
     }),

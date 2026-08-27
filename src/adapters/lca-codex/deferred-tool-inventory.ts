@@ -28,6 +28,18 @@ const DEFERRED_GATEWAY_BLOCKED_LOGICAL_NAMES = [
   "codex_tool_inventory",
   "codex_tool_call",
 ];
+const MODEL_RECURSIVE_EXACT_LOGICAL_NAMES = [
+  "agent",
+  "spawn_agent",
+  "run_agent",
+  "subagent",
+];
+const MODEL_RECURSIVE_CONDITIONAL_LOGICAL_NAMES = [
+  "task",
+  "new_task",
+  "delegate_task",
+  "dispatch_task",
+];
 const DEFERRED_TOOL_DESCRIPTION_TOTAL_BUDGET = 24_000;
 const DEFERRED_TOOL_DESCRIPTION_MAX_BUDGET = 12_000;
 const DEFERRED_TOOL_SCHEMA_TOTAL_BUDGET = 96_000;
@@ -65,6 +77,17 @@ export function gatewayWireIdentity(wireNameValue: string): { name: string; name
     namespace: parts[1] || null,
     name: parts.slice(2).join("__") || wireNameValue,
   };
+}
+
+export function isModelRecursiveHarnessTool(wireNameValue: string, description = ""): boolean {
+  const logicalName = gatewayWireIdentity(wireNameValue).name.toLowerCase();
+  if (MODEL_RECURSIVE_EXACT_LOGICAL_NAMES.some(name => (
+    logicalName === name || logicalName.endsWith(`_${name}`)
+  ))) return true;
+  if (!MODEL_RECURSIVE_CONDITIONAL_LOGICAL_NAMES.some(name => (
+    logicalName === name || logicalName.endsWith(`_${name}`)
+  ))) return false;
+  return /\b(?:sub-?agent|agentic|delegate|delegation|spawn|launch)\b/i.test(description);
 }
 
 interface TypeToken {
@@ -321,9 +344,14 @@ export function gatewayToolInventoryProgram({
     `const excluded = new Set(${JSON.stringify(excludedWireNames)});`,
     `const blockedLogicalNames = new Set(${JSON.stringify(DEFERRED_GATEWAY_BLOCKED_LOGICAL_NAMES)});`,
     "const blockedLogicalSuffixes = [...blockedLogicalNames].map(name => `_${name}`);",
+    `const modelRecursiveExactNames = new Set(${JSON.stringify(MODEL_RECURSIVE_EXACT_LOGICAL_NAMES)});`,
+    "const modelRecursiveExactSuffixes = [...modelRecursiveExactNames].map(name => `_${name}`);",
+    `const modelRecursiveConditionalNames = new Set(${JSON.stringify(MODEL_RECURSIVE_CONDITIONAL_LOGICAL_NAMES)});`,
+    "const modelRecursiveConditionalSuffixes = [...modelRecursiveConditionalNames].map(name => `_${name}`);",
     "const identity = tool => { const wire = tool.name.toLowerCase(); const parts = wire.split(\"__\"); return { wire, logicalName: parts.length >= 3 ? parts.slice(2).join(\"__\") : wire, provider: parts.length >= 3 ? parts[1] : \"\" }; };",
     "const isBlockedLogicalName = logicalName => blockedLogicalNames.has(logicalName) || blockedLogicalSuffixes.some(suffix => logicalName.endsWith(suffix));",
-    "const candidates = ALL_TOOLS.filter(tool => !excluded.has(tool.name) && !isBlockedLogicalName(identity(tool).logicalName));",
+    "const isModelRecursive = tool => { const logicalName = identity(tool).logicalName; if (modelRecursiveExactNames.has(logicalName) || modelRecursiveExactSuffixes.some(suffix => logicalName.endsWith(suffix))) return true; if (!(modelRecursiveConditionalNames.has(logicalName) || modelRecursiveConditionalSuffixes.some(suffix => logicalName.endsWith(suffix)))) return false; return /\\b(?:sub-?agent|agentic|delegate|delegation|spawn|launch)\\b/i.test(tool.description || \"\"); };",
+    "const candidates = ALL_TOOLS.filter(tool => !excluded.has(tool.name) && !isBlockedLogicalName(identity(tool).logicalName) && !isModelRecursive(tool));",
     "const exactNamespaceMatchExists = Boolean(needleKey) && candidates.some(tool => identity(tool).provider === needleKey);",
     "const rank = tool => { const { wire, logicalName, provider } = identity(tool); const combined = provider ? `${provider}_${logicalName}` : logicalName; const summary = (tool.description || \"\").split(/\\n\\nexec tool declaration:/i)[0].toLowerCase(); if (!needle) return 0; if (wire === needle || combined === needleKey) return 0; if (exactNamespaceMatchExists && provider === needleKey) return 0; if (!exactNamespaceMatchExists && logicalName === needleKey) return 0; if (logicalName === needleKey) return 1; if (logicalName.includes(needleKey) || combined.includes(needleKey)) return 2; if (provider.includes(needleKey)) return 3; if (summary.includes(needle)) return 4; return 5; };",
     "const matches = candidates.map((tool, index) => ({ tool, index, rank: rank(tool) })).filter(item => !needle || item.rank < 5).sort((left, right) => left.rank - right.rank || left.tool.name.localeCompare(right.tool.name) || left.index - right.index);",

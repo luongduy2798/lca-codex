@@ -95,10 +95,12 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
   });
 }
 
-function structuredContent(text: string): unknown | undefined {
+function structuredContent(text: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(text);
-    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
   } catch {
     return undefined;
   }
@@ -218,7 +220,6 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
       ? resolve(expandUserPath(provider.lcaCodex.threadEnvironmentStatePath))
       : undefined,
   );
-
   const startRuntime = (
     parsed: CodexParsedRequest,
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
@@ -405,9 +406,10 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         }
       }
       if (parsed._compactionRequest) {
-        if (harness === "agent") throw new Error("Generic agent compaction is not enabled yet; start a new agent turn from the retained harness context");
-        const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
-        await chatGptTurnSessions.retireAndWait(responseExecutionKey);
+        if (harness === "codex") {
+          const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
+          await chatGptTurnSessions.retireAndWait(responseExecutionKey);
+        }
       }
       const executionKey = `${executionNamespace}:${harness === "agent"
         ? chatGptAgentExecutionKey(parsed, incoming.agentRequest!.executionId)
@@ -433,6 +435,14 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         {
           threadId: identity.threadId,
           turnId: identity.turnId,
+          ...(harness === "agent" && incoming.agentRequest
+            ? {
+                agentExecutionId: incoming.agentRequest.executionId,
+                ...(incoming.agentRequest.conversationId
+                  ? { agentConversationId: incoming.agentRequest.conversationId }
+                  : {}),
+              }
+            : {}),
           purpose: parsed._compactionRequest ? "compaction" : "response",
         },
       );
@@ -586,9 +596,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
         const browserRetryScheduled = nextAttempt !== null;
         const retryable = retryPolicy.nativeRetryableWithoutBrowserGeneration || browserRetryScheduled;
         if (adapterError && browserRetryScheduled) {
-          // Reconnects must replay an active/successful browser turn, but retryable terminal
-          // ChatGPT failures need a genuinely new Temporary Chat. Retaining a failed session here
-          // made every native retry replay the same cached error for the registry's full TTL.
+          // Retryable terminal ChatGPT failures may start another isolated generation only when
+          // policy permits it. Never reuse the failed page or its connector/binding state.
           logTurnActivity(parsed, "lca_codex.turn_retry_scheduled", {
             traceId,
             attempt: session.runtime.attempt ?? 1,
@@ -622,9 +631,9 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
             errorType: adapterError.errorType,
             code: adapterError.code,
             // Responses deltas are append-only. Once any final-answer text escaped this request,
-            // starting a fresh browser generation would make Codex append the retry from byte 0
-            // after the already-visible prefix. Keep the failed session replayable instead and
-            // force this streamed failure to be terminal for the native request.
+            // starting another browser generation on a new page would append the
+            // retry from byte 0 after the already-visible prefix. Keep the failed session
+            // replayable instead and force this streamed failure to be terminal for this request.
             retryable,
           });
           return;

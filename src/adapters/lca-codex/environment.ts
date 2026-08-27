@@ -229,7 +229,15 @@ function canonicalMetadataEnvironmentBeforeUser(
   if (userIndex <= 0 || !metadata) return undefined;
   const metadataTurnId = typeof metadata.turn_id === "string" ? metadata.turn_id.trim() : "";
   const metadataSandbox = sandboxTypeFromMetadata(metadata.sandbox);
-  if (!metadataTurnId || !metadataSandbox) return undefined;
+  const metadataSandboxName = typeof metadata.sandbox === "string"
+    ? metadata.sandbox.trim().toLowerCase().replaceAll("_", "-")
+    : "";
+  // Codex CLI 0.141 on macOS reports the enforcement mechanism (`seatbelt`) instead of the
+  // effective read/write policy in canonical turn metadata. The adjacent native environment
+  // envelope still carries the exact managed filesystem policy. Accept that older wire shape only
+  // for managed (never unrestricted) envelopes; newer clients continue to require an exact match.
+  const seatbeltSandbox = metadataSandboxName === "seatbelt";
+  if (!metadataTurnId || (!metadataSandbox && !seatbeltSandbox)) return undefined;
   const workspaces = record(metadata.workspaces);
   const metadataRoots = workspaces ? Object.keys(workspaces) : [];
   if (metadataRoots.some(path => !isAbsolute(path))) return undefined;
@@ -237,8 +245,11 @@ function canonicalMetadataEnvironmentBeforeUser(
 
   const user = record(input[userIndex]);
   const candidate = record(input[userIndex - 1]);
-  if (user?.type !== "message" || user.role !== "user" || typeof user.id !== "string" || !user.id) return undefined;
-  if (candidate?.type !== "message" || candidate.role !== "user" || typeof candidate.id !== "string" || !candidate.id) return undefined;
+  if (user?.type !== "message" || user.role !== "user") return undefined;
+  if (candidate?.type !== "message" || candidate.role !== "user") return undefined;
+  const hasServerOwnedIds = typeof user.id === "string" && user.id.length > 0
+    && typeof candidate.id === "string" && candidate.id.length > 0;
+  if (!hasServerOwnedIds && !seatbeltSandbox) return undefined;
   const userTurnId = itemTurnId(user);
   const candidateTurnId = itemTurnId(candidate);
   if ((userTurnId !== undefined && userTurnId !== metadataTurnId)
@@ -271,7 +282,13 @@ function canonicalMetadataEnvironmentBeforeUser(
     if (normalizedMetadataRoots.length > 0
       && !normalizedMetadataRoots.some(root => matchesPath(root, cwd))) continue;
     if (!declaredRoots.some(root => matchesPath(root, cwd))) continue;
-    if (sandboxTypeFromEnvironment(trimmed) !== metadataSandbox) continue;
+    const environmentSandbox = sandboxTypeFromEnvironment(trimmed);
+    if (!environmentSandbox) continue;
+    if (seatbeltSandbox) {
+      if (environmentSandbox === "dangerFullAccess") continue;
+    } else if (environmentSandbox !== metadataSandbox) {
+      continue;
+    }
     return trimmed;
   }
   return undefined;

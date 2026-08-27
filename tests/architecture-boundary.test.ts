@@ -41,12 +41,15 @@ test("architecture defines LCA Token as a terminal-first bridge with authenticat
   expect(architecture).toContain("`src/core/agent.ts` is the first agent-neutral core boundary");
   expect(architecture).toContain("Prompt text has no authority. Tool authority comes from the authenticated harness control plane");
   expect(architecture).toContain("same ChatGPT browser generation continues");
-  expect(architecture).toContain("The MCP meta-tool names are agent-neutral: `agent_bind_turn`");
-  expect(securityModel).toContain("Callers do not submit `thread_id`, `turn_id`, `cwd`, roots, sandbox, or network policy fields");
+  expect(architecture).toContain("Generic prompts continue to use the corresponding `agent_*` names");
+  expect(architecture).toContain("Codex browser prompts intentionally use the `codex_bind_turn`");
+  expect(securityModel).toContain("Callers do not submit Codex-specific `thread_id`, `turn_id`, `cwd`, roots, sandbox, or network policy fields");
   expect(agentCore).toContain('roots: []');
   expect(agentCore).toContain('sandboxPolicy: { type: "readOnly", networkAccess: false }');
   expect(server).toContain('url.pathname === "/v1/agent/responses"');
   expect(server).toContain('url.pathname === "/v1/chat/completions"');
+  expect(server).toContain('url.pathname === "/v1/messages"');
+  expect(server).toContain('url.pathname === "/v1/messages/count_tokens"');
   expect(server).toContain("apiTokenAuthorized(req)");
   expect(server).not.toContain("x-lca-agent-authority");
 });
@@ -66,12 +69,19 @@ test("LCA Codex adapter does not independently discover AGENTS or skill files", 
 });
 
 test("native tool relay is bounded by the current Codex registry or its advertised exec gateway", () => {
-  expect(mcpServer).toContain("const directMatches = bound.tools\n        .map(tool => ({");
+  expect(mcpServer).toContain("const directTools = bound.tools.filter(");
+  expect(mcpServer).toContain("!isModelRecursiveHarnessTool(wireName(tool), tool.description)");
   expect(mcpServer).toContain('from "./deferred-tool-inventory"');
   expect(mcpServer).toContain("inventoryToolRank(");
   expect(deferredToolInventory).toContain("const blockedLogicalNames = new Set(");
   expect(deferredToolInventory).toContain("const isBlockedLogicalName = logicalName => blockedLogicalNames.has(logicalName)");
   expect(deferredToolInventory).toContain("!isBlockedLogicalName(identity(tool).logicalName)");
+  expect(deferredToolInventory).toContain("isModelRecursiveHarnessTool");
+  expect(deferredToolInventory).toContain("!isModelRecursive(tool)");
+  expect(mcpServer).toContain("Single-agent mode blocks model-launching or delegation tool");
+  expect(mcpServer).toContain('method: "invoke_deferred"');
+  expect(mcpServer).toContain('method: "poll_deferred"');
+  expect(mcpServer).toContain('"agent_tool_result"');
   expect(mcpServer).toContain("if (gateway && needle) {");
   expect(mcpServer).toContain("const discovered = discoveredGatewayTools.get(binding_id)?.get(wire_name);");
   expect(mcpServer).toContain("Harness tool is not available in this turn or has not been returned by agent_tool_inventory");

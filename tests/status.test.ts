@@ -5,7 +5,10 @@ test("status exposes generic agent and Codex compatibility endpoints", () => {
   expect(agentEndpoints({ host: "127.0.0.1", port: 8317 })).toEqual({
     models: "http://127.0.0.1:8317/v1/agent/models",
     responses: "http://127.0.0.1:8317/v1/agent/responses",
+    lifecycle: "http://127.0.0.1:8317/v1/agent/lifecycle",
     chatCompletions: "http://127.0.0.1:8317/v1/chat/completions",
+    anthropicMessages: "http://127.0.0.1:8317/v1/messages",
+    anthropicCountTokens: "http://127.0.0.1:8317/v1/messages/count_tokens",
     codexModels: "http://127.0.0.1:8317/v1/models",
     codexResponses: "http://127.0.0.1:8317/v1/responses",
     codexCompact: "http://127.0.0.1:8317/v1/responses/compact",
@@ -30,7 +33,10 @@ test("compact status output is distinct from doctor diagnostics", () => {
   expect(output).toContain("Agent API endpoints:");
   expect(output).toContain("GET  http://127.0.0.1:8317/v1/agent/models");
   expect(output).toContain("POST http://127.0.0.1:8317/v1/agent/responses");
+  expect(output).toContain("POST http://127.0.0.1:8317/v1/agent/lifecycle");
   expect(output).toContain("POST http://127.0.0.1:8317/v1/chat/completions");
+  expect(output).toContain("POST http://127.0.0.1:8317/v1/messages");
+  expect(output).toContain("POST http://127.0.0.1:8317/v1/messages/count_tokens");
   expect(output).toContain("Codex compatibility endpoints:");
   expect(output).toContain("GET  http://127.0.0.1:8317/v1/models");
   expect(output).toContain("POST http://127.0.0.1:8317/v1/responses");

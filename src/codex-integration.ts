@@ -3,14 +3,17 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppConfig } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
+import { LCA_CODEX_MODEL_SLUG } from "./lca-codex-models";
 
 // Reversible compatibility profile for ChatGPT Web constraints. Codex remains the agent harness;
 // LCA Codex only transports turns and native tool capabilities across the bridge.
 const MANAGED_COMMENT = "# Managed by lca-codex; `lca-codex uninstall` restores prior values.";
 const MANAGED_REMOTE_COMPACTION_LINE =
   "remote_compaction_v2 = false # Managed by lca-codex: bounds retained Web image history.";
-const MANAGED_MULTI_AGENT_LINE =
+const LEGACY_MANAGED_MULTI_AGENT_LINE =
   "multi_agent = true # Managed by lca-codex: enables routed Web subagents.";
+const MANAGED_MULTI_AGENT_LINE =
+  "multi_agent = false # Managed by lca-codex: single-agent ChatGPT Web mode.";
 const MANAGED_MULTI_AGENT_V2_LINE =
   "multi_agent_v2 = false # Managed by lca-codex: keeps routed Web subagent payloads readable.";
 const MANAGED_MULTI_AGENT_V2_TABLE_LINE =
@@ -36,11 +39,16 @@ export interface CodexIntegrationJournal {
   configPath: string;
   installed: {
     openai_base_url: string;
+    /** Absent only in version-6 journals created before the routed model was managed. */
+    model?: string;
     remote_compaction_v2: false;
-    multi_agent: true;
+    /** `true` is accepted only for migration from the previous managed profile. */
+    multi_agent: boolean;
     multi_agent_v2: false;
   };
   previous: Record<ManagedAssignmentKey, PreviousAssignment>;
+  /** Absent only in version-6 journals created before the routed model was managed. */
+  previousModel?: PreviousAssignment;
   previousRemoteCompactionV2: PreviousFeatureAssignment;
   previousMultiAgent: PreviousFeatureAssignment;
   previousMultiAgentV2: PreviousFeatureAssignment;
@@ -556,7 +564,12 @@ function verifyInstalledFeatures(
     "false",
     MANAGED_REMOTE_COMPACTION_LINE,
   );
-  verifyInstalledBooleanFeature(text, "multi_agent", "true", MANAGED_MULTI_AGENT_LINE);
+  verifyInstalledBooleanFeature(
+    text,
+    "multi_agent",
+    journal.installed.multi_agent ? "true" : "false",
+    journal.installed.multi_agent ? LEGACY_MANAGED_MULTI_AGENT_LINE : MANAGED_MULTI_AGENT_LINE,
+  );
   verifyInstalledMultiAgentV2Feature(text, journal.previousMultiAgentV2);
 }
 
@@ -568,8 +581,8 @@ function restoreManagedFeatures(
   const withoutMultiAgent = restoreBooleanFeature(
     withoutMultiAgentV2,
     "multi_agent",
-    "true",
-    MANAGED_MULTI_AGENT_LINE,
+    journal.installed.multi_agent ? "true" : "false",
+    journal.installed.multi_agent ? LEGACY_MANAGED_MULTI_AGENT_LINE : MANAGED_MULTI_AGENT_LINE,
     journal.previousMultiAgent,
   );
   return restoreBooleanFeature(
@@ -588,6 +601,7 @@ function installIntegrationConfig(
 ): {
   text: string;
   previous: CodexIntegrationJournal["previous"];
+  previousModel: PreviousAssignment;
   previousRemoteCompactionV2: PreviousFeatureAssignment;
   previousMultiAgent: PreviousFeatureAssignment;
   previousMultiAgentV2: PreviousFeatureAssignment;
@@ -597,6 +611,7 @@ function installIntegrationConfig(
   return {
     text: features.text,
     previous: route.previous,
+    previousModel: route.previousModel,
     previousRemoteCompactionV2: features.previousRemoteCompactionV2,
     previousMultiAgent: features.previousMultiAgent,
     previousMultiAgentV2: features.previousMultiAgentV2,
@@ -607,9 +622,10 @@ function installRoute(
   text: string,
   installedUrl: string,
   replaceExistingRoute: boolean,
-): { text: string; previous: CodexIntegrationJournal["previous"] } {
+): { text: string; previous: CodexIntegrationJournal["previous"]; previousModel: PreviousAssignment } {
   const document = parseDocument(text);
   const previous = assignments(document.lines);
+  const previousModel = findTopLevelAssignment(document.lines, "model");
   const conflicts = (Object.entries(previous) as Array<[ManagedAssignmentKey, PreviousAssignment]>)
     .filter(([key, assignment]) => assignment.present
       && !(key === "model_provider" && assignment.value === "openai"))
@@ -625,6 +641,12 @@ function installRoute(
     const location = findTopLevelAssignment(document.lines, key);
     if (location.index !== undefined) removeDocumentLine(document, location.index);
   }
+  const currentModel = findTopLevelAssignment(document.lines, "model");
+  if (currentModel.index !== undefined) {
+    document.lines[currentModel.index] = `model = ${JSON.stringify(LCA_CODEX_MODEL_SLUG)}`;
+  } else {
+    insertDocumentLine(document, firstTableIndex(document.lines), `model = ${JSON.stringify(LCA_CODEX_MODEL_SLUG)}`);
+  }
   const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   if (currentBaseUrl.index !== undefined) {
     document.lines[currentBaseUrl.index] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
@@ -634,7 +656,7 @@ function installRoute(
   removeManagedComment(document);
   const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   insertDocumentLine(document, installedBaseUrl.index!, MANAGED_COMMENT);
-  return { text: renderDocument(document), previous };
+  return { text: renderDocument(document), previous, previousModel };
 }
 
 function verifyInstalledRoute(text: string, journal: CodexIntegrationJournal): void {
@@ -645,6 +667,12 @@ function verifyInstalledRoute(text: string, journal: CodexIntegrationJournal): v
   }
   if (current.model_provider.present || current.model_catalog_json.present) {
     throw new Error("Codex model_provider or model_catalog_json changed after setup; refusing to overwrite the user's newer value");
+  }
+  if (journal.installed.model) {
+    const currentModel = findTopLevelAssignment(lines, "model");
+    if (currentModel.value !== journal.installed.model) {
+      throw new Error("Codex model changed after setup; refusing to overwrite the user's newer value");
+    }
   }
   if (!lines.includes(MANAGED_COMMENT)) {
     throw new Error("Managed Codex route marker changed after setup; refusing to overwrite it");
@@ -666,6 +694,12 @@ function verifyRestoredRoute(
   for (const key of ["openai_base_url", "model_provider", "model_catalog_json"] as const) {
     if (!previousAssignmentMatches(current[key], journal.previous[key])) {
       throw new Error(`Codex ${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`);
+    }
+  }
+  if (journal.previousModel) {
+    const currentModel = findTopLevelAssignment(lines, "model");
+    if (!previousAssignmentMatches(currentModel, journal.previousModel)) {
+      throw new Error("Codex model changed while the bridge was disconnected; refusing to overwrite the user's newer value");
     }
   }
   if (lines.includes(MANAGED_COMMENT)) {
@@ -702,6 +736,15 @@ function assertPreservedPreviousAssignments(
   }
 }
 
+function assertPreservedPreviousModel(
+  actual: PreviousAssignment,
+  expected: PreviousAssignment | undefined,
+): void {
+  if (expected && !previousAssignmentMatches(actual, expected)) {
+    throw new Error("Codex model changed while the bridge was disconnected; refusing to replace it");
+  }
+}
+
 function assertPreservedPreviousFeature(
   actual: PreviousFeatureAssignment,
   expected: PreviousFeatureAssignment,
@@ -717,13 +760,33 @@ function assertPreservedPreviousFeature(
   }
 }
 
-function updateManagedRouteUrl(text: string, journal: CodexIntegrationJournal, installedUrl: string): string {
+function updateManagedRoute(
+  text: string,
+  journal: CodexIntegrationJournal,
+  installedUrl: string,
+): { text: string; previousModel?: PreviousAssignment } {
   verifyInstalledRoute(text, journal);
   const document = parseDocument(text);
   const current = findTopLevelAssignment(document.lines, "openai_base_url");
   if (current.index === undefined) throw new Error("Managed Codex openai_base_url is missing");
   document.lines[current.index] = `openai_base_url = ${JSON.stringify(installedUrl)}`;
-  return renderDocument(document);
+  let previousModel: PreviousAssignment | undefined;
+  if (!journal.installed.model) {
+    previousModel = findTopLevelAssignment(document.lines, "model");
+    if (previousModel.index !== undefined) {
+      document.lines[previousModel.index] = `model = ${JSON.stringify(LCA_CODEX_MODEL_SLUG)}`;
+    } else {
+      insertDocumentLine(document, firstTableIndex(document.lines), `model = ${JSON.stringify(LCA_CODEX_MODEL_SLUG)}`);
+    }
+  }
+  if (journal.installed.multi_agent) {
+    const multiAgent = findFeatureAssignment(document.lines, "multi_agent");
+    if (multiAgent.index === undefined || multiAgent.rawLine !== LEGACY_MANAGED_MULTI_AGENT_LINE) {
+      throw new Error("Managed Codex multi_agent feature is missing during single-agent migration");
+    }
+    document.lines[multiAgent.index] = MANAGED_MULTI_AGENT_LINE;
+  }
+  return { text: renderDocument(document), previousModel };
 }
 
 function restoreManagedRoute(text: string, journal: CodexIntegrationJournal): string {
@@ -738,6 +801,16 @@ function restoreManagedRoute(text: string, journal: CodexIntegrationJournal): st
     document.lines[currentBaseUrl.index] = previousBaseUrl.rawLine;
   } else {
     removeDocumentLine(document, currentBaseUrl.index);
+  }
+  if (journal.installed.model && journal.previousModel) {
+    const currentModel = findTopLevelAssignment(document.lines, "model");
+    if (currentModel.index === undefined) throw new Error("Managed Codex model is missing");
+    if (journal.previousModel.present) {
+      if (!journal.previousModel.rawLine) throw new Error("Codex integration journal is missing the prior model line");
+      document.lines[currentModel.index] = journal.previousModel.rawLine;
+    } else {
+      removeDocumentLine(document, currentModel.index);
+    }
   }
   const removedAssignments = (["model_provider", "model_catalog_json"] as const)
     .map(key => ({ key, previous: journal.previous[key] }))
@@ -769,6 +842,7 @@ function readJournalFile(path: string): CodexIntegrationJournal | undefined {
       configPath: journal.configPath,
       installed: {
         openai_base_url: journal.installed.openai_base_url,
+        ...(typeof journal.installed.model === "string" ? { model: journal.installed.model } : {}),
         remote_compaction_v2: journal.installed.remote_compaction_v2,
         multi_agent: journal.installed.multi_agent,
         multi_agent_v2: journal.installed.multi_agent_v2,
@@ -778,6 +852,7 @@ function readJournalFile(path: string): CodexIntegrationJournal | undefined {
         model_provider: { ...journal.previous.model_provider },
         model_catalog_json: { ...journal.previous.model_catalog_json },
       },
+      ...(journal.previousModel ? { previousModel: { ...journal.previousModel } } : {}),
       previousRemoteCompactionV2: { ...journal.previousRemoteCompactionV2 },
       previousMultiAgent: { ...journal.previousMultiAgent },
       previousMultiAgentV2: { ...journal.previousMultiAgentV2 },
@@ -850,6 +925,7 @@ export function installCodexIntegration(
 
   if (existing) {
     let installedText: string;
+    let previousModel = existing.previousModel;
     let previousRemoteCompactionV2 = existing.previousRemoteCompactionV2;
     let previousMultiAgent = existing.previousMultiAgent;
     let previousMultiAgentV2 = existing.previousMultiAgentV2;
@@ -857,6 +933,7 @@ export function installCodexIntegration(
       verifyRestoredRoute(currentText, existing);
       const patched = installIntegrationConfig(currentText, installedUrl, true);
       assertPreservedPreviousAssignments(patched.previous, existing.previous);
+      assertPreservedPreviousModel(patched.previousModel, existing.previousModel);
       assertPreservedPreviousFeature(
         patched.previousRemoteCompactionV2,
         existing.previousRemoteCompactionV2,
@@ -873,23 +950,28 @@ export function installCodexIntegration(
         "multi_agent_v2",
       );
       installedText = patched.text;
+      previousModel = patched.previousModel;
       // Preserve unrelated [features] edits made while disconnected by remembering whether the
       // table itself now belongs to the user's baseline.
       previousRemoteCompactionV2 = patched.previousRemoteCompactionV2;
       previousMultiAgent = patched.previousMultiAgent;
       previousMultiAgentV2 = patched.previousMultiAgentV2;
     } else {
-      installedText = updateManagedRouteUrl(currentText, existing, installedUrl);
+      const patched = updateManagedRoute(currentText, existing, installedUrl);
+      installedText = patched.text;
+      previousModel = existing.previousModel ?? patched.previousModel;
     }
     const updated: CodexIntegrationJournal = {
       ...existing,
       active: true,
       installed: {
         openai_base_url: installedUrl,
+        model: LCA_CODEX_MODEL_SLUG,
         remote_compaction_v2: false,
-        multi_agent: true,
+        multi_agent: false,
         multi_agent_v2: false,
       },
+      previousModel,
       previousRemoteCompactionV2,
       previousMultiAgent,
       previousMultiAgentV2,
@@ -904,11 +986,13 @@ export function installCodexIntegration(
     configPath,
     installed: {
       openai_base_url: installedUrl,
+      model: LCA_CODEX_MODEL_SLUG,
       remote_compaction_v2: false,
-      multi_agent: true,
+      multi_agent: false,
       multi_agent_v2: false,
     },
     previous: patched.previous,
+    previousModel: patched.previousModel,
     previousRemoteCompactionV2: patched.previousRemoteCompactionV2,
     previousMultiAgent: patched.previousMultiAgent,
     previousMultiAgentV2: patched.previousMultiAgentV2,
@@ -953,6 +1037,7 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   verifyRestoredRoute(current, existing);
   const patched = installIntegrationConfig(current, existing.installed.openai_base_url, true);
   assertPreservedPreviousAssignments(patched.previous, existing.previous);
+  assertPreservedPreviousModel(patched.previousModel, existing.previousModel);
   assertPreservedPreviousFeature(
     patched.previousRemoteCompactionV2,
     existing.previousRemoteCompactionV2,
@@ -971,6 +1056,11 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const connected: CodexIntegrationJournal = {
     ...existing,
     active: true,
+    installed: {
+      ...existing.installed,
+      model: LCA_CODEX_MODEL_SLUG,
+    },
+    previousModel: existing.previousModel ?? patched.previousModel,
     previousRemoteCompactionV2: patched.previousRemoteCompactionV2,
     previousMultiAgent: patched.previousMultiAgent,
     previousMultiAgentV2: patched.previousMultiAgentV2,

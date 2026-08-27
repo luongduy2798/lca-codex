@@ -231,6 +231,100 @@ test("Cline-style textual tool rounds keep stable private task identity metadata
   expect(conversationIds[1]).toBe(conversationIds[0]);
 });
 
+test("Cline-style compacted history keeps task identity when the retained tail is unique", async () => {
+  const { token } = ensureApiToken();
+  const conversationIds: string[] = [];
+  const factory = (_provider: CodexProviderConfig): ProviderAdapter => ({
+    name: "chat-cline-compaction-affinity-test",
+    async runTurn(_parsed, incoming, emit) {
+      conversationIds.push(incoming.agentRequest?.conversationId ?? "missing");
+      emit({ type: "text_delta", text: "done", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true, usage: { inputTokens: 2, outputTokens: 1 } });
+    },
+  });
+  const system = "Tool uses are formatted using XML-style tags. Finish with <attempt_completion>.";
+  const retainedUser = { role: "user", content: "recent tool result that survives compaction" };
+  const retainedAssistant = { role: "assistant", content: "recent assistant turn that survives compaction" };
+  const first = await chatCompletionsRequest(request(token, {
+    model: "lca-token",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: "original Cline task" },
+      { role: "assistant", content: "older assistant turn" },
+      { role: "user", content: "older tool result" },
+      { role: "assistant", content: "another older assistant turn" },
+      { role: "user", content: "another older tool result" },
+      retainedUser,
+      retainedAssistant,
+    ],
+  }), defaultConfig(), factory);
+  expect(first.status).toBe(200);
+  const firstTaskId = first.headers.get("x-lca-task-id");
+  expect(firstTaskId).toMatch(/^lca-task-[0-9a-f]{32}$/);
+
+  const compacted = await chatCompletionsRequest(request(token, {
+    model: "lca-token",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: "[Continue assisting the user!]" },
+      { role: "assistant", content: "[NOTE] Some previous conversation history with the user has been removed." },
+      retainedUser,
+      retainedAssistant,
+      { role: "user", content: "continue after compaction" },
+    ],
+  }), defaultConfig(), factory);
+  expect(compacted.status).toBe(200);
+  expect(compacted.headers.get("x-lca-task-id")).toBe(firstTaskId);
+  expect(conversationIds).toHaveLength(2);
+  expect(conversationIds[0]).not.toBe("missing");
+  expect(conversationIds[1]).toBe(conversationIds[0]);
+});
+
+test("Cline-style compacted history fails closed when the retained tail matches multiple tasks", async () => {
+  const { token } = ensureApiToken();
+  const conversationIds: string[] = [];
+  const factory = (_provider: CodexProviderConfig): ProviderAdapter => ({
+    name: "chat-cline-compaction-ambiguous-affinity-test",
+    async runTurn(_parsed, incoming, emit) {
+      conversationIds.push(incoming.agentRequest?.conversationId ?? "missing");
+      emit({ type: "text_delta", text: "done", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true, usage: { inputTokens: 2, outputTokens: 1 } });
+    },
+  });
+  const retainedUser = { role: "user", content: "shared retained result" };
+  const retainedAssistant = { role: "assistant", content: "shared retained assistant turn" };
+  for (const task of ["task-a", "task-b"]) {
+    const response = await chatCompletionsRequest(request(token, {
+      model: "lca-token",
+      messages: [
+        { role: "system", content: `instructions for ${task}` },
+        { role: "user", content: `original prompt for ${task}` },
+        { role: "assistant", content: `older response for ${task}` },
+        { role: "user", content: `older result for ${task}` },
+        retainedUser,
+        retainedAssistant,
+      ],
+    }), defaultConfig(), factory);
+    expect(response.status).toBe(200);
+  }
+
+  const compacted = await chatCompletionsRequest(request(token, {
+    model: "lca-token",
+    messages: [
+      { role: "system", content: "rewritten compact instructions" },
+      { role: "user", content: "[Continue assisting the user!]" },
+      retainedUser,
+      retainedAssistant,
+      { role: "user", content: "continue after ambiguous compaction" },
+    ],
+  }), defaultConfig(), factory);
+  expect(compacted.status).toBe(200);
+  expect(conversationIds).toHaveLength(3);
+  expect(conversationIds[0]).not.toBe(conversationIds[1]);
+  expect(conversationIds[2]).not.toBe(conversationIds[0]);
+  expect(conversationIds[2]).not.toBe(conversationIds[1]);
+});
+
 test("ordinary Chat Completions follow-ups keep stable private task identity metadata", async () => {
   const { token } = ensureApiToken();
   const conversationIds: string[] = [];

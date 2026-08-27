@@ -8,6 +8,7 @@
 	connector-status connector-setup \
 	api-key-status api-key-create api-key-rotate api-key-revoke api-key-path \
 	api-token-status api-token-create api-token-rotate api-token-revoke api-token-path \
+	harness-setup-codex harness-setup-claude-code harness-setup-cline harness-setup-all \
 	profile-show profile-list profile-create profile-use config-path browser-check serve \
 	open-tunnels open-runtime-keys open-connectors uninstall \
 	test test-safe typecheck verify help
@@ -136,6 +137,21 @@ api-token-rotate: api-key-rotate
 api-token-revoke: api-key-revoke
 api-token-path: api-key-path
 
+harness-setup-codex: check-bun
+	$(CLI) harness setup codex $(if $(filter 1 true yes,$(REPLACE)),--replace-codex-route)
+
+harness-setup-claude-code: check-bun
+	$(CLI) harness setup claude-code $(if $(strip $(MODEL)),--model "$(MODEL)")
+
+harness-setup-cline: check-bun
+	$(CLI) harness setup cline $(if $(strip $(MODEL)),--model "$(MODEL)")
+
+harness-setup-all: check-bun
+	$(CLI) harness setup all \
+		$(if $(strip $(CLAUDE_MODEL)),--claude-model "$(CLAUDE_MODEL)") \
+		$(if $(strip $(CLINE_MODEL)),--cline-model "$(CLINE_MODEL)") \
+		$(if $(filter 1 true yes,$(REPLACE)),--replace-codex-route)
+
 profile-show: check-bun
 	$(CLI) profile show
 
@@ -219,6 +235,12 @@ help:
 		'API key' \
 		'  make api-key-status | make api-key-create | make api-key-rotate' \
 		'  make api-key-revoke | make api-key-path' \
+		'' \
+		'Harness configuration' \
+		'  make harness-setup-codex [REPLACE=1]' \
+		'  make harness-setup-claude-code [MODEL=lca-token]' \
+		'  make harness-setup-cline [MODEL=lca-token]' \
+		'  make harness-setup-all [CLAUDE_MODEL=...] [CLINE_MODEL=...] [REPLACE=1]' \
 		'' \
 		'Profiles / config' \
 		'  make profile-show | make profile-list' \

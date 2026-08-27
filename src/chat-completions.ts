@@ -136,9 +136,9 @@ function hasTextualXmlToolProtocol(messages: unknown): boolean {
 
 /**
  * Chat Completions has no standard thread id. This immutable-prefix derivation is only a
- * backward-compatible best effort for append-only transcripts. Harnesses that may compact or
- * rewrite history should use the transport-neutral LCA task-id contract instead. Keep this
- * fallback private to continuation/task bookkeeping; it must never select or reuse a browser page.
+ * backward-compatible best effort for append-only transcripts. The server may recover a compacted
+ * stock-harness task from a uniquely retained recent tail, but harnesses that may arbitrarily
+ * compact or rewrite history should use the transport-neutral LCA task-id contract instead.
  */
 export function chatCompletionsConversationId(body: unknown): string | undefined {
   if (!isObject(body) || !Array.isArray(body.messages)) return undefined;

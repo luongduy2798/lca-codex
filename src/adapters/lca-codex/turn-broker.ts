@@ -36,10 +36,19 @@ export interface BrokerToolResult {
   _meta?: unknown;
 }
 
+export interface BrokerDeferredInvocation {
+  invocationId: string;
+}
+
+export type BrokerDeferredToolStatus =
+  | { status: "pending"; invocationId: string }
+  | { status: "completed"; invocationId: string; result: BrokerToolResult };
+
 interface PendingInvocation {
   request: BrokerToolRequest;
   activityTool: string;
   startedAt: number;
+  deferred: boolean;
   resolve: (result: BrokerToolResult) => void;
   reject: (error: Error) => void;
 }
@@ -71,13 +80,14 @@ interface TurnChannel {
   };
   queuedCallIds: string[];
   invocations: Map<string, PendingInvocation>;
+  deferredResults: Map<string, BrokerToolResult>;
   waiters: Set<ToolWaiter>;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface BrokerRequest {
   id: string;
-  method: "claim" | "resolve" | "release" | "context_query" | "invoke" | "health_check";
+  method: "claim" | "resolve" | "release" | "context_query" | "invoke" | "invoke_deferred" | "poll_deferred" | "health_check";
   token?: string;
   bindingId?: string;
   action?: ContextQueryAction;
@@ -91,6 +101,7 @@ interface BrokerRequest {
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
+  invocationId?: string;
   /** Public LCA connector tool that originated this broker operation. */
   sourceTool?: string;
   /** Native Codex tool requested before any exec-gateway wrapping. */
@@ -202,6 +213,7 @@ export class TurnBroker {
       } : {}),
       queuedCallIds: [],
       invocations: new Map(),
+      deferredResults: new Map(),
       waiters: new Set(),
     };
     this.channels.set(token, channel);
@@ -269,6 +281,7 @@ export class TurnBroker {
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (channel.queuedCallIds.includes(callId)) throw new Error(`tool call was completed before it was delivered: ${callId}`);
     channel.invocations.delete(callId);
+    if (invocation.deferred) channel.deferredResults.set(callId, result);
     logLcaCodexActivity("lca_codex.tool_completed", {
       traceId: channel.traceId,
       layer: "codex",
@@ -496,6 +509,8 @@ export class TurnBroker {
       && request.method !== "release"
       && request.method !== "context_query"
       && request.method !== "invoke"
+      && request.method !== "invoke_deferred"
+      && request.method !== "poll_deferred"
       && request.method !== "health_check") {
       throw new Error("turn broker method is invalid");
     }
@@ -558,6 +573,15 @@ export class TurnBroker {
     }
     if (request.method === "resolve") {
       return { environment: binding.channel.environment };
+    }
+    if (request.method === "poll_deferred") {
+      const invocationId = request.invocationId?.trim();
+      if (!invocationId) throw new Error("deferred invocation id is required");
+      const completed = binding.channel.deferredResults.get(invocationId);
+      if (completed) return { status: "completed", invocationId, result: completed } satisfies BrokerDeferredToolStatus;
+      const pendingInvocation = binding.channel.invocations.get(invocationId);
+      if (!pendingInvocation?.deferred) throw new Error("deferred tool invocation is invalid or no longer available");
+      return { status: "pending", invocationId } satisfies BrokerDeferredToolStatus;
     }
     if (request.method === "context_query") {
       const context = binding.channel.context;
@@ -664,13 +688,13 @@ export class TurnBroker {
 
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
-    return this.invokeChannel(
-      binding.channel,
-      wireName,
-      request.freeform === true,
-      request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} },
-      request.activityTool?.trim() || wireName,
-    );
+    const payload = request.freeform === true
+      ? { input: request.input ?? "" }
+      : { arguments: request.arguments ?? {} };
+    const activityTool = request.activityTool?.trim() || wireName;
+    return request.method === "invoke_deferred"
+      ? this.invokeDeferredChannel(binding.channel, wireName, request.freeform === true, payload, activityTool)
+      : this.invokeChannel(binding.channel, wireName, request.freeform === true, payload, activityTool);
   }
 
   private invokeChannel(
@@ -680,6 +704,29 @@ export class TurnBroker {
     payload: { arguments?: Record<string, unknown>; input?: string },
     activityTool: string,
   ): Promise<BrokerToolResult> {
+    return this.queueChannelInvocation(channel, wireName, freeform, payload, activityTool, false).result;
+  }
+
+  private invokeDeferredChannel(
+    channel: TurnChannel,
+    wireName: string,
+    freeform: boolean,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+    activityTool: string,
+  ): BrokerDeferredInvocation {
+    const queued = this.queueChannelInvocation(channel, wireName, freeform, payload, activityTool, true);
+    void queued.result.catch(() => {});
+    return { invocationId: queued.callId };
+  }
+
+  private queueChannelInvocation(
+    channel: TurnChannel,
+    wireName: string,
+    freeform: boolean,
+    payload: { arguments?: Record<string, unknown>; input?: string },
+    activityTool: string,
+    deferred: boolean,
+  ): { callId: string; result: Promise<BrokerToolResult> } {
     const callId = opaqueId("call");
     const startedAt = Date.now();
     const toolRequest: BrokerToolRequest = {
@@ -688,11 +735,12 @@ export class TurnBroker {
       freeform,
       ...(freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
     };
-    return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
+    const result = new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
       channel.invocations.set(callId, {
         request: toolRequest,
         activityTool,
         startedAt,
+        deferred,
         resolve: resolveInvoke,
         reject: rejectInvoke,
       });
@@ -708,6 +756,7 @@ export class TurnBroker {
       );
       this.scheduleToolWaiters(channel);
     });
+    return { callId, result };
   }
 
   private exactEnvironmentTool(environment: ChatGptTurnEnvironment, name: string) {
@@ -848,6 +897,7 @@ export class TurnBroker {
       invocation.reject(error);
     }
     channel.invocations.clear();
+    channel.deferredResults.clear();
     channel.queuedCallIds = [];
   }
 

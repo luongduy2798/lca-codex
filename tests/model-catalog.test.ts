@@ -16,6 +16,7 @@ function source(): Record<string, unknown> {
         description: "native",
         priority: 2,
         shell_type: "shell_command",
+        apply_patch_tool_type: "freeform",
         visibility: "list",
         supported_in_api: true,
         multi_agent_version: "v2",
@@ -26,7 +27,7 @@ function source(): Record<string, unknown> {
           { effort: "high", description: "High native" },
           { effort: "xhigh", description: "Extra high native" },
         ],
-        tool_mode: "code_mode_only",
+        tool_mode: null,
         context_window: 300_000,
         max_context_window: 320_000,
         auto_compact_token_limit: 270_000,
@@ -57,7 +58,7 @@ describe("native /models augmentation", () => {
     expect(routed).toMatchObject({
       slug: "lca-token",
       display_name: "LCA Token",
-      tool_mode: "code_mode_only",
+      tool_mode: null,
       default_reasoning_level: "high",
       supported_reasoning_levels: [
         { effort: "low", description: "Instant" },
@@ -66,7 +67,7 @@ describe("native /models augmentation", () => {
         { effort: "xhigh", description: "Extra High" },
         { effort: "ultra", description: "Pro" },
       ],
-      multi_agent_version: "v1",
+      multi_agent_version: null,
       supported_in_api: true,
       priority: LCA_CODEX_MODEL_PRIORITY,
       context_window: limits.contextWindow,
@@ -79,17 +80,12 @@ describe("native /models augmentation", () => {
     expect(routed).not.toHaveProperty("comp_hash");
   });
 
-  test("keeps the shared LCA Codex model in Codex's V1 spawn-agent model registry", () => {
+  test("keeps the routed LCA Codex model out of Codex's subagent model registry", () => {
     const config = defaultConfig();
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
-    const spawnOverrides = models
-      .filter(model => model.supported_in_api === true && model.visibility === "list")
-      .toSorted((left, right) => Number(left.priority) - Number(right.priority))
-      .slice(0, 5)
-      .map(model => model.slug);
-
-    expect(spawnOverrides).toEqual(["lca-token", "gpt-5.6-sol"]);
+    const routed = models.find(model => model.slug === "lca-token");
+    expect(routed?.multi_agent_version).toBeNull();
   });
 
   test("is idempotent, reserves the routed namespace, and hides Pro-only reasoning when unavailable", () => {
@@ -106,8 +102,8 @@ describe("native /models augmentation", () => {
     const models = second.models as Array<Record<string, unknown>>;
     const routed = models.filter(model => model.slug === "lca-token");
     expect(routed).toHaveLength(1);
-    expect(routed[0]!.tool_mode).toBe("code_mode_only");
-    expect(routed[0]!.multi_agent_version).toBe("v1");
+    expect(routed[0]!.tool_mode).toBeNull();
+    expect(routed[0]!.multi_agent_version).toBeNull();
     expect(routed[0]!.supported_reasoning_levels).toEqual([
       { effort: "low", description: "Instant" },
       { effort: "medium", description: "Medium" },
@@ -188,9 +184,10 @@ describe("native /models augmentation", () => {
     Object.assign(models[1]!, {
       visibility: "list",
       supported_in_api: true,
-      tool_mode: "code_mode_only",
+      tool_mode: null,
       supported_reasoning_levels: [{ effort: "high", description: "High" }],
       shell_type: "shell_command",
+      apply_patch_tool_type: "freeform",
       max_context_window: 872_000,
     });
 
@@ -198,7 +195,7 @@ describe("native /models augmentation", () => {
     const routed = (result.models as Array<Record<string, unknown>>)
       .find(model => model.slug === "lca-token");
     expect(routed?.shell_type).toBe("shell_command");
-    expect(routed?.tool_mode).toBe("code_mode_only");
+    expect(routed?.tool_mode).toBeNull();
   });
 
   test("follows official catalog order instead of preferring a named paid-tier model", () => {
@@ -228,6 +225,6 @@ describe("native /models augmentation", () => {
         supported_reasoning_levels: [],
         tool_mode: null,
       }],
-    }, defaultConfig())).toThrow("no list-visible, API-supported, tool-capable model");
+    }, defaultConfig())).toThrow("no list-visible, API-supported shell/patch model");
   });
 });

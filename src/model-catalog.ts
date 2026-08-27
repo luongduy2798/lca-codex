@@ -10,7 +10,7 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
-/** Keep the routed LCA Codex model at the front of Codex's spawn-agent override registry. */
+/** Keep the routed LCA Codex model at the front of Codex's ordinary model picker. */
 export const LCA_CODEX_MODEL_PRIORITY = 0;
 
 function object(value: unknown, label: string): JsonObject {
@@ -38,21 +38,26 @@ function isOwnedLcaCodexSlug(modelSlug: string | undefined): boolean {
   return modelSlug === LCA_CODEX_MODEL_SLUG || modelSlug?.startsWith(LCA_CODEX_MODEL_PREFIX) === true;
 }
 
-function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
+function nativeTemplateCandidate(value: unknown): value is JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const model = value as JsonObject;
   const modelSlug = slug(model);
   if (!modelSlug || isOwnedLcaCodexSlug(modelSlug)) return false;
   if (model.visibility !== "list" || model.supported_in_api !== true) return false;
   if (!Array.isArray(model.supported_reasoning_levels)) return false;
-  return !requireTools || (typeof model.tool_mode === "string" && model.tool_mode.length > 0);
+  // Current Codex catalogs advertise normal interactive models with `tool_mode: null`; shell and
+  // patch capability live in their dedicated fields instead. Requiring the legacy non-null
+  // `tool_mode` makes every current list-visible model disappear and turns /v1/models into 502.
+  if (typeof model.shell_type !== "string" || model.shell_type.length === 0) return false;
+  if (typeof model.apply_patch_tool_type !== "string" || model.apply_patch_tool_type.length === 0) return false;
+  return true;
 }
 
 function selectNativeTemplate(models: unknown[], _config: AppConfig): JsonObject {
-  const candidates = models.filter(model => nativeTemplateCandidate(model, true)) as JsonObject[];
+  const candidates = models.filter(nativeTemplateCandidate) as JsonObject[];
   const template = candidates[0];
   if (template) return template;
-  throw new Error("Native Codex models response has no list-visible, API-supported, tool-capable model with reasoning metadata");
+  throw new Error("Native Codex models response has no list-visible, API-supported shell/patch model with reasoning metadata");
 }
 
 export function buildLcaCodexModel(
@@ -78,9 +83,12 @@ export function buildLcaCodexModel(
     visibility: "list",
     supported_in_api: true,
     priority: LCA_CODEX_MODEL_PRIORITY,
-    multi_agent_version: "v1",
-    // All reasoning levels share the same connector/tool capability when it is enabled.
-    tool_mode: template.tool_mode,
+    // LCA Token deliberately exposes one ChatGPT Web reasoning agent per Codex task. A null
+    // multi_agent_version keeps the routed model out of Codex's subagent model registry.
+    multi_agent_version: null,
+    // Preserve the current native model's tool contract. Modern Codex uses shell_type and
+    // apply_patch_tool_type while list-visible models commonly advertise tool_mode=null.
+    tool_mode: template.tool_mode ?? null,
     upgrade: null,
     default_reasoning_level: "high",
     supported_reasoning_levels: reasoningModes.map(mode =>

@@ -26,7 +26,6 @@ import {
   chatGptManagedChromeArgs,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
-import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import { LcaCodexAdapterError } from "./adapter-error";
 import { activityDuration, logLcaCodexActivity } from "./activity";
 
@@ -356,6 +355,7 @@ export class ChatGptNetworkTurnTracker {
   private ownedConversationId?: string;
   private ownedTurnId?: string;
   private ownedConversationCreated = false;
+  private ownedTurnConversationCompleted = false;
   private readonly createdConversationIds = new Set<string>();
   private readonly conversationOnlyCompletions = new Set<string>();
   private readonly completedTurnIds = new Map<string, Set<string>>();
@@ -375,6 +375,7 @@ export class ChatGptNetworkTurnTracker {
     this.ownedConversationId = undefined;
     this.ownedTurnId = undefined;
     this.ownedConversationCreated = false;
+    this.ownedTurnConversationCompleted = false;
     this.createdConversationIds.clear();
     this.conversationOnlyCompletions.clear();
     this.completedTurnIds.clear();
@@ -491,6 +492,12 @@ export class ChatGptNetworkTurnTracker {
           turnIds.add(turnId);
         } else {
           this.conversationOnlyCompletions.add(conversationId);
+          if (conversationId === this.ownedConversationId && this.ownedTurnId) {
+            // A conversation-only completion is safe only after this page has already bound an
+            // exact owned turn. An earlier ambiguous completion stays buffered until ownership
+            // is established by this fresh execution's network traffic.
+            this.ownedTurnConversationCompleted = true;
+          }
         }
         this.tryCompleteOwnedTurn();
       }
@@ -510,7 +517,7 @@ export class ChatGptNetworkTurnTracker {
       && this.completedTurnIds.get(this.ownedConversationId)?.has(this.ownedTurnId) === true;
     const confirmedConversationCompleted = this.ownedConversationCreated
       && this.conversationOnlyCompletions.has(this.ownedConversationId);
-    if (!exactTurnCompleted && !confirmedConversationCompleted) return;
+    if (!exactTurnCompleted && !confirmedConversationCompleted && !this.ownedTurnConversationCompleted) return;
     this.completed = true;
     this.emitTransition("completed");
   }
@@ -541,6 +548,7 @@ export class ChatGptNetworkTurnTracker {
       completed: this.completed,
     };
   }
+
 }
 
 class ChatGptNetworkTurnObserver {
@@ -1092,11 +1100,6 @@ export class ChatGptBrowserWorker {
     if (this.activeRuns.has(turn.traceId)) {
       return Promise.reject(new Error(`Duplicate LCA Codex browser turn: ${turn.traceId}`));
     }
-    if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
-      return Promise.reject(new Error(
-        `LCA Codex supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
-      ));
-    }
     const run = Promise.resolve().then(() => this.runExclusive(turn));
     this.activeRuns.set(turn.traceId, run);
     void run.finally(() => {
@@ -1211,14 +1214,10 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  /**
-   * Every browser generation owns one isolated Temporary Chat document. Reusing a ChatGPT SPA
-   * page can leak the preceding prompt/transcript into an unrelated logical turn, so never retain
-   * a page across completed generations.
-   */
+  /** Every model execution owns a fresh Temporary Chat page; the harness owns all retained history. */
   private async pageForNewTurn(): Promise<Page> {
     const { context } = await this.ensureManagedBrowser();
-    return await context.newPage();
+    return context.newPage();
   }
 
   private async selectModelAndEffort(
@@ -1560,7 +1559,7 @@ export class ChatGptBrowserWorker {
         await captureDiagnostic?.("connector-selected-during-filter");
         return await this.activeComposer(page);
       }
-      // A fresh Temporary Chat can expose the composer a fraction before autocomplete hydration.
+      // A newly created Temporary Chat can expose the composer a fraction before autocomplete hydration.
       // Retry the exact full-name query once before paying for the geometric fallback scanner.
       if (triggerAttempts === 1 && Date.now() < menuDeadline) {
         await page.keyboard.press("Escape").catch(() => {});
@@ -2015,9 +2014,16 @@ export class ChatGptBrowserWorker {
         await this.runStage(turn.traceId, "composer_ready", browserStageTimeouts.composerReady, () => (
           this.activeComposer(page)
         ), turn.abortSignal);
-      } catch {
+      } catch (error) {
         await throwIfChatGptHumanVerificationChallenge(page);
-        throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
+        // Navigation completed and no human-verification challenge is present, but the SPA
+        // occasionally exposes the Temporary Chat shell before its composer hydrates. This is
+        // pre-submission, so the existing bounded provider-retry policy may safely allow one
+        // fresh generation. Do not broaden this to CDP/transport failures after submission.
+        throw new LcaCodexAdapterError(
+          `ChatGPT Temporary Chat did not become ready before submission: ${error instanceof Error ? error.message : String(error)}`,
+          { status: 503, errorType: "server_error", code: "upstream_server_error", retryable: true },
+        );
       }
       await diagnostics.capture(page, "composer-ready");
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {

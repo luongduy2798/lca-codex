@@ -18,7 +18,7 @@ import {
 import { chatGptHtmlToMarkdown, ChatGptMarkdownBuffer } from "../src/adapters/lca-codex/markdown";
 import { LCA_CODEX_MODEL_ID, resolveLcaCodexModelMode } from "../src/adapters/lca-codex/model";
 import { chatGptReadOnlyContextWarning, compileChatGptContextSnapshot, compileLcaCodexPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/lca-codex/prompt";
-import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/lca-codex/turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/lca-codex/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/lca-codex/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import { estimateLcaCodexUsage } from "../src/adapters/lca-codex/usage";
@@ -347,7 +347,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
-      expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
+      expect("conversationId" in turn).toBeFalse();
       const prepared = await turn.prepare();
       expect(prepared.transport).toBe("mcp-lazy");
       expect(prepared.text).toContain("<codex_active_context>");
@@ -390,7 +390,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
       browserStarts += 1;
       expect(turn.capabilities.localToolsEnabled).toBe(true);
-      expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
+      expect("conversationId" in turn).toBeFalse();
       const prepared = await turn.prepare();
       expect(prepared.transport).toBe("mcp-lazy");
       expect(prepared.text).toContain("<agent_active_context>");
@@ -688,43 +688,90 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(second.outstanding()).toEqual([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
   });
 
-  test("retires an active previous turn when a new turn starts on the same Codex thread", async () => {
-    const sessions = new ChatGptTurnSessions();
-    let oldReject!: (error: Error) => void;
-    let otherReject!: (error: Error) => void;
-    let oldCancellations = 0;
-    let otherCancellations = 0;
-    const old = sessions.getOrCreate("old", () => ({
-      mode: "read-only",
-      browser: new Promise<string>((_resolve, reject) => { oldReject = reject; }),
-      trace: new ChatGptTraceFeed(),
-      text: new ChatGptTextFeed(),
-      cancel: () => {
-        oldCancellations += 1;
-        oldReject(new DOMException("old turn cancelled", "AbortError"));
-      },
-    }), { threadId: "thread-a", turnId: "turn-old", purpose: "response" });
-    const sameTurnRetry = sessions.getOrCreate("old", () => {
-      throw new Error("same execution key must reuse its session");
-    }, { threadId: "thread-a", turnId: "turn-old", purpose: "response" });
-    const otherThread = sessions.getOrCreate("other", () => ({
-      mode: "read-only",
-      browser: new Promise<string>((_resolve, reject) => { otherReject = reject; }),
-      trace: new ChatGptTraceFeed(),
-      text: new ChatGptTextFeed(),
-      cancel: () => {
-        otherCancellations += 1;
-        otherReject(new DOMException("other turn cancelled", "AbortError"));
-      },
-    }), { threadId: "thread-b", turnId: "turn-other", purpose: "response" });
+  test("keeps concurrent generic executions isolated even when a harness session id is shared", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-agent-supersession-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "lca-codex",
+      baseUrl: "browser://chatgpt-agent-supersession-test",
+      lcaCodex: { brokerSocketPath: socketPath, localToolsEnabled: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    let firstAborted = false;
+    let firstStarted!: () => void;
+    let releaseFirst!: () => void;
+    const firstStartedPromise = new Promise<void>(resolve => { firstStarted = resolve; });
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      const prepared = await turn.prepare();
+      prepared.release();
+      if (browserStarts === 1) {
+        firstStarted();
+        return await new Promise<string>((resolve, reject) => {
+          releaseFirst = () => {
+            const answer = "primary execution";
+            turn.onTextDelta(answer);
+            resolve(answer);
+          };
+          const abort = () => {
+            firstAborted = true;
+            reject(new DOMException("generic turn interrupted", "AbortError"));
+          };
+          if (turn.abortSignal?.aborted) abort();
+          else turn.abortSignal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      const answer = "auxiliary execution";
+      turn.onTextDelta(answer);
+      return answer;
+    };
 
-    expect(sameTurnRetry).toBe(old);
-    expect(await sessions.retireSupersededThreadTurns("thread-a", "turn-new", "new")).toBe(1);
-    expect(oldCancellations).toBe(1);
-    expect(otherCancellations).toBe(0);
-    expect((await old.browserOutcome).type).toBe("error");
-    expect(otherThread.isActive()).toBe(true);
-    sessions.clear();
+    const adapter = createLcaCodexAdapter(provider);
+    const firstEvents: AdapterEvent[] = [];
+    const auxiliaryEvents: AdapterEvent[] = [];
+    const primaryRequest = parsed();
+    primaryRequest.context.messages = [{ role: "user", content: "m dùng model nào", timestamp: 1 }];
+    const titleRequest = parsed();
+    titleRequest.context.messages = [{
+      role: "user",
+      content: "<session> m dùng model nào </session> Write the title in the predominant language of the session",
+      timestamp: 1,
+    }];
+    const first = adapter.runTurn!(primaryRequest, {
+      headers: new Headers(),
+      agentRequest: {
+        executionId: "agent-execution-old",
+        conversationId: "agent-task-shared",
+        transport: "anthropic_messages",
+      },
+    }, event => firstEvents.push(event)).then(
+      () => undefined,
+      error => error instanceof Error ? error : new Error(String(error)),
+    );
+
+    try {
+      await firstStartedPromise;
+      await adapter.runTurn!(titleRequest, {
+        headers: new Headers(),
+        agentRequest: {
+          executionId: "agent-execution-auxiliary",
+          conversationId: "agent-task-shared",
+          transport: "anthropic_messages",
+        },
+      }, event => auxiliaryEvents.push(event));
+
+      expect(firstAborted).toBe(false);
+      expect(browserStarts).toBe(2);
+      expect(auxiliaryEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      releaseFirst();
+      expect(await first).toBeUndefined();
+      expect(firstEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+      await TurnBroker.forSocket(socketPath).close();
+    }
   });
 
   test("retires a failed session so the next native retry starts a new browser turn", async () => {
@@ -754,7 +801,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     sessions.clear();
   });
 
-  test("does not open a fresh Temporary Chat to retry a product usage limit", async () => {
+  test("does not open a second browser generation to retry a product usage limit", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-rate-limit-retry-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "lca-codex",
@@ -1012,6 +1059,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.images).toHaveLength(1);
+    expect(compiled.text).not.toContain("codex_bind_turn");
     expect(compiled.text).not.toContain("agent_bind_turn");
     expect(compiled.text).not.toContain("turn_token");
     expect(compiled.text).not.toContain("Use the attached lca-codex plugin");
@@ -1040,7 +1088,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       "turn_12345678901234567890123456789012",
     );
     expect(lazyPro.transport).toBe("mcp-lazy");
-    expect(lazyPro.text).toContain("agent_bind_turn");
+    expect(lazyPro.text).toContain("codex_bind_turn");
     expect(lazyPro.text).not.toContain("LCA Codex Pro with no lca-codex bridge");
   });
 
@@ -1663,13 +1711,13 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       const prepared = await turn.prepare();
       try {
         if (prepared.text.includes("history-compaction checkpoint")) {
-          expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
+          expect("conversationId" in turn).toBeFalse();
           compactionPrompt = prepared.text;
           const compactSummary = "The project was inspected and the pending command completed.";
           turn.onTextDelta(compactSummary);
           return compactSummary;
         }
-        expect((turn as BrowserTurn & { conversationId?: string }).conversationId).toBeUndefined();
+        expect("conversationId" in turn).toBeFalse();
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -1777,7 +1825,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(originalBrowserStopped).toBe(true);
       expect(originalBrowserReceivedToolResult).toBe(false);
       expect(compactionPrompt).toContain('"transport":"mcp-lazy"');
-      expect(compactionPrompt).toContain("Use agent_context as a read-only lazy transport for the frozen snapshot");
+      expect(compactionPrompt).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
       expect(compactionPrompt).toContain('"recent_inline":0');
       expect(compactionPrompt).toContain('"recent_exchanges":0');
       expect(compactionPrompt).not.toContain(`"tool_call_id":"${callStart!.id}"`);
@@ -1886,6 +1934,7 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         expect(prepared.text).toContain("LCA Codex Pro with no lca-codex bridge to the user's local computer");
         expect(prepared.text).toContain("web search, browsing, research");
         expect(prepared.text).not.toContain("turn_token");
+        expect(prepared.text).not.toContain("codex_bind_turn");
         expect(prepared.text).not.toContain("agent_bind_turn");
         turn.onReasoningSummary?.("Reviewed the accumulated");
         turn.onReasoningSummary?.(" task evidence", true);
@@ -2000,26 +2049,113 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         "agent_exec",
         "agent_tool_call",
         "agent_tool_inventory",
+        "agent_tool_result",
         "agent_view_image",
         "agent_write_stdin",
+        "codex_apply_patch",
+        "codex_bind_turn",
+        "codex_context",
+        "codex_exec",
+        "codex_tool_call",
+        "codex_tool_inventory",
+        "codex_tool_result",
+        "codex_view_image",
+        "codex_write_stdin",
       ]);
       expect(listed.tools.find(tool => tool.name === "agent_exec")?.description).toContain(
-        "Intentional repository edits must use agent_apply_patch instead",
+        "Do not assume it is the mutation route for every harness",
       );
       expect(listed.tools.find(tool => tool.name === "agent_write_stdin")?.description).toContain(
-        "Do not use a command session to substitute for agent_apply_patch",
+        "not a universal repository-edit primitive",
       );
       expect(listed.tools.find(tool => tool.name === "agent_apply_patch")?.description).toContain(
-        "Required route for intentional repository edits",
+        "Do not assume this helper is available or preferred for generic harnesses such as Claude Code",
       );
 
       const bound = await call("agent_bind_turn", { turn_token: token });
       const bindingId = (bound.structuredContent as { binding_id?: string } | undefined)?.binding_id;
       expect(bindingId).toStartWith("binding_");
+      const legacyBound = await call("codex_bind_turn", { turn_token: token });
+      expect((legacyBound.structuredContent as { binding_id?: string } | undefined)?.binding_id).toBe(bindingId);
+      expect(listed.tools.find(tool => tool.name === "codex_bind_turn")?.description).toContain(
+        "Compatibility alias for agent_bind_turn",
+      );
       expect((bound.structuredContent as { bridge_protocol_version: number }).bridge_protocol_version).toBe(3);
       expect((bound.structuredContent as { execution: string }).execution).toBe("outer_harness_native");
       expect((bound.structuredContent as { outer_tool_gateway: string }).outer_tool_gateway).toBe("exec");
       expect((bound.structuredContent as { command_tool: string }).command_tool).toBe("exec_command");
+      expect((bound.structuredContent as { capabilities: string[] }).capabilities).toContain("apply_patch");
+
+      const genericToken = await broker.register({
+        cwd: "/",
+        roots: [],
+        writableRoots: [],
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+        tools: [
+          { name: "Read", description: "Read a file", parameters: { type: "object" } },
+          { name: "Write", description: "Write a file", parameters: { type: "object" } },
+          { name: "Edit", description: "Edit a file", parameters: { type: "object" } },
+          { name: "Bash", description: "Run a shell command", parameters: { type: "object" } },
+          { name: "read_files", description: "Read multiple files", parameters: { type: "object" } },
+          { name: "Agent", description: "Launch a subagent to perform a delegated task", parameters: { type: "object" } },
+        ],
+      }, 60_000);
+      try {
+        const genericBound = await call("agent_bind_turn", { turn_token: genericToken });
+        const genericBindingId = (genericBound.structuredContent as { binding_id?: string } | undefined)?.binding_id;
+        expect(genericBindingId).toStartWith("binding_");
+        expect((genericBound.structuredContent as { capabilities: string[] }).capabilities).not.toContain("apply_patch");
+        expect((genericBound.structuredContent as { capabilities: string[] }).capabilities).not.toContain("exec");
+        expect((genericBound.structuredContent as { next_action: string }).next_action).toContain("Write, Edit, or Bash");
+
+        const unavailablePatch = await call("agent_apply_patch", {
+          binding_id: genericBindingId,
+          patch: "*** Begin Patch\n*** Add File: generic.txt\n+ok\n*** End Patch",
+        });
+        expect(unavailablePatch.isError).toBe(true);
+        expect(JSON.stringify(unavailablePatch.content)).toContain("agent_tool_inventory");
+        expect(JSON.stringify(unavailablePatch.content)).toContain("Write or Edit in Claude Code");
+
+        const genericInventory = await call("agent_tool_inventory", {
+          binding_id: genericBindingId,
+          query: "write",
+        });
+        expect((genericInventory.structuredContent as { tools: Array<{ wire_name: string }> }).tools.map(tool => tool.wire_name)).toEqual(["Write"]);
+
+        const recursiveInventory = await call("agent_tool_inventory", {
+          binding_id: genericBindingId,
+          query: "agent",
+        });
+        expect(recursiveInventory.structuredContent).toMatchObject({ tools: [], total: 0 });
+
+        const recursiveCall = await call("agent_tool_call", {
+          binding_id: genericBindingId,
+          wire_name: "Agent",
+          arguments: { prompt: "Inspect the repository" },
+        });
+        expect(recursiveCall.isError).toBe(true);
+        expect(JSON.stringify(recursiveCall.content)).toContain("Single-agent mode blocks model-launching or delegation tool Agent");
+
+        const arrayResultPromise = call("agent_tool_call", {
+          binding_id: genericBindingId,
+          wire_name: "read_files",
+          arguments: { paths: ["README.md"] },
+        });
+        const [arrayResultRequest] = await broker.nextToolBatch(genericToken);
+        expect(arrayResultRequest).toMatchObject({ wireName: "read_files", freeform: false });
+        const arrayPayload = [{ path: "README.md", content: "project docs" }];
+        broker.completeTool(genericToken, arrayResultRequest!.callId, {
+          content: [{ type: "text", text: JSON.stringify(arrayPayload) }],
+          structuredContent: arrayPayload,
+          _meta: ["invalid MCP metadata shape"],
+        });
+        const arrayResult = await arrayResultPromise;
+        expect(arrayResult.content).toEqual([{ type: "text", text: JSON.stringify(arrayPayload) }]);
+        expect(arrayResult).not.toHaveProperty("structuredContent");
+        expect(arrayResult).not.toHaveProperty("_meta");
+      } finally {
+        broker.revoke(genericToken);
+      }
 
       const completeReadiness = async (availability: Record<string, boolean>) => {
         const [readinessRequest] = await broker.nextToolBatch(token);
@@ -2060,6 +2196,9 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
         { name: "mcp__lnd_lca_codex__codex_tool_call", description: "Figma bridge recursion trap." },
         { name: "mcp__proxy_host__nested_bridge_codex_tool_inventory", description: "Figma bridge recursion trap behind a generic proxy prefix." },
         { name: "mcp__proxy_host__legacy_wrapper_codex_tool_call", description: "Figma bridge call recursion trap behind a generic proxy prefix." },
+        { name: "mcp__collaboration__spawn_agent", description: "Spawn another model agent." },
+        { name: "mcp__opencode__task", description: "Launch a subagent for a delegated task." },
+        { name: "mcp__todoist__new_task", description: "Create a to-do item." },
       ];
       executeInventory(figmaCandidates, value => rankedInventoryOutput.push(value));
       const rankedInventory = JSON.parse(rankedInventoryOutput[0]!.slice("LCA_AGENT_TOOL_INVENTORY:".length)) as {
@@ -2129,6 +2268,9 @@ describe("LCA Codex ChatGPT Web bridge v3", () => {
       expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__nested_bridge_agent_tool_inventory");
       expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__nested_bridge_codex_tool_inventory");
       expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__proxy_host__legacy_wrapper_codex_tool_call");
+      expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__collaboration__spawn_agent");
+      expect(unfilteredInventory.tools.map(tool => tool.name)).not.toContain("mcp__opencode__task");
+      expect(unfilteredInventory.tools.map(tool => tool.name)).toContain("mcp__todoist__new_task");
 
       const missingSchemaOutput: string[] = [];
       executeInventory([

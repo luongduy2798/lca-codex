@@ -45,3 +45,14 @@ test("append-only final output makes every fresh browser generation terminal", (
   expect(policy.nativeRetryableWithoutBrowserGeneration).toBe(false);
   expect(policy.stopReason).toBe("response_streamed");
 });
+
+test("browser/CDP transport failures fail closed instead of replaying an unknown-side-effect generation", () => {
+  const policy = resolveBrowserRetryPolicy(
+    new Error("Target page, context or browser has been closed after a CDP disconnect"),
+    false,
+  );
+
+  expect(policy.providerRetryable).toBe(false);
+  expect(policy.browserGenerationAllowed).toBe(false);
+  expect(policy.nativeRetryableWithoutBrowserGeneration).toBe(false);
+});

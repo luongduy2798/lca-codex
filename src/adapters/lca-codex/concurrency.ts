@@ -1,6 +1,6 @@
 /**
- * LCA Codex concurrency is deliberately bounded. Every active Codex turn owns a real
- * browser document in the signed-in account, so unbounded fan-out would create account-level
- * traffic that is indistinguishable from spam.
+ * Browser execution concurrency is deliberately bounded. Every live model execution owns one
+ * isolated Temporary Chat page until its page-owned WebSocket completion arrives, so unbounded
+ * harness fan-out would create unbounded signed-in browser state and account traffic.
  */
 export const MAX_CHATGPT_BROWSER_TABS = 5;

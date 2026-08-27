@@ -22,7 +22,9 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
         visibility: "list",
         supported_in_api: true,
         supported_reasoning_levels: [],
-        tool_mode: "code_mode_only",
+        tool_mode: null,
+        shell_type: "shell_command",
+        apply_patch_tool_type: "freeform",
         max_context_window: 872_000,
       }],
     }, { headers: { etag: "native-etag" } });

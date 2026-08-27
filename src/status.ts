@@ -25,7 +25,10 @@ export interface StatusReport {
   endpoints: {
     models: string;
     responses: string;
+    lifecycle: string;
     chatCompletions: string;
+    anthropicMessages: string;
+    anthropicCountTokens: string;
     codexModels: string;
     codexResponses: string;
     codexCompact: string;
@@ -58,7 +61,10 @@ export function agentEndpoints(config: Pick<AppConfig, "host" | "port">): Status
   return {
     models: `${agentBase}/models`,
     responses: `${agentBase}/responses`,
+    lifecycle: `${agentBase}/lifecycle`,
     chatCompletions: `${root}/chat/completions`,
+    anthropicMessages: `${root}/messages`,
+    anthropicCountTokens: `${root}/messages/count_tokens`,
     codexModels: `${root}/models`,
     codexResponses: `${root}/responses`,
     codexCompact: `${root}/responses/compact`,
@@ -113,7 +119,10 @@ export function formatStatusReport(report: StatusReport): string {
     "Agent API endpoints:",
     `  GET  ${report.endpoints.models}`,
     `  POST ${report.endpoints.responses}`,
+    `  POST ${report.endpoints.lifecycle}`,
     `  POST ${report.endpoints.chatCompletions}`,
+    `  POST ${report.endpoints.anthropicMessages}`,
+    `  POST ${report.endpoints.anthropicCountTokens}`,
     "Codex compatibility endpoints:",
     `  GET  ${report.endpoints.codexModels}`,
     `  POST ${report.endpoints.codexResponses}`,

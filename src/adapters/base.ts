@@ -1,13 +1,13 @@
 import type { AdapterEvent, CodexParsedRequest } from "../types";
 
-export type AgentRequestTransport = "responses" | "chat_completions";
+export type AgentRequestTransport = "responses" | "chat_completions" | "anthropic_messages";
 
 export interface AgentRequestContext {
   /** Stable for one logical Responses turn, including its function_call_output continuations. */
   executionId: string;
   /** Public generic transport that originated this browser turn. */
   transport: AgentRequestTransport;
-  /** Optional transport task identity for continuation bookkeeping; never browser-page affinity. */
+  /** Stable logical-task identity used for outer-harness lineage and continuation bookkeeping. */
   conversationId?: string;
 }
 

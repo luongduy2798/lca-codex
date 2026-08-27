@@ -74,6 +74,13 @@ test("generic harness prompts keep capability authority outside prompt text", ()
   expect(compiled.text).toContain("agent_context");
   expect(compiled.text).toContain("agent_tool_inventory");
   expect(compiled.text).toContain("agent_tool_call");
+  expect(compiled.text).toContain("Single-agent mode is mandatory");
+  expect(compiled.text).toContain("never invoke Agent, spawn_agent, new_task, subagent");
+  expect(compiled.text).not.toContain("deferred handshake");
+  expect(compiled.text).not.toContain("agent_tool_result");
+  expect(compiled.text).toContain("Do not treat agent_apply_patch, agent_exec, or any other compatibility helper as universally available");
+  expect(compiled.text).toContain("Claude Code Read/Write/Edit/Bash");
+  expect(compiled.text).toContain("Never report that editing is impossible merely because agent_apply_patch is absent");
   expect(compiled.text).not.toMatch(/codex_(?:bind_turn|context|tool_inventory|tool_call|exec|write_stdin|apply_patch|view_image)/);
   expect(compiled.text).toContain("<agent_active_context>");
   expect(compiled.text).toContain("<agent_context_ref>");
@@ -125,9 +132,9 @@ test("tool-capable prompts expose active and recent context immediately while ke
   expect(activeContextEnd).toBeGreaterThan(0);
   expect(contextRefEnd).toBeGreaterThan(activeContextEnd);
   expect(finalToken).toBeGreaterThan(0);
-  expect(compiled.text).toContain("agent_context");
-  expect(compiled.text).not.toContain("agent_context_manifest");
-  expect(compiled.text).not.toContain("agent_context_next");
+  expect(compiled.text).toContain("codex_context");
+  expect(compiled.text).not.toContain("codex_context_manifest");
+  expect(compiled.text).not.toContain("codex_context_next");
   expect(compiled.text).not.toContain(snapshot.id);
   expect(compiled.text).not.toContain(snapshot.digest);
   expect(compiled.text).not.toContain("<codex_context_json>");
@@ -138,11 +145,11 @@ test("tool-capable prompts expose active and recent context immediately while ke
   expect(compiled.text).toContain("authoritative immediate conversational continuity");
   expect(compiled.text).toContain("answer immediately with zero connector calls when the active context is sufficient");
   expect(snapshot.serialized).toContain("preserve-system");
-  expect(compiled.text).toContain("Use agent_context selectively: instructions for Codex skill/capability guidance");
+  expect(compiled.text).toContain("Use codex_context selectively: instructions for Codex skill/capability guidance");
   expect(compiled.text).toContain("otherwise do not bind");
-  expect(compiled.text).toContain("For every intentional repository edit to source, tests, docs, or configuration, use agent_apply_patch");
-  expect(compiled.text).toContain("Do not use agent_exec, agent_write_stdin, or nested shell/Python/Node commands");
-  expect(compiled.text).toContain("If agent_apply_patch is unavailable or fails, report that blocker instead of falling back to a shell-based file edit");
+  expect(compiled.text).toContain("For every intentional repository edit to source, tests, docs, or configuration, use codex_apply_patch");
+  expect(compiled.text).toContain("Do not use codex_exec, codex_write_stdin, or nested shell/Python/Node commands");
+  expect(compiled.text).toContain("If codex_apply_patch is unavailable or fails, report that blocker instead of falling back to a shell-based file edit");
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
@@ -164,14 +171,16 @@ test("tool-capable prompts make the configured connector an exclusive routing co
   expect(compiled.text).toContain(`from "${connectorName}" does not authorize fallback to another connector`);
   expect(compiled.text).toContain("Report the blocker instead of switching providers");
   expect(compiled.text).toContain("Switching connectors requires explicit user authorization");
-  expect(compiled.text).toContain("Nested MCP/app/provider tools returned by agent_tool_inventory and invoked through agent_tool_call are still executed inside the selected connector's outer Codex route");
-  expect(compiled.text).toContain("run agent_tool_inventory before declaring that capability unavailable");
+  expect(compiled.text).toContain("Nested MCP/app/provider tools returned by codex_tool_inventory and invoked through codex_tool_call are still executed inside the selected connector's outer Codex route");
+  expect(compiled.text).toContain("Single-agent mode is mandatory");
+  expect(compiled.text).toContain("One Codex task must stay on one ChatGPT Web reasoning agent");
+  expect(compiled.text).toContain("run codex_tool_inventory before declaring that capability unavailable");
   expect(compiled.text).toContain("Prefer the most specific operation query you can infer");
   expect(compiled.text).toContain("use the exact provider/operation and do not choose a lower-ranked wrapper");
   expect(compiled.text).toContain("For Figma design-to-code URLs, query get_design_context first rather than a broad figma search");
 });
 
-test("fresh Temporary Chats inline the previous user and assistant exchange for ambiguous follow-ups", () => {
+test("bounded active context still inlines the previous exchange for ambiguous follow-ups", () => {
   for (const followUp of ["cần gì ảnh", "làm tiếp đi", "undo cái vừa sửa", "phương án 2 thì sao"]) {
     const parsed = request("high");
     parsed.context.messages = [
@@ -417,6 +426,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
   );
 
   expect(compiled.text).toContain("The task context is complete. Execute the latest active user request now under the capability contract above.");
+  expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("agent_bind_turn");
   expect(compiled.text).not.toContain("turn_token");
   expect(compiled.text).toContain("web search, browsing, research");
@@ -443,8 +453,8 @@ test("compaction prompts use the frozen snapshot through read-only lazy context"
   );
 
   expect(compiled.text).toContain("This is a Codex history-compaction checkpoint, not a normal task turn.");
-  expect(compiled.text).toContain(`agent_bind_turn with turn_token ${token}`);
-  expect(compiled.text).toContain("Use agent_context as a read-only lazy transport for the frozen snapshot");
+  expect(compiled.text).toContain(`codex_bind_turn with turn_token ${token}`);
+  expect(compiled.text).toContain("Use codex_context as a read-only lazy transport for the frozen snapshot");
   expect(compiled.text).toContain("Compact may discard wording but must preserve semantic task state");
   const active = activeContext(compiled.text) as { checkpoint?: unknown; recent_context?: unknown[]; latest_user?: unknown };
   expect(JSON.stringify(active.checkpoint)).toContain("Preserve the earlier architecture decision.");

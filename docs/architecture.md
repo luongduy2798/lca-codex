@@ -4,7 +4,7 @@
 
 LCA Token is a **terminal-first ChatGPT Web runtime and capability bridge**, not an agent harness. A caller owns its task lifecycle, local execution policy, and tool implementations. LCA Token owns the browser turn, frozen-context transport, connector binding, and Responses encoding needed to let ChatGPT participate in that task.
 
-Codex is no longer the only supported harness. It remains a compatibility adapter while the generic API supplies the same browser/broker runtime behind authenticated Responses and OpenAI-compatible Chat Completions surfaces.
+Codex is no longer the only supported harness. It remains a compatibility adapter while the generic API supplies the same browser/broker runtime behind authenticated Responses, OpenAI-compatible Chat Completions, and Anthropic Messages surfaces.
 
 ```text
           Generic harness                         Codex compatibility
@@ -12,6 +12,7 @@ Codex is no longer the only supported harness. It remains a compatibility adapte
                │                                           │
                │ /v1/agent/responses                       │ /v1/responses
                │ /v1/chat/completions                      │
+               │ /v1/messages                              │
                │ API key                                   │ native Codex metadata
                └──────────────────┬────────────────────────┘
                                   ▼
@@ -59,10 +60,13 @@ The generic routes are:
 ```text
 GET  /v1/agent/models
 POST /v1/agent/responses
+POST /v1/agent/lifecycle
 POST /v1/chat/completions
+POST /v1/messages
+POST /v1/messages/count_tokens
 ```
 
-They require only a per-profile `lcat_...` bearer token. Execution identity and task identity are separate. `previous_response_id` restores private continuation metadata across Responses logical turns while execution identity changes after a completed model generation; tool-result rounds keep the active execution identity because they resume the same in-flight generation. A transport-neutral `X-LCA-Task-ID` can label any generic request with a stable task, and `metadata.lca_task_id` is an equivalent body-level extension. Responses may also use its `conversation` id as the same task-identity input. These identifiers never create browser-page affinity. Chat Completions is an adapter: it normalizes `messages`, function `tools`, tool calls/results, JSON responses, and SSE chunks onto the same generic Responses core. Because Chat Completions has no standard thread id, explicit task identity remains robust across history rewrites/compaction; immutable-prefix derivation is only a backward-compatible fallback for append-only transcripts. In both transports the declared tool registry is harness-owned. The outer harness executes those tools under its own filesystem/sandbox policy; LCA Token does not invent local filesystem authority from the HTTP request or prompt text.
+They require only a per-profile `lcat_...` bearer token. Execution identity and task identity are separate. `previous_response_id` restores private continuation metadata across Responses logical turns while execution identity changes after a completed model generation; tool-result rounds keep the active execution identity because they resume the same in-flight generation. A transport-neutral `X-LCA-Task-ID` can label any generic request with a stable task, and `metadata.lca_task_id` is an equivalent body-level extension. Responses may also use its `conversation` id as the same task-identity input. Task identity labels harness lineage and explicit cancellation scope without granting tool, filesystem, page-affinity, or completion authority. Every distinct model execution gets a fresh Temporary Chat page, including auxiliary/title, subagent, and compaction executions that share a harness task/session id. Requests that resolve to the same server-owned execution coalesce; structured tool-result rounds reuse only their still-live execution. Distinct executions may run concurrently and do not supersede one another merely because their task identity matches. `POST /v1/agent/lifecycle` is an authenticated harness-neutral cancellation side-channel: interrupt/stop events may cancel matching live executions, while completed events are compatibility acknowledgements with no browser or replay-state mutation. Chat Completions and Anthropic Messages are adapters over the same core. Explicit task identity remains robust across history rewrites/compaction, while immutable-prefix derivation is a backward-compatible Chat Completions fallback. Claude Code's `x-claude-code-session-id` and optional namespaced `x-claude-code-agent-id` identify lineage, not browser affinity; the request body separates a main response from auxiliary title generation. Across all generic transports the declared tool registry is harness-owned. The outer harness retains authoritative history and executes tools under its own filesystem/sandbox policy; LCA Token does not invent local filesystem authority from the HTTP request or prompt text.
 
 `src/core/agent.ts` is the first agent-neutral core boundary. The current compatibility adapter consumes its `AgentTurnEnvironment`; future transport adapters should normalize into the same turn-environment model rather than teaching the browser worker about individual harnesses.
 
@@ -76,17 +80,19 @@ Native model passthrough, Codex model-catalog augmentation, previous-response re
 
 Normal inference uses managed Chrome with `headless: false`. Desktop runtimes place the browser window off-screen; Linux managed services run the daemon under Xvfb so Chrome still sees a normal graphical display without requiring a physical desktop. Human-verification challenges remain terminal browser-turn failures; LCA Token does not solve or bypass them. A browser worker:
 
-1. creates a fresh Temporary Chat page for every browser generation;
+1. creates a fresh isolated Temporary Chat page for this model execution;
 2. attaches page-scoped network lifecycle observation before Send;
 3. selects the configured ChatGPT model/reasoning mode;
 4. projects only bounded active context into the composer;
 5. streams visible reasoning/commentary plus semantic Markdown;
 6. treats matching page-owned network completion as terminal authority;
-7. revokes turn-scoped connector capability and closes that Temporary Chat during cleanup.
+7. after matching page-owned WebSocket completion, takes one final DOM snapshot, revokes the turn-scoped connector capability, and closes the page. Cline-style textual markers such as `<attempt_completion>...</attempt_completion>` are returned to the harness but do not participate in task lifecycle.
 
-Browser DOM is used for semantic text/controls, not as the source of turn completion. A completion belonging to another tab/conversation cannot terminate the active turn.
+Browser DOM is used only to submit the prompt and serialize visible reasoning/semantic Markdown back to the harness, never as the source of lifecycle or turn completion. A completion belonging to another page cannot terminate the active turn.
 
-Task identity remains transport-neutral, but browser pages are turn/generation-scoped rather than task-scoped. Native Codex `thread_id`, generic Responses continuation state, and `X-LCA-Task-ID` may associate retained context with a logical task, but a completed Temporary Chat is never reopened for the next prompt. The next logical turn reconstructs its bounded active context from the same frozen/lazy context machinery inside a new Temporary Chat.
+The stable `main` launcher could reattach a transient CDP connection because Electron owned an independently addressable browser surface id. LCA Token's terminal-first managed Chrome does not currently have that independent surface identity. Therefore a managed-Chrome/CDP transport loss fails closed and is never treated as permission to replay the generation; replaying an unknown-side-effect generation could execute an already-issued harness tool twice. Same-surface reattachment requires a future host-neutral owned-browser endpoint rather than guessing from DOM state or opening a replacement Temporary Chat.
+
+Task identity remains transport-neutral control-plane lineage only. Native Codex `thread_id`, generic Responses continuation state, `X-LCA-Task-ID`, and Claude Code session/agent identity group explicit cancellation and tool continuation mappings, but never select or retain a browser page. The outer harness owns full history and compaction. Each new execution reconstructs authoritative bounded active context from the frozen/lazy snapshot, opens a fresh Temporary Chat, and closes it after its own WebSocket terminal edge. The visible browser transcript is not continuity state. Structured tool-result rounds reuse the same live execution/page; unrelated main, auxiliary, subagent, and compaction executions remain isolated even when their lineage matches. The worker permits at most five simultaneous live pages and fails closed at capacity rather than evicting another execution.
 
 Account bootstrap is intentionally outside the **server** runtime. On a desktop machine, the Control Center can launch the configured Chrome executable directly with a dedicated temporary `--user-data-dir` owned by the active LCA Token profile. The user performs ChatGPT/Google login in that ordinary Chrome window; LCA Token does not attach Playwright/CDP to the login window or to the user's normal Chrome profile. After the user confirms from the terminal, LCA Token closes only that dedicated Chrome process, then reopens only the isolated profile in an off-screen normal Chrome renderer, verifies an authenticated Temporary Chat surface, exports portable Playwright storage state, and deletes the temporary login profile. A failed verification never replaces an already verified stored session.
 
@@ -98,7 +104,7 @@ A connector-backed turn freezes an immutable snapshot before submitting the brow
 
 The model can answer without binding the connector. If it needs older state, it binds the one-time turn token and queries the frozen snapshot lazily. This keeps large task histories out of the ChatGPT composer and keeps context retrieval read-only.
 
-The MCP meta-tool names are agent-neutral: `agent_bind_turn`, `agent_context`, `agent_tool_inventory`, and `agent_tool_call`. Native helper wrappers use the same namespace (`agent_exec`, `agent_write_stdin`, `agent_apply_patch`, and `agent_view_image`). The compatibility adapter may still be implemented under `src/adapters/lca-codex`, but its connector surface does not leak Codex product naming into LCA Token.
+The MCP server exposes agent-neutral `agent_*` meta-tools for generic harness prompts and exact `codex_*` compatibility aliases over the same authenticated handlers. Codex browser prompts intentionally use the `codex_bind_turn`, `codex_context`, `codex_tool_inventory`, `codex_tool_call`, `codex_exec`, `codex_write_stdin`, `codex_apply_patch`, and `codex_view_image` names because those are the frozen connector schema advertised to Codex turns. Generic prompts continue to use the corresponding `agent_*` names. The two namespaces do not create separate authority or registries.
 
 ## Tool authority and lazy inventory
 
@@ -147,6 +153,15 @@ TurnBroker resolves the blocked connector request
 same ChatGPT browser generation continues
 ```
 
+Ordinary harness tools use the synchronous round trip above. LCA Token runs task reasoning in
+**single-agent mode**: model-launching/delegation tools such as Claude Code `Agent`, Codex
+`spawn_agent`, agentic `task`, and equivalent subagent launchers are removed from lazy inventory and
+rejected if invoked by exact wire name. A single outer task therefore stays on one ChatGPT Web
+reasoning agent instead of recursively launching another ChatGPT-backed model turn. The broker still
+understands the older deferred invocation/result protocol only so an already-created in-flight call
+from a previous runtime can be retired safely during migration; new model-launching calls are not
+accepted.
+
 The generic harness only needs to send the normal `previous_response_id` continuation. LCA Token restores its server-owned execution id from private response state so the same browser generation continues without caller-managed `thread_id` or `turn_id`.
 
 Parallel tool batches remain atomic at the continuation boundary: every outstanding `call_id` in a surfaced batch must receive a result before the browser generation resumes.
@@ -189,7 +204,7 @@ already neutralized
 compatibility internals still to move/rename
   src/adapters/lca-codex/* browser + broker modules
   CodexParsedRequest canonical naming
-  agent_* MCP meta-tool names
+  removal of codex_* MCP compatibility aliases after migration
   Codex-specific model catalog / compaction
 ```
 

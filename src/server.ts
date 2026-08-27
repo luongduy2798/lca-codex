@@ -49,6 +49,12 @@ import {
   responsesSseToChatCompletions,
   responsesToChatCompletion,
 } from "./chat-completions";
+import {
+  anthropicInputTokenCount,
+  anthropicMessagesToResponses,
+  responsesSseToAnthropicMessages,
+  responsesToAnthropicMessage,
+} from "./anthropic-messages";
 
 const AGENT_PROVIDER_STATE_KEY = "lca-token-agent";
 export const AGENT_TASK_ID_HEADER = "x-lca-task-id";
@@ -108,6 +114,15 @@ function forgetChatToolExecution(executionId: string): void {
   for (const key of [...keys]) forgetChatToolExecutionKey(key);
 }
 
+function forgetChatToolConversation(conversationId: string): void {
+  const executionIds = new Set<string>();
+  for (const entry of chatToolExecutions.values()) {
+    if (entry.conversationId !== conversationId) continue;
+    executionIds.add(entry.executionId);
+  }
+  for (const executionId of executionIds) forgetChatToolExecution(executionId);
+}
+
 function trailingChatToolResultCallIds(body: unknown): string[] {
   if (!body || typeof body !== "object" || Array.isArray(body)) return [];
   const messages = (body as { messages?: unknown }).messages;
@@ -124,14 +139,63 @@ function trailingChatToolResultCallIds(body: unknown): string[] {
   return callIds.reverse();
 }
 
-function chatToolContinuationExecutionId(body: unknown, conversationId: string): string | undefined {
+function trailingAnthropicToolResultCallIds(body: unknown): string[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  const messages = (body as { messages?: unknown }).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  let messageIndex = messages.length - 1;
+  while (messageIndex >= 0) {
+    const candidate = messages[messageIndex];
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const role = (candidate as { role?: unknown }).role;
+    // Claude Code may append harness reminders (for example TodoWrite nudges) after a
+    // tool_result. They belong to the same model/tool loop, not a new logical turn.
+    // Only skip non-conversational instruction roles: assistant or user messages remain
+    // hard boundaries so unrelated work cannot inherit an in-flight execution.
+    if (role === "system" || role === "developer") {
+      messageIndex -= 1;
+      continue;
+    }
+    break;
+  }
+  if (messageIndex < 0) return [];
+  const message = messages[messageIndex] as { role?: unknown; content?: unknown };
+  if (message.role !== "user" || !Array.isArray(message.content)) return [];
+  const callIds: string[] = [];
+  for (let index = message.content.length - 1; index >= 0; index -= 1) {
+    const block = message.content[index];
+    if (!block || typeof block !== "object" || Array.isArray(block)) break;
+    const item = block as { type?: unknown; tool_use_id?: unknown };
+    if (item.type !== "tool_result") break;
+    if (typeof item.tool_use_id !== "string" || item.tool_use_id.length === 0) return [];
+    callIds.push(item.tool_use_id);
+  }
+  return callIds.reverse();
+}
+
+function toolContinuationExecutionId(callIds: string[], conversationId: string): string | undefined {
   pruneChatToolExecutions();
-  const callIds = trailingChatToolResultCallIds(body);
   if (callIds.length === 0) return undefined;
   const entries = callIds.map(callId => chatToolExecutions.get(chatToolExecutionKey(conversationId, callId)));
   if (entries.some(entry => !entry)) return undefined;
   const executionIds = new Set(entries.map(entry => entry!.executionId));
   return executionIds.size === 1 ? entries[0]!.executionId : undefined;
+}
+
+function chatToolContinuationExecutionId(body: unknown, conversationId: string): string | undefined {
+  return toolContinuationExecutionId(trailingChatToolResultCallIds(body), conversationId);
+}
+
+function anthropicToolContinuationExecutionId(body: unknown, conversationId: string): string | undefined {
+  return toolContinuationExecutionId(trailingAnthropicToolResultCallIds(body), conversationId);
+}
+
+function anthropicRequestExecutionId(conversationId: string, responsesBody: unknown): string {
+  return `anthropic-${createHash("sha256")
+    .update(conversationId)
+    .update("\0")
+    .update(JSON.stringify(responsesBody))
+    .digest("hex")}`;
 }
 
 function agentTaskIdValue(value: unknown, source: string): string | undefined {
@@ -143,7 +207,7 @@ function agentTaskIdValue(value: unknown, source: string): string | undefined {
     throw new Error(`${source} must be at most ${MAX_AGENT_TASK_ID_LENGTH} characters`);
   }
   // Returned task ids are already opaque and safe to reuse verbatim. External harness ids are
-  // hashed so task-affinity map keys do not retain caller-provided identifiers or arbitrary text.
+  // hashed so control-plane lineage keys do not retain caller-provided identifiers or arbitrary text.
   if (/^lca-task-[0-9a-f]{32}$/i.test(trimmed)) return trimmed.toLowerCase();
   return `lca-task-${createHash("sha256").update(trimmed).digest("hex").slice(0, 32)}`;
 }
@@ -173,6 +237,21 @@ function requestAgentTaskId(req: Request, body: unknown): string | undefined {
     );
   }
   return candidates[0];
+}
+
+function requestAnthropicTaskId(req: Request): string | undefined {
+  const explicit = agentTaskIdValue(req.headers.get(AGENT_TASK_ID_HEADER), AGENT_TASK_ID_HEADER);
+  const sessionId = req.headers.get("x-claude-code-session-id")?.trim();
+  const agentId = req.headers.get("x-claude-code-agent-id")?.trim();
+  if (!sessionId) return explicit;
+  const claudeTaskId = agentTaskIdValue(
+    `claude-code:${sessionId}${agentId ? `:agent:${agentId}` : ""}`,
+    "x-claude-code-session-id",
+  );
+  if (explicit && explicit !== claudeTaskId) {
+    throw new Error(`${AGENT_TASK_ID_HEADER} conflicts with x-claude-code-session-id task identity`);
+  }
+  return explicit ?? claudeTaskId;
 }
 
 function agentExecutionIdFromState(body: unknown): string | undefined {
@@ -324,6 +403,119 @@ export class HttpTurnCounter {
 }
 
 type LcaCodexAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
+
+const CHAT_HISTORY_AFFINITY_TTL_MS = 30 * 60_000;
+const MAX_CHAT_HISTORY_AFFINITIES = 32;
+const chatHistoryAffinities = new WeakMap<
+  LcaCodexAdapterFactory,
+  Map<string, Map<string, { messageDigests: string[]; updatedAt: number }>>
+>();
+
+function chatHistoryNamespace(config: AppConfig): string {
+  return createHash("sha256")
+    .update(`${config.storageStatePath}\0${config.brokerSocketPath}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function chatCompletionMessages(body: unknown): unknown[] | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const messages = (body as { messages?: unknown }).messages;
+  return Array.isArray(messages) ? messages : undefined;
+}
+
+function chatMessageDigests(messages: unknown[]): string[] {
+  return messages.map(message => createHash("sha256").update(JSON.stringify(message)).digest("hex"));
+}
+
+function retainedSuffixOverlap(previous: string[], incoming: string[]): number {
+  for (let count = Math.min(previous.length, incoming.length); count >= 2; count -= 1) {
+    const suffixStart = previous.length - count;
+    for (let incomingStart = 0; incomingStart + count <= incoming.length; incomingStart += 1) {
+      let matches = true;
+      for (let offset = 0; offset < count; offset += 1) {
+        if (previous[suffixStart + offset] !== incoming[incomingStart + offset]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) return count;
+    }
+  }
+  return 0;
+}
+
+function chatHistoryRegistry(adapterFactory: LcaCodexAdapterFactory, config: AppConfig): Map<
+  string,
+  { messageDigests: string[]; updatedAt: number }
+> {
+  let factoryRegistries = chatHistoryAffinities.get(adapterFactory);
+  if (!factoryRegistries) {
+    factoryRegistries = new Map();
+    chatHistoryAffinities.set(adapterFactory, factoryRegistries);
+  }
+  const namespace = chatHistoryNamespace(config);
+  let registry = factoryRegistries.get(namespace);
+  if (!registry) {
+    registry = new Map();
+    factoryRegistries.set(namespace, registry);
+  }
+  const cutoff = Date.now() - CHAT_HISTORY_AFFINITY_TTL_MS;
+  for (const [conversationId, entry] of registry) {
+    if (entry.updatedAt < cutoff) registry.delete(conversationId);
+  }
+  while (registry.size > MAX_CHAT_HISTORY_AFFINITIES) {
+    registry.delete(registry.keys().next().value!);
+  }
+  return registry;
+}
+
+/**
+ * Stock OpenAI-compatible harnesses do not have a standard task id. Keep the existing immutable
+ * prefix id for append-only transcripts, then recover a compacted task only when the shortened
+ * transcript uniquely retains at least two exact messages from the prior task tail. This covers
+ * Cline's standard truncation (which rewrites its first two messages but keeps the recent tail)
+ * without guessing when two tasks could plausibly share the same retained history.
+ */
+function resolveChatHistoryConversationId(
+  adapterFactory: LcaCodexAdapterFactory,
+  config: AppConfig,
+  body: unknown,
+  fallbackConversationId: string | undefined,
+): string | undefined {
+  const messages = chatCompletionMessages(body);
+  if (!messages || !fallbackConversationId) return fallbackConversationId;
+  const registry = chatHistoryRegistry(adapterFactory, config);
+  if (registry.has(fallbackConversationId)) return fallbackConversationId;
+  const incoming = chatMessageDigests(messages);
+  const matches: string[] = [];
+  for (const [conversationId, entry] of registry) {
+    if (incoming.length >= entry.messageDigests.length) continue;
+    const overlap = retainedSuffixOverlap(entry.messageDigests, incoming);
+    if (overlap >= 2 && overlap < incoming.length) matches.push(conversationId);
+  }
+  return matches.length === 1 ? matches[0] : fallbackConversationId;
+}
+
+function rememberChatHistoryConversation(
+  adapterFactory: LcaCodexAdapterFactory,
+  config: AppConfig,
+  conversationId: string | undefined,
+  body: unknown,
+): void {
+  if (!conversationId) return;
+  const messages = chatCompletionMessages(body);
+  if (!messages) return;
+  const registry = chatHistoryRegistry(adapterFactory, config);
+  registry.delete(conversationId);
+  registry.set(conversationId, {
+    messageDigests: chatMessageDigests(messages),
+    updatedAt: Date.now(),
+  });
+  while (registry.size > MAX_CHAT_HISTORY_AFFINITIES) {
+    registry.delete(registry.keys().next().value!);
+  }
+}
 
 export function routeLcaCodexRequest(parsed: CodexParsedRequest, config: AppConfig): LcaCodexModelDescriptor {
   const model = requireLcaCodexModel(parsed.modelId);
@@ -503,7 +695,10 @@ export async function responseRequest(
         if (agentExecutionId && event.type === "tool_call_start") {
           options.onAgentToolCall?.(event.id, agentExecutionId, agentConversationId);
         }
-        if (agentExecutionId && ((event.type === "done" && event.endTurn) || event.type === "error")) {
+        if (agentExecutionId && event.type === "done" && event.endTurn) {
+          options.onAgentExecutionFinished?.(agentExecutionId);
+        }
+        if (agentExecutionId && event.type === "error") {
           options.onAgentExecutionFinished?.(agentExecutionId);
         }
         queue.push(event);
@@ -608,7 +803,12 @@ export async function chatCompletionsRequest(
   const headers = new Headers(req.headers);
   headers.set("content-type", "application/json");
   if (chatTaskId) headers.set(AGENT_TASK_ID_HEADER, chatTaskId);
-  const conversationId = chatTaskId ?? conversion.conversationId;
+  const conversationId = chatTaskId ?? resolveChatHistoryConversationId(
+    adapterFactory,
+    config,
+    chatBody,
+    conversion.conversationId,
+  );
   const continuedExecutionId = conversationId
     ? chatToolContinuationExecutionId(chatBody, conversationId)
     : undefined;
@@ -621,7 +821,7 @@ export async function chatCompletionsRequest(
   const response = await responseRequest(internal, config, adapterFactory, {
     agentOnly: true,
     agentTransport: "chat_completions",
-    ...(conversion.conversationId ? { agentConversationId: conversion.conversationId } : {}),
+    ...(conversationId ? { agentConversationId: conversationId } : {}),
     ...(continuedExecutionId ? { agentExecutionId: continuedExecutionId } : {}),
     onAgentToolCall: (callId, executionId, activeConversationId) => {
       if (activeConversationId) rememberChatToolExecution(activeConversationId, executionId, callId);
@@ -629,6 +829,7 @@ export async function chatCompletionsRequest(
     onAgentExecutionFinished: forgetChatToolExecution,
   });
   if (!response.ok) return response;
+  if (!chatTaskId) rememberChatHistoryConversation(adapterFactory, config, conversationId, chatBody);
   const taskId = response.headers.get(AGENT_TASK_ID_HEADER);
   const requestedModel = String(conversion.responsesBody.model);
   if (conversion.stream) {
@@ -667,6 +868,123 @@ export async function chatCompletionsRequest(
     responsesToChatCompletion(body, requestedModel, conversion.textualXmlToolProtocol),
     taskId ? { headers: { [AGENT_TASK_ID_HEADER]: taskId } } : undefined,
   );
+}
+
+function anthropicErrorResponse(status: number, type: string, message: string): Response {
+  return Response.json({
+    type: "error",
+    error: { type, message },
+  }, { status });
+}
+
+async function anthropicErrorFromResponse(response: Response): Promise<Response> {
+  let message = `LCA Token request failed with HTTP ${response.status}`;
+  let type = "api_error";
+  try {
+    const body = await response.json() as { error?: { message?: unknown; type?: unknown } };
+    if (typeof body.error?.message === "string") message = body.error.message;
+    if (typeof body.error?.type === "string") type = body.error.type;
+  } catch {
+    // Preserve the status and a generic Anthropic error shape when the internal body is malformed.
+  }
+  return anthropicErrorResponse(response.status, type, message);
+}
+
+export async function anthropicMessagesRequest(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: LcaCodexAdapterFactory = createLcaCodexAdapter,
+): Promise<Response> {
+  if (!apiTokenAuthorized(req)) {
+    return anthropicErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+  }
+
+  let raw: unknown;
+  let conversion: ReturnType<typeof anthropicMessagesToResponses>;
+  let taskId: string | undefined;
+  try {
+    raw = await readJsonRequestBody(req);
+    conversion = anthropicMessagesToResponses(raw);
+    taskId = requestAnthropicTaskId(req);
+  } catch (error) {
+    return anthropicErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+
+  const continuedExecutionId = taskId
+    ? anthropicToolContinuationExecutionId(raw, taskId)
+    : undefined;
+  const requestExecutionId = taskId
+    ? continuedExecutionId ?? anthropicRequestExecutionId(taskId, conversion.responsesBody)
+    : undefined;
+  const headers = new Headers(req.headers);
+  headers.set("content-type", "application/json");
+  if (taskId) headers.set(AGENT_TASK_ID_HEADER, taskId);
+  const internal = new Request("http://127.0.0.1/v1/agent/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(conversion.responsesBody),
+    signal: req.signal,
+  });
+  const response = await responseRequest(internal, config, adapterFactory, {
+    agentOnly: true,
+    agentTransport: "anthropic_messages",
+    ...(taskId ? { agentConversationId: taskId } : {}),
+    ...(requestExecutionId ? { agentExecutionId: requestExecutionId } : {}),
+    onAgentToolCall: (callId, executionId, activeConversationId) => {
+      if (activeConversationId) rememberChatToolExecution(activeConversationId, executionId, callId);
+    },
+    onAgentExecutionFinished: forgetChatToolExecution,
+  });
+  if (!response.ok) return anthropicErrorFromResponse(response);
+
+  const returnedTaskId = response.headers.get(AGENT_TASK_ID_HEADER);
+  if (conversion.stream) {
+    if (!response.body) return anthropicErrorResponse(502, "api_error", "Responses core returned an empty stream");
+    return new Response(responsesSseToAnthropicMessages(response.body, conversion.requestedModel), {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        ...(returnedTaskId ? { [AGENT_TASK_ID_HEADER]: returnedTaskId } : {}),
+      },
+    });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await response.json() as Record<string, unknown>;
+  } catch {
+    return anthropicErrorResponse(502, "api_error", "Responses core returned invalid JSON");
+  }
+  if (body.error && typeof body.error === "object") {
+    const error = body.error as { message?: unknown; type?: unknown };
+    const normalized = {
+      type: typeof error.type === "string" ? error.type : "api_error",
+      message: typeof error.message === "string" ? error.message : "Anthropic Messages turn failed",
+    };
+    return anthropicErrorResponse(
+      httpStatusFromTerminalError(normalized),
+      normalized.type,
+      normalized.message,
+    );
+  }
+  return Response.json(
+    responsesToAnthropicMessage(body, conversion.requestedModel),
+    returnedTaskId ? { headers: { [AGENT_TASK_ID_HEADER]: returnedTaskId } } : undefined,
+  );
+}
+
+export async function anthropicCountTokensRequest(req: Request): Promise<Response> {
+  if (!apiTokenAuthorized(req)) {
+    return anthropicErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+  }
+  try {
+    const raw = await readJsonRequestBody(req);
+    return Response.json({ input_tokens: anthropicInputTokenCount(raw) });
+  } catch (error) {
+    return anthropicErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
 }
 
 export async function compactRequest(
@@ -846,7 +1164,9 @@ export function startServer(
           let cancelled = 0;
           if (method === "turn/interrupt" || method === "turn/completed") {
             if (!turnId) return formatErrorResponse(400, "invalid_request_error", `${method} requires turnId`);
-            cancelled = chatGptTurnSessions.retireThreadTurn(threadId, turnId);
+            cancelled = method === "turn/interrupt"
+              ? chatGptTurnSessions.retireThreadTurn(threadId, turnId)
+              : 0;
           } else if (method === "thread/stop") {
             cancelled = chatGptTurnSessions.retireThread(threadId);
           } else if (method !== "turn/start" && method !== "turn/started") {
@@ -862,6 +1182,61 @@ export function startServer(
           400,
           "invalid_request_error",
           error instanceof Error ? error.message : "Codex lifecycle request must be valid JSON",
+        ));
+      }
+      if (req.method === "POST" && url.pathname === "/v1/agent/lifecycle") {
+        if (!apiTokenAuthorized(req)) {
+          return formatErrorResponse(401, "authentication_error", "A valid LCA Token API key is required");
+        }
+        return readJsonRequestBody(req).then(async raw => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            return formatErrorResponse(400, "invalid_request_error", "Agent lifecycle event must be an object");
+          }
+          const event = raw as { method?: unknown; execution_id?: unknown };
+          const method = typeof event.method === "string" ? event.method : "";
+          const executionId = typeof event.execution_id === "string" ? event.execution_id.trim() : "";
+          const explicitTaskId = requestAgentTaskId(req, raw);
+          const anthropicTaskId = req.headers.get("x-claude-code-session-id")
+            ? requestAnthropicTaskId(req)
+            : undefined;
+          if (explicitTaskId && anthropicTaskId && explicitTaskId !== anthropicTaskId) {
+            return formatErrorResponse(400, "invalid_request_error", "Agent lifecycle task identities conflict");
+          }
+          const taskId = explicitTaskId ?? anthropicTaskId;
+          let cancelled = 0;
+          if (method === "execution/interrupt" || method === "execution/completed") {
+            if (!executionId || executionId.length > 200) {
+              return formatErrorResponse(400, "invalid_request_error", `${method} requires execution_id`);
+            }
+            cancelled = method === "execution/interrupt"
+              ? chatGptTurnSessions.retireAgentExecution(executionId)
+              : 0;
+            if (method === "execution/interrupt" || cancelled > 0) forgetChatToolExecution(executionId);
+          } else if (method === "task/stop") {
+            if (!taskId) {
+              return formatErrorResponse(
+                400,
+                "invalid_request_error",
+                "task/stop requires X-LCA-Task-ID or a supported harness session identity",
+              );
+            }
+            cancelled = chatGptTurnSessions.retireAgentConversation(taskId);
+            forgetChatToolConversation(taskId);
+          } else if (method !== "execution/start" && method !== "execution/started") {
+            return formatErrorResponse(400, "invalid_request_error", `Unsupported agent lifecycle method: ${method || "missing"}`);
+          }
+          return Response.json({
+            status: "ok",
+            method,
+            ...(taskId ? { task_id: taskId } : {}),
+            ...(executionId ? { execution_id: executionId } : {}),
+            cancelled_browser_turns: cancelled,
+            ...activity(),
+          });
+        }).catch(error => formatErrorResponse(
+          400,
+          "invalid_request_error",
+          error instanceof Error ? error.message : "Agent lifecycle request must be valid JSON",
         ));
       }
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
@@ -922,6 +1297,14 @@ export function startServer(
       if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
         if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);
         return httpTurns.track(() => chatCompletionsRequest(req, config), req.signal);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/messages") {
+        if (draining) return anthropicErrorResponse(503, "api_error", `${PRODUCT_ID} is draining for a requested service operation`);
+        return httpTurns.track(() => anthropicMessagesRequest(req, config), req.signal);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
+        if (draining) return anthropicErrorResponse(503, "api_error", `${PRODUCT_ID} is draining for a requested service operation`);
+        return httpTurns.track(() => anthropicCountTokensRequest(req), req.signal);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", `${PRODUCT_ID} is draining for a requested service operation`);

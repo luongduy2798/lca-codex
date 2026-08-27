@@ -38,7 +38,7 @@ test("completed prompts activate the scoped semantic send control", () => {
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
 });
 
-test("browser turns run concurrently up to the five-tab limit", async () => {
+test("distinct browser executions start independently and exact duplicate traces are rejected", async () => {
   expect(MAX_CHATGPT_BROWSER_TABS).toBe(5);
   const releases = new Map<string, () => void>();
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -56,29 +56,45 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
     onTextDelta() {},
   });
 
-  const active = Array.from({ length: 5 }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
+  const first = worker.run(browserTurn("execution_a"));
+  const second = worker.run(browserTurn("execution_b"));
+  await expect(worker.run(browserTurn("execution_a"))).rejects.toThrow("Duplicate LCA Codex browser turn");
   await Promise.resolve();
-  expect(releases.size).toBe(5);
-  await expect(worker.run(browserTurn("trace_6"))).rejects.toThrow("at most 5 simultaneous browser turns");
-
-  releases.get("trace_1")?.();
-  await active[0];
-  const sixth = worker.run(browserTurn("trace_6"));
-  await Promise.resolve();
-  expect(releases.has("trace_6")).toBeTrue();
-  for (const traceId of ["trace_2", "trace_3", "trace_4", "trace_5", "trace_6"]) {
-    releases.get(traceId)?.();
-  }
-  await Promise.all([...active.slice(1), sixth]);
+  expect(releases.has("execution_a")).toBeTrue();
+  expect(releases.has("execution_b")).toBeTrue();
+  releases.get("execution_a")?.();
+  releases.get("execution_b")?.();
+  await Promise.all([first, second]);
 });
 
-test("every browser generation owns a fresh Temporary Chat and closes it after completion", () => {
+test("every browser execution owns a fresh Temporary Chat page closed after network completion", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain("const managed = await this.pageForNewTurn();");
-  expect(workerSource).toContain('page.goto(CHATGPT_TEMPORARY_CHAT_URL');
-  expect(workerSource).toContain("if (managedPage && !managedPage.isClosed()) {");
+  expect(workerSource).toContain("private async pageForNewTurn(): Promise<Page>");
+  expect(workerSource).toContain("return context.newPage()");
   expect(workerSource).not.toContain("conversationPages");
-  expect(workerSource).not.toContain("temporary-chat-reused");
+  expect(workerSource).not.toContain("conversationTails");
+  expect(workerSource).not.toContain("taskChatGptConversationIds");
+  expect(workerSource).toContain('page.goto(CHATGPT_TEMPORARY_CHAT_URL');
+  expect(workerSource).toContain("if (networkCompletionReady) {");
+  expect(workerSource).toContain("if (managedPage && !managedPage.isClosed()) {");
+});
+
+test("page acquisition never reuses a prior harness execution page", async () => {
+  let created = 0;
+  const context = {
+    newPage: async () => ({ id: `page-${++created}` } as unknown as Page),
+  };
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    ensureManagedBrowser: async () => ({ context }),
+  }) as ChatGptBrowserWorker;
+  const pageForNewTurn = (worker as unknown as {
+    pageForNewTurn: () => Promise<Page>;
+  }).pageForNewTurn.bind(worker);
+
+  const first = await pageForNewTurn();
+  const second = await pageForNewTurn();
+  expect(first).not.toBe(second);
+  expect(created).toBe(2);
 });
 
 test("browser turns have no absolute deadline unless one is explicitly configured", () => {
@@ -437,6 +453,56 @@ test("browser network lifecycle rejects a completion for another turn in the own
   expect(tracker.snapshot().completed).toBe(true);
 });
 
+test("fresh execution accepts a conversation-only completion after its current turn is owned", () => {
+  const tracker = new ChatGptNetworkTurnTracker();
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+
+  tracker.arm();
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  tracker.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/existing-conversation/stream_status",
+  );
+  tracker.observeWebSocketPayload(frame("conversation-turn-current-turn", "conversation-turn-stream", {
+    turn_id: "current-turn",
+    conversation_id: "existing-conversation",
+  }));
+  expect(tracker.snapshot()).toMatchObject({ turnKnown: true, completed: false });
+
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "existing-conversation",
+  }));
+  expect(tracker.snapshot().completed).toBe(true);
+});
+
+test("fresh execution does not bind an early ambiguous conversation-only completion", () => {
+  const tracker = new ChatGptNetworkTurnTracker();
+  const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: topicId,
+    payload: { type, payload },
+  }]);
+
+  tracker.arm();
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  tracker.observePageRequest(
+    "GET",
+    "https://chatgpt.com/backend-api/conversation/existing-conversation/stream_status",
+  );
+  tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "existing-conversation",
+  }));
+  tracker.observeWebSocketPayload(frame("conversation-turn-current-turn", "conversation-turn-stream", {
+    turn_id: "current-turn",
+    conversation_id: "existing-conversation",
+  }));
+  expect(tracker.snapshot()).toMatchObject({ turnKnown: true, completed: false });
+});
+
 test("five browser turn trackers keep terminal state isolated", () => {
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
     type: "message",
@@ -479,7 +545,7 @@ test("five browser turn trackers keep terminal state isolated", () => {
 test("browser network lifecycle is mandatory before Send", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const attach = workerSource.indexOf("await networkObserver.attach(page);");
-  const arm = workerSource.indexOf("networkObserver.arm();", attach);
+  const arm = workerSource.indexOf("networkObserver.arm(", attach);
   const send = workerSource.indexOf('await sendButton.press("Enter");', arm);
   expect(attach).toBeGreaterThan(-1);
   expect(arm).toBeGreaterThan(attach);

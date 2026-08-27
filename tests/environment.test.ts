@@ -96,6 +96,28 @@ describe("trusted current Codex environment envelope", () => {
       .toThrow("missing cwd");
   });
 
+  test("accepts Codex CLI 0.141 seatbelt metadata without item ids when the managed envelope is read-only", () => {
+    expect(extractChatGptTurnEnvironment(currentWire({
+      sandbox: "seatbelt",
+      includeIds: false,
+      environmentXml: filesystemEnvironmentXml(readOnlyProfileXml),
+    }))).toEqual({
+      cwd: root,
+      roots: [root],
+      writableRoots: [],
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      tools: [],
+    });
+  });
+
+  test("never treats seatbelt metadata as unrestricted authority", () => {
+    expect(() => extractChatGptTurnEnvironment(currentWire({
+      sandbox: "seatbelt",
+      includeIds: false,
+      environmentXml: filesystemEnvironmentXml(dangerFullAccessProfileXml),
+    }))).toThrow("missing cwd");
+  });
+
   test("accepts Codex auxiliary roots that are intentionally absent from git workspace metadata", () => {
     const auxiliary = resolve(root, "auxiliary-output");
     const projectEnvironment = `<environment_context>

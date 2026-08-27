@@ -41,6 +41,13 @@ import { VERSION } from "./version";
 import { apiTokenPath, ensureApiToken, readApiToken, removeApiToken, rotateApiToken } from "./api-auth";
 import { runSetupWizard, runTui, tuiSupported } from "./tui";
 import { uninstallProfile } from "./uninstall";
+import {
+  setupAllHarnesses,
+  setupClaudeCodeHarness,
+  setupClineHarness,
+  setupCodexHarness,
+  type HarnessSetupResult,
+} from "./harness-config";
 
 const HELP = `${PRODUCT_ID} ${VERSION}
 
@@ -59,6 +66,7 @@ Usage:
   ${SOURCE_CLI_COMMAND} tunnel <status|key-import>
   ${SOURCE_CLI_COMMAND} connector <status|setup>
   ${SOURCE_CLI_COMMAND} api key <status|create|rotate|revoke|path>
+  ${SOURCE_CLI_COMMAND} harness setup <codex|claude-code|cline|all> [options]
   ${SOURCE_CLI_COMMAND} browser check
   ${SOURCE_CLI_COMMAND} profile <show|list|create|use> [NAME]
   ${SOURCE_CLI_COMMAND} config path
@@ -73,6 +81,12 @@ Setup options:
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
 
+Harness setup options:
+  --model NAME                 Model alias for one Claude Code or Cline setup
+  --claude-model NAME          Claude Code model alias for harness setup all
+  --cline-model NAME           Cline model alias for harness setup all
+  --replace-codex-route        Reversibly replace an existing Codex openai_base_url
+
 Global:
   --home PATH                  Override ~/.lca-token
   --profile NAME               Select an isolated profile (default: active/default)
@@ -80,6 +94,11 @@ Global:
   -v, --version
 
 `;
+
+function printHarnessSetup(result: HarnessSetupResult): void {
+  stdout.write(`Configured ${result.harness}: ${result.path}\n`);
+  stdout.write(`${result.detail}\n`);
+}
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -395,6 +414,48 @@ function apiCommand(args: string[]): void {
   throw new Error("API command must be: api key status|create|rotate|revoke|path");
 }
 
+function harnessCommand(args: string[]): void {
+  const action = args.shift();
+  const harness = args.shift();
+  if (action !== "setup" || !harness) {
+    throw new Error("Harness command must be: harness setup codex|claude-code|cline|all");
+  }
+  const model = takeOption(args, "--model");
+  const claudeModel = takeOption(args, "--claude-model");
+  const clineModel = takeOption(args, "--cline-model");
+  const replaceCodexRoute = takeFlag(args, "--replace-codex-route");
+  assertNoArgs(args);
+  const config = loadConfig();
+
+  if (harness === "codex") {
+    if (model || claudeModel || clineModel) throw new Error("Codex harness setup does not accept a model override");
+    printHarnessSetup(setupCodexHarness(config, { replaceCodexRoute }));
+    return;
+  }
+  if (harness === "claude-code") {
+    if (claudeModel || clineModel || replaceCodexRoute) {
+      throw new Error("Claude Code harness setup accepts only --model");
+    }
+    printHarnessSetup(setupClaudeCodeHarness(config, { model }));
+    return;
+  }
+  if (harness === "cline") {
+    if (claudeModel || clineModel || replaceCodexRoute) {
+      throw new Error("Cline harness setup accepts only --model");
+    }
+    printHarnessSetup(setupClineHarness(config, { model }));
+    return;
+  }
+  if (harness === "all") {
+    if (model) throw new Error("All-harness setup uses --claude-model and --cline-model instead of --model");
+    for (const result of setupAllHarnesses(config, { claudeModel, clineModel, replaceCodexRoute })) {
+      printHarnessSetup(result);
+    }
+    return;
+  }
+  throw new Error("Harness must be one of: codex, claude-code, cline, all");
+}
+
 async function uninstallCommand(args: string[]): Promise<void> {
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
@@ -442,6 +503,7 @@ async function main(): Promise<void> {
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "connector") connectorCommand(args);
   else if (command === "api") apiCommand(args);
+  else if (command === "harness") harnessCommand(args);
   else if (command === "profile") profileCommand(args);
   else if (command === "config") {
     const action = args.shift();
