@@ -148,7 +148,7 @@ type LcaCodexAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter
 
 export function routeLcaCodexRequest(parsed: CodexParsedRequest, config: AppConfig): LcaCodexModelDescriptor {
   const model = requireLcaCodexModel(parsed.modelId);
-  const mode = resolveLcaCodexReasoningMode(parsed.options.reasoning, config.proAvailable);
+  const mode = resolveLcaCodexReasoningMode(parsed.options.reasoning, config.effortLevelCount);
   parsed.modelId = LCA_CODEX_BASE_MODEL;
   parsed.options.reasoning = mode.adapterEffort;
   return model;

@@ -61,7 +61,9 @@ export interface ExistingBridgeSetupCredentials {
 }
 
 export function launcherCapabilityProbeRequired(existing: AppConfig | undefined): boolean {
-  return !(existing?.browserHost === "launcher" && typeof existing.proAvailable === "boolean");
+  return !(existing?.browserHost === "launcher"
+    && Number.isInteger(existing.effortLevelCount)
+    && existing.effortLevelCount > 0);
 }
 
 export function existingBridgeSetupCredentials(existing: AppConfig | undefined): ExistingBridgeSetupCredentials {
@@ -91,6 +93,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     storageStatePath: before.storageStatePath,
     brokerSocketPath: before.brokerSocketPath,
     headed: before.headed,
+    effortLevelCount: before.effortLevelCount,
     proAvailable: before.proAvailable,
     autoApproveToolCalls: before.autoApproveToolCalls,
     controlToken: before.controlToken,
@@ -109,6 +112,7 @@ function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
     storageStatePath: after.storageStatePath,
     brokerSocketPath: after.brokerSocketPath,
     headed: after.headed,
+    effortLevelCount: after.effortLevelCount,
     proAvailable: after.proAvailable,
     autoApproveToolCalls: after.autoApproveToolCalls,
     controlToken: after.controlToken,
@@ -277,18 +281,18 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   }
 
   let loginCreated = false;
-  let proAvailable: boolean | undefined;
+  let effortLevelCount: number | undefined;
   if (config.browserHost === "launcher") {
     if (options.forceLogin) throw new Error("Launcher browser login is owned by the launcher UI; --login cannot replace it");
-    const detectPro = launcherCapabilityProbeRequired(existing);
+    const detectEffortLevels = launcherCapabilityProbeRequired(existing);
     const inspected = await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, {
-      detectPro,
+      detectEffortLevels,
     });
-    proAvailable = detectPro ? inspected.proAvailable : existing!.proAvailable;
+    effortLevelCount = detectEffortLevels ? inspected.effortLevelCount : existing!.effortLevelCount;
   } else {
-    proAvailable = storedBrowserLoginCapabilities(config).proAvailable;
+    effortLevelCount = storedBrowserLoginCapabilities(config).effortLevelCount;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
-    const capabilityProbeRequired = !loginRequired && proAvailable === undefined;
+    const capabilityProbeRequired = !loginRequired && effortLevelCount === undefined;
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && !options.restartService) {
       throw new Error(
         "Setup must verify the browser account before changing the running daemon. "
@@ -298,13 +302,14 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (beforeService.loaded && (loginRequired || capabilityProbeRequired) && existing) await assertServiceIdle(existing);
     if (loginRequired) {
       const login = await loginToChatGpt(config);
-      proAvailable = login.proAvailable;
+      effortLevelCount = login.effortLevelCount;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
-      proAvailable = (await inspectBrowserLoginCapabilities(config)).proAvailable;
+      effortLevelCount = (await inspectBrowserLoginCapabilities(config)).effortLevelCount;
     }
   }
-  config.proAvailable = proAvailable === true;
+  config.effortLevelCount = effortLevelCount ?? 3;
+  config.proAvailable = config.effortLevelCount >= 5;
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);
   const preliminaryChange = Boolean(existing && (meaningfulRuntimeChange(existing, config) || explicitTunnelChange || options.forceLogin));
   if (beforeService.loaded && preliminaryChange && !options.restartService) {

@@ -2372,8 +2372,48 @@ code {
   border-bottom: 1px solid var(--color-border-light);
 }
 
-.setting-row > div {
+.setting-row-copy {
   padding: 12px 0;
+}
+
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 7px;
+  background: var(--color-background-control);
+}
+
+.segmented-control button {
+  min-width: 86px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  transition:
+    background var(--duration-micro) ease,
+    color var(--duration-micro) ease;
+}
+
+.segmented-control button:not(.is-active):not(:disabled):hover {
+  color: var(--color-text-secondary);
+  background: rgb(255 255 255 / 4%);
+}
+
+.segmented-control button.is-active {
+  background: var(--blue-300);
+  color: var(--gray-0);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+}
+
+.segmented-control button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .switch {

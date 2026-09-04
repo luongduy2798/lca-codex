@@ -64,7 +64,7 @@ export function buildLcaCodexModel(
   if (!templateSlug || isOwnedLcaCodexSlug(templateSlug)) {
     throw new Error("LCA Codex model template must be a native Codex model");
   }
-  const reasoningModes = availableLcaCodexReasoningModes(config.proAvailable);
+  const reasoningModes = availableLcaCodexReasoningModes(config.effortLevelCount);
   // Codex exposes context size per model, not per reasoning level. Use the native harness's
   // advertised maximum for the routed outer lifetime and preserve its normal 10% compaction
   // headroom. Browser prompts stay independently bounded by lazy-context projection.

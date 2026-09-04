@@ -301,8 +301,10 @@ export interface CodexProviderConfig {
   modelDefaultReasoningEfforts?: Record<string, string>;
   noReasoningModels?: string[];
   lcaCodex?: {
-    /** ChatGPT custom connector attached to tool-capable temporary chats. */
+    /** ChatGPT custom connector attached to tool-capable chats. */
     appName?: string;
+    /** Chat surface used by managed browser turns; launcher turns snapshot their own mode lease. */
+    chatMode?: "normal" | "temporary";
     /** Explicit browser owner. Launcher mode attaches to the embedded Electron ChatGPT surface. */
     browserHost?: "managed-chrome" | "launcher";
     /** Owner-only descriptor containing the launcher's loopback CDP and control endpoints. */
@@ -321,7 +323,9 @@ export interface CodexProviderConfig {
     headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for non-Pro efforts. */
     localToolsEnabled?: boolean;
-    /** Account capability proven by the authenticated browser probe. */
+    /** Number of thinking-slider positions proven by the authenticated browser probe. */
+    effortLevelCount?: number;
+    /** Backward-compatible derived capability; true when at least five thinking positions exist. */
     proAvailable?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */
     autoApproveToolCalls?: boolean;

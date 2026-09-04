@@ -40,16 +40,22 @@ describe("single LCA Codex model", () => {
     expect(() => requireLcaCodexModel("lca-codex/high")).toThrow("model is not enabled");
   });
 
-  test("advertises Pro-only reasoning levels only when the account supports them", () => {
-    expect(availableLcaCodexReasoningModes(false).map(mode => mode.codexEffort)).toEqual([
+  test("advertises reasoning levels from the live indexed thinking range", () => {
+    expect(availableLcaCodexReasoningModes(3).map(mode => mode.codexEffort)).toEqual([
       "low",
       "medium",
       "high",
     ]);
-    expect(availableLcaCodexReasoningModes(true)).toEqual(LCA_CODEX_REASONING_MODES);
-    expect(() => resolveLcaCodexReasoningMode("xhigh", false)).toThrow("Extra High effort is not available");
-    expect(() => resolveLcaCodexReasoningMode("max", false)).toThrow("Pro effort is not available");
-    expect(resolveLcaCodexReasoningMode("ultra", true).adapterEffort).toBe("max");
+    expect(availableLcaCodexReasoningModes(4).map(mode => mode.codexEffort)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(availableLcaCodexReasoningModes(5)).toEqual(LCA_CODEX_REASONING_MODES);
+    expect(() => resolveLcaCodexReasoningMode("xhigh", 3)).toThrow("current ChatGPT thinking range");
+    expect(() => resolveLcaCodexReasoningMode("max", 4)).toThrow("current ChatGPT thinking range");
+    expect(resolveLcaCodexReasoningMode("ultra", 5).adapterEffort).toBe("max");
   });
 
   test("uses one outer Codex lifetime across every reasoning mode", () => {
@@ -79,6 +85,7 @@ describe("single LCA Codex model", () => {
 
   test("maps Pro to the browser max effort and fails closed for unsupported routed slugs", () => {
     const config = defaultConfig();
+    config.effortLevelCount = 5;
     config.proAvailable = true;
     const request = parsed("lca-codex", "max");
     expect(routeLcaCodexRequest(request, config).slug).toBe("lca-codex");

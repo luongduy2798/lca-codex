@@ -39,33 +39,38 @@ export interface LcaCodexReasoningMode {
   adapterEffort: LcaCodexAdapterEffort;
   displayLabel: "Instant" | "Medium" | "High" | "Extra High" | "Pro";
   uiEffortIndex: 0 | 1 | 2 | 3 | 4;
-  requiresPro: boolean;
 }
 
-/** One public model; reasoning selects the ChatGPT browser mode. */
+/** One public model; reasoning selects a zero-based ChatGPT thinking-slider position. */
 export const LCA_CODEX_REASONING_MODES: readonly LcaCodexReasoningMode[] = [
-  { codexEffort: "low", adapterEffort: "low", displayLabel: "Instant", uiEffortIndex: 0, requiresPro: false },
-  { codexEffort: "medium", adapterEffort: "medium", displayLabel: "Medium", uiEffortIndex: 1, requiresPro: false },
-  { codexEffort: "high", adapterEffort: "high", displayLabel: "High", uiEffortIndex: 2, requiresPro: false },
-  { codexEffort: "xhigh", adapterEffort: "xhigh", displayLabel: "Extra High", uiEffortIndex: 3, requiresPro: true },
-  { codexEffort: "ultra", adapterEffort: "max", displayLabel: "Pro", uiEffortIndex: 4, requiresPro: true },
+  { codexEffort: "low", adapterEffort: "low", displayLabel: "Instant", uiEffortIndex: 0 },
+  { codexEffort: "medium", adapterEffort: "medium", displayLabel: "Medium", uiEffortIndex: 1 },
+  { codexEffort: "high", adapterEffort: "high", displayLabel: "High", uiEffortIndex: 2 },
+  { codexEffort: "xhigh", adapterEffort: "xhigh", displayLabel: "Extra High", uiEffortIndex: 3 },
+  { codexEffort: "ultra", adapterEffort: "max", displayLabel: "Pro", uiEffortIndex: 4 },
 ];
 
-export function availableLcaCodexReasoningModes(proAvailable: boolean): readonly LcaCodexReasoningMode[] {
-  return proAvailable
-    ? LCA_CODEX_REASONING_MODES
-    : LCA_CODEX_REASONING_MODES.filter(mode => !mode.requiresPro);
+export function normalizeLcaCodexEffortLevelCount(value: number): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`ChatGPT effort level count must be a positive integer: ${value}`);
+  }
+  return Math.min(value, LCA_CODEX_REASONING_MODES.length);
+}
+
+export function availableLcaCodexReasoningModes(effortLevelCount: number): readonly LcaCodexReasoningMode[] {
+  const available = normalizeLcaCodexEffortLevelCount(effortLevelCount);
+  return LCA_CODEX_REASONING_MODES.filter(mode => mode.uiEffortIndex < available);
 }
 
 export function resolveLcaCodexReasoningMode(
   reasoning: string | undefined,
-  proAvailable: boolean,
+  effortLevelCount: number,
 ): LcaCodexReasoningMode {
   const effort = reasoning === "ultra" ? "max" : reasoning ?? "high";
   const mode = LCA_CODEX_REASONING_MODES.find(candidate => candidate.adapterEffort === effort);
   if (!mode) throw new Error(`LCA Codex effort is not supported: ${effort}`);
-  if (mode.requiresPro && !proAvailable) {
-    throw new Error(`${mode.displayLabel} effort is not available for this account`);
+  if (mode.uiEffortIndex >= normalizeLcaCodexEffortLevelCount(effortLevelCount)) {
+    throw new Error(`${mode.displayLabel} effort is not available for the current ChatGPT thinking range`);
   }
   return mode;
 }

@@ -32,6 +32,7 @@ export interface AppConfig {
   storageStatePath: string;
   brokerSocketPath: string;
   headed: boolean;
+  effortLevelCount: number;
   proAvailable: boolean;
   autoApproveToolCalls: boolean;
   controlToken: string;
@@ -122,6 +123,7 @@ export function defaultConfig(): AppConfig {
     storageStatePath: join(home, "browser", "storage-state.json"),
     brokerSocketPath: defaultBrokerEndpoint(home),
     headed: true,
+    effortLevelCount: 3,
     proAvailable: false,
     autoApproveToolCalls: false,
     controlToken: randomBytes(32).toString("base64url"),
@@ -321,6 +323,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
+  const effortLevelCount = parsed.effortLevelCount === undefined
+    ? (parsed.proAvailable ? 5 : 3)
+    : parsed.effortLevelCount;
+  if (!Number.isInteger(effortLevelCount) || effortLevelCount < 1) {
+    throw new Error(`Invalid effortLevelCount in ${path}`);
+  }
   if (parsed.acknowledgedUnofficialAt !== undefined
     && (typeof parsed.acknowledgedUnofficialAt !== "string" || !parsed.acknowledgedUnofficialAt.trim())) {
     throw new Error(`Invalid acknowledgedUnofficialAt in ${path}`);
@@ -341,7 +349,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
     storageStatePath: parsed.storageStatePath!,
     brokerSocketPath: parsed.brokerSocketPath!,
     headed: parsed.headed,
-    proAvailable: parsed.proAvailable,
+    effortLevelCount,
+    proAvailable: effortLevelCount >= 5,
     autoApproveToolCalls: parsed.autoApproveToolCalls,
     controlToken: parsed.controlToken!,
     runtimeCommand: [...parsed.runtimeCommand],
@@ -365,7 +374,7 @@ export function saveConfig(config: AppConfig): void {
 
 export function providerConfig(config: AppConfig): CodexProviderConfig {
   const models = ["gpt-5.6-sol"];
-  const efforts = ["low", "medium", "high", ...(config.proAvailable ? ["xhigh", "max"] : [])];
+  const efforts = ["low", "medium", "high", "xhigh", "max"].slice(0, Math.min(5, config.effortLevelCount));
   return {
     adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
@@ -379,6 +388,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     noReasoningModels: [],
     lcaCodex: {
       appName: config.appName,
+      chatMode: "normal",
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,
@@ -387,6 +397,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
       headed: config.headed,
       localToolsEnabled: true,
+      effortLevelCount: config.effortLevelCount,
       proAvailable: config.proAvailable,
       autoApproveToolCalls: config.autoApproveToolCalls,
     },

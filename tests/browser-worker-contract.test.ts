@@ -219,6 +219,10 @@ test("browser network lifecycle correlates completion regardless of created/stre
     turnKnown: true,
     completed: true,
   });
+  expect(tracker.ownership()).toEqual({
+    conversationId: "conversation-1",
+    created: true,
+  });
 
   const exactCompletionBeforeStream = new ChatGptNetworkTurnTracker();
   exactCompletionBeforeStream.arm();
@@ -1008,20 +1012,21 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   expect(workerSource).not.toContain('aria-label^="Remove file "');
 });
 
-test("effort selection uses structural menu indices instead of localized labels", () => {
+test("effort selection uses the indexed thinking slider instead of localized labels or model radios", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
   expect(workerSource).toContain("mode.uiEffortIndex");
   expect(workerSource).toContain("CHATGPT_EFFORT_MENU_SELECTOR");
-  expect(workerSource).toContain("CHATGPT_EFFORT_ITEM_SELECTOR");
-  expect(workerSource).toContain('timeout: 70_000');
-  expect(sessionSource).toContain('[role="menu"]:has([role="menuitemradio"])');
-  expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"])');
-  expect(sessionSource).toContain('[role="menuitemradio"]');
+  expect(workerSource).toContain("CHATGPT_EFFORT_SLIDER_SELECTOR");
+  expect(workerSource).toContain('getAttribute("aria-valuemin")');
+  expect(workerSource).toContain('getAttribute("aria-valuemax")');
+  expect(workerSource).toContain('getAttribute("aria-valuenow")');
+  expect(workerSource).toContain('effortSlider.press(key)');
+  expect(workerSource).toContain('"ArrowRight" : "ArrowLeft"');
+  expect(sessionSource).toContain('[role="slider"][aria-valuenow][aria-valuemax]');
+  expect(sessionSource).not.toContain('[role="menuitemradio"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
-  expect(workerSource).toContain('getAttribute("aria-checked")');
-  expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);
@@ -1040,9 +1045,9 @@ test("effort selection handles the known ChatGPT rate-limit dialog before truste
   expect(guard).toBeGreaterThan(-1);
   expect(activation).toBeGreaterThan(guard);
   expect(selectionSource).not.toContain('currentEffort.press("Enter")');
-  expect(selectionSource).toContain("effortChoice.click()");
-  expect(selectionSource).not.toContain('effortChoice.press("Enter")');
-  expect(selectionSource).not.toContain("is unavailable");
+  expect(selectionSource).toContain("effortSlider.focus()");
+  expect(selectionSource).toContain("effortSlider.press(key)");
+  expect(selectionSource).not.toContain("effortChoice");
 });
 
 function dialogPage(text: string): { page: Page; pressed: string[] } {
@@ -1301,7 +1306,7 @@ test("browser stage diagnostics preserve every critical local checkpoint", () =>
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   for (const checkpoint of [
     "browser-page-acquired",
-    "temporary-chat-navigation-complete",
+    "chat-navigation-complete",
     "composer-ready",
     "session-verified",
     "effort-control-ready",

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
+import type { ChatGptChatMode } from "./chatgpt-session";
 import { processRunning } from "./process";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "lca-codex-launcher";
@@ -216,10 +217,10 @@ export async function connectLauncherBrowserHost(
 
 export async function inspectLauncherBrowserHost(
   descriptorPath: string,
-  options: { detectPro?: boolean; timeoutMs?: number } = {},
-): Promise<{ proAvailable?: boolean; url: string }> {
+  options: { detectEffortLevels?: boolean; timeoutMs?: number } = {},
+): Promise<{ effortLevelCount?: number; chatMode: ChatGptChatMode; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-  const timeoutMs = options.timeoutMs ?? (options.detectPro
+  const timeoutMs = options.timeoutMs ?? (options.detectEffortLevels
     ? LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS
     : LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS);
   const controller = new AbortController();
@@ -235,18 +236,24 @@ export async function inspectLauncherBrowserHost(
         authorization: `Bearer ${descriptor.control.token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ detectPro: options.detectPro === true }),
+      body: JSON.stringify({ detectEffortLevels: options.detectEffortLevels === true }),
       signal: controller.signal,
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
-    if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
+    const chatMode = body.chatMode === "normal" || body.chatMode === "temporary" ? body.chatMode : undefined;
+    if (body.authenticated !== true || !chatMode || typeof body.url !== "string") {
       throw new Error("Launcher returned invalid ChatGPT session evidence");
     }
-    if (options.detectPro && typeof body.proAvailable !== "boolean") {
-      throw new Error("Launcher did not return ChatGPT Pro capability evidence");
+    if (options.detectEffortLevels
+      && (!Number.isInteger(body.effortLevelCount) || (body.effortLevelCount as number) < 1)) {
+      throw new Error("Launcher did not return ChatGPT thinking-range capability evidence");
     }
-    return { url: body.url, ...(options.detectPro ? { proAvailable: body.proAvailable as boolean } : {}) };
+    return {
+      url: body.url,
+      chatMode,
+      ...(options.detectEffortLevels ? { effortLevelCount: body.effortLevelCount as number } : {}),
+    };
   } catch (error) {
     const detail = timedOut
       ? `session inspection timed out after ${timeoutMs}ms`
@@ -267,6 +274,7 @@ export type LauncherTurnActivity =
       traceId: string;
       helperPid: number;
       status: "completed" | "failed" | "aborted";
+      ownedConversationId?: string;
       message?: string;
     };
 
@@ -279,7 +287,7 @@ export async function notifyLauncherTurn(
   timeoutMs = activity.phase === "end"
     ? LAUNCHER_TURN_END_TIMEOUT_MS
     : LAUNCHER_TURN_START_TIMEOUT_MS,
-): Promise<{ surfaceId?: string }> {
+): Promise<{ surfaceId?: string; chatMode?: ChatGptChatMode }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -302,7 +310,10 @@ export async function notifyLauncherTurn(
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
       }
-      return { surfaceId: body.surfaceId };
+      if (body.chatMode !== "normal" && body.chatMode !== "temporary") {
+        throw new Error("Launcher browser control channel returned an invalid chat mode");
+      }
+      return { surfaceId: body.surfaceId, chatMode: body.chatMode };
     }
     return {};
   } catch (error) {

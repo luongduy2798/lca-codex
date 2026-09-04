@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- Add a persisted **Normal Chat / Temporary Chat** launcher setting. Normal Chat is the default for current connector support; Temporary Chat remains available for future compatibility. Each browser turn snapshots the selected mode when its launcher tab is leased, so changing Settings never mutates an in-flight turn.
+- Add **Delete completed task chats**, enabled by default. Terminal Normal Chat turns delete only the exact conversation created by their own fresh launcher surface; Temporary Chat and chats without strong ownership evidence are never targeted.
+
+### Changed
+
+- Probe ChatGPT reasoning from the live ARIA slider range and select thinking effort only by zero-based slider index. Translated labels are diagnostic only, and model `menuitemradio` controls are never treated as reasoning choices.
+- Detect and persist the number of available thinking positions instead of using a Pro boolean as the primary capability. Legacy configuration remains readable by deriving a conservative 3- or 5-position range.
+- Keep connector setup and verification on Normal Chat while preserving the Temporary Chat browser path without silently falling back between modes.
+- Release terminal browser tabs even when ChatGPT history cleanup fails. Cleanup uses trusted UI controls and exact `/c/<conversation-id>` ownership proof, never titles or sidebar text, and UI drift fails closed without guessing another chat.
+
+### Tests
+
+- Add/update launcher, browser-worker, model-catalog, setup, state, and control-server coverage for Normal/Temporary mode snapshots, dynamic thinking ranges, slider-only effort selection, legacy state/config migration, and fail-closed owned-chat cleanup.
+
 ## [1.0.8] - Released
 
 ### Added

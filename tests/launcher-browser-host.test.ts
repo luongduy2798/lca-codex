@@ -73,7 +73,7 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
     };
     response.writeHead(200, { "content-type": "application/json" });
     response.end(request.url === "/v1/turn/start"
-      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB"}\n'
+      ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","chatMode":"normal"}\n'
       : '{"ok":true}\n');
   });
   await new Promise<void>((resolve, reject) => {
@@ -88,7 +88,7 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       phase: "start",
       traceId: "abc123def456",
       helperPid: process.pid,
-    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB" });
+    })).resolves.toEqual({ surfaceId: "launcher_surface_id_0123456789AB", chatMode: "normal" });
     expect(received.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
     expect(received.body).toEqual({ phase: "start", traceId: "abc123def456", helperPid: process.pid });
     await notifyLauncherTurn(path, {
@@ -96,12 +96,14 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       traceId: "abc123def456",
       helperPid: process.pid,
       status: "completed",
+      ownedConversationId: "6a992aec-5688-83ec-9649-de1ce1eef46f",
     });
     expect(received.body).toEqual({
       phase: "end",
       traceId: "abc123def456",
       helperPid: process.pid,
       status: "completed",
+      ownedConversationId: "6a992aec-5688-83ec-9649-de1ce1eef46f",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -115,13 +117,13 @@ test("launcher session verification uses the authenticated control channel inste
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     expect(request.url).toBe("/v1/session/inspect");
     expect(request.headers.authorization).toBe("Bearer launcher-control-token-0123456789abcdefghijklmnop");
-    expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual({ detectPro: true });
+    expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual({ detectEffortLevels: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      temporary: true,
-      proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      chatMode: "normal",
+      effortLevelCount: 5,
+      url: "https://chatgpt.com/",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -132,9 +134,10 @@ test("launcher session verification uses the authenticated control channel inste
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server has no port");
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
-    expect(await inspectLauncherBrowserHost(path, { detectPro: true })).toEqual({
-      proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+    expect(await inspectLauncherBrowserHost(path, { detectEffortLevels: true })).toEqual({
+      effortLevelCount: 5,
+      chatMode: "normal",
+      url: "https://chatgpt.com/",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -158,7 +161,7 @@ test("launcher session verification reports its own deadline instead of a generi
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server has no port");
     const path = descriptorFile(`http://127.0.0.1:${address.port}`);
-    await expect(inspectLauncherBrowserHost(path, { detectPro: true, timeoutMs: 5 }))
+    await expect(inspectLauncherBrowserHost(path, { detectEffortLevels: true, timeoutMs: 5 }))
       .rejects.toThrow("session inspection timed out after 5ms");
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));

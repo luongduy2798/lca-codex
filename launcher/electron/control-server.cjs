@@ -101,7 +101,7 @@ class BrowserControlServer {
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
       if (isSessionInspect) {
-        const result = await host.inspectSession(body?.detectPro === true);
+        const result = await host.inspectSession(body?.detectEffortLevels === true);
         writeJson(response, 200, result);
         return;
       }
@@ -113,18 +113,26 @@ class BrowserControlServer {
       }
       const preferences = this.getPreferences();
       if (request.url === "/v1/turn/start") {
-        const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid);
+        const chatMode = preferences.chatMode === "temporary" ? "temporary" : "normal";
+        const lease = host.beginTurn(body.traceId, preferences.showBrowserDuringTurns === true, body.helperPid, chatMode);
         this.logger.info("browser.turn_started", { traceId: body.traceId });
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        if (body.ownedConversationId !== undefined
+          && (typeof body.ownedConversationId !== "string"
+            || !/^[A-Za-z0-9_-]{16,128}$/.test(body.ownedConversationId))) {
+          throw new Error("ownedConversationId is invalid");
+        }
         await host.endTurn(
           body.traceId,
           body.helperPid,
           body.status,
           preferences.showBrowserDuringTurns === true,
+          preferences.deleteCompletedTaskChats !== false,
           body.message,
+          body.ownedConversationId,
         );
         this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
       }

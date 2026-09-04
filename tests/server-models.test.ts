@@ -58,8 +58,6 @@ test("proxies official /models auth and query, then appends one LCA Codex model"
     "low",
     "medium",
     "high",
-    "xhigh",
-    "ultra",
   ]);
   expect(model.supported_in_api).toBe(true);
   expect(model.priority).toBe(LCA_CODEX_MODEL_PRIORITY);

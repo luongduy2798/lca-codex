@@ -40,6 +40,7 @@ const {
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateChatMode,
   validateSidebarState,
 } = require("./state.cjs");
 const {
@@ -1139,8 +1140,21 @@ function registerIpc({ logger, stateStore }) {
       throw error;
     }
   });
+  handle("launcher:set-chat-mode", (_event, value) => {
+    const chatMode = validateChatMode(value);
+    const current = stateStore.read();
+    if (current.chatMode === chatMode) return current;
+    const state = stateStore.update({
+      chatMode,
+      browserSmokePassed: false,
+      browserSmokeVersion: null,
+    });
+    smokePassedThisSession = false;
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:set-preference", async (_event, key, value) => {
-    if (key !== "runtimeAutoStart" && key !== "keepRunningOnClose" && key !== "showBrowserDuringTurns") {
+    if (key !== "runtimeAutoStart" && key !== "keepRunningOnClose" && key !== "deleteCompletedTaskChats" && key !== "showBrowserDuringTurns") {
       throw new Error("Unknown preference");
     }
     const desired = value === true;
@@ -1314,6 +1328,7 @@ async function start() {
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     publishState: (state) => send("launcher:browser-state", state),
+    getPreferences: () => stateStore.read(),
   });
   runtimeSupervisor = new RuntimeSupervisor({
     app,

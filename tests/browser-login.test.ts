@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browserLoginStateExists, loginToChatGpt, loginVerificationMarkerPath } from "../src/browser-login";
-import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
+import { CHATGPT_NORMAL_CHAT_URL } from "../src/chatgpt-session";
 import { defaultConfig } from "../src/config";
 
 test("login starts with normal Chrome and captures state in a headed Keychain-aware context", async () => {
@@ -25,7 +25,7 @@ test("login starts with normal Chrome and captures state in a headed Keychain-aw
     const firstLaunch = launches[0] ?? "";
     expect(firstLaunch).toContain("--new-window");
     expect(firstLaunch).toContain("--user-data-dir=");
-    expect(firstLaunch).toContain(CHATGPT_TEMPORARY_CHAT_URL);
+    expect(firstLaunch).toContain(CHATGPT_NORMAL_CHAT_URL);
     expect(firstLaunch).not.toContain("--remote-debugging-pipe");
     expect(launches[1]).not.toContain("--headless");
   } finally {

@@ -7,6 +7,7 @@ const {
   SESSION_REFRESH_REMINDER_INTERVAL_MS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateChatMode,
   validateSidebarState,
 } = require("../electron/state.cjs");
 
@@ -16,6 +17,8 @@ const DEFAULT_EXPECTED = {
   runtimeAutoStart: false,
   bridgeEnabled: true,
   keepRunningOnClose: true,
+  chatMode: "normal",
+  deleteCompletedTaskChats: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
   reviewCodexChangesPerFile: false,
@@ -38,6 +41,8 @@ test("launcher state persists manual runtime preferences atomically", () => {
     store.update({
       runtimeAutoStart: true,
       keepRunningOnClose: false,
+      chatMode: "temporary",
+      deleteCompletedTaskChats: false,
       hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -47,6 +52,8 @@ test("launcher state persists manual runtime preferences atomically", () => {
       ...DEFAULT_EXPECTED,
       runtimeAutoStart: true,
       keepRunningOnClose: false,
+      chatMode: "temporary",
+      deleteCompletedTaskChats: false,
       hideCodexUsageUpsell: true,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
@@ -57,6 +64,12 @@ test("launcher state persists manual runtime preferences atomically", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("chat mode accepts only Normal or Temporary", () => {
+  assert.equal(validateChatMode("normal"), "normal");
+  assert.equal(validateChatMode("temporary"), "temporary");
+  assert.throws(() => validateChatMode("auto"), /invalid/);
 });
 
 test("sidebar state accepts only bounded native shell dimensions", () => {
@@ -79,6 +92,8 @@ test("persisted sidebar corruption is repaired without changing valid launcher s
       autoStart: "yes",
       runtimeAutoStart: "yes",
       keepRunningOnClose: "yes",
+      chatMode: "auto",
+      deleteCompletedTaskChats: "yes",
       browserSmokePassed: "yes",
       browserSmokeVersion: { invalid: true },
       sidebarOpen: "yes",

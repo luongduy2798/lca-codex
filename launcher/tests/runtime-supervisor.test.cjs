@@ -1216,6 +1216,106 @@ test("manual restart force-stops a busy launcher-owned daemon while manual stop 
   }
 });
 
+test("launcher rebinds an obsolete stale marker to a detached matching Responses daemon", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-rebind-stale-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const warnings = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn: (event, detail) => warnings.push([event, detail]), error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  const detachedPid = 123_456_789;
+  const calls = [];
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealthPayload = async () => ({
+    service: "lca-codex",
+    mode: config.mode,
+    version: config.releaseVersion,
+    pid: detachedPid,
+  });
+  supervisor.daemonPidMatchesRuntimeCommand = (pid) => {
+    calls.push(["verify", pid]);
+    return pid === detachedPid;
+  };
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    absent: true,
+    state: "stopped",
+    processRunning: false,
+    pid: null,
+  });
+  supervisor.acquireDrain = async () => { calls.push(["drain"]); return true; };
+  supervisor.control = async (_config, action) => {
+    calls.push(["control", action]);
+    return { status: "ok" };
+  };
+  supervisor.waitForProcessExit = async (name, pid) => { calls.push(["wait-exit", name, pid]); };
+  supervisor.waitForPortRelease = async () => { calls.push(["port-released"]); };
+  supervisor.clearState = () => { calls.push(["clear-state"]); };
+  try {
+    assert.equal(await supervisor.stopStaleOwnedRuntime(config), true);
+    assert.deepEqual(calls, [
+      ["verify", detachedPid],
+      ["drain"],
+      ["control", "shutdown"],
+      ["wait-exit", "stale daemon", detachedPid],
+      ["port-released"],
+      ["clear-state"],
+    ]);
+    assert.equal(warnings[0][0], "runtime.stale_daemon_marker_rebound");
+    assert.equal(warnings[0][1].previousPid, null);
+    assert.equal(warnings[0][1].daemonPid, detachedPid);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher still rejects a mismatched Responses daemon that cannot be verified", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-rebind-foreign-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath, { releaseVersion: "0.2.0" });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.readState = () => ({
+    version: 1,
+    ownerPid: 999_999_999,
+    daemonPid: null,
+    tunnelPid: null,
+    status: "failed",
+    updatedAt: new Date().toISOString(),
+  });
+  supervisor.proxyHealthPayload = async () => ({
+    service: "lca-codex",
+    mode: config.mode,
+    version: config.releaseVersion,
+    pid: 123_456_789,
+  });
+  supervisor.daemonPidMatchesRuntimeCommand = () => false;
+  try {
+    await assert.rejects(
+      supervisor.stopStaleOwnedRuntime(config),
+      /does not match the stale launcher marker/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("manual restart can reclaim a verified stale daemon that no longer serves health", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-restart-stale-"));
   const descriptorPath = path.join(root, "launcher.json");

@@ -24,14 +24,17 @@ LCA Codex has one supported runtime shape: the ChatGPT Web bridge. Codex remains
 harness; LCA transports a selected turn to ChatGPT Web and connects that response back to the
 current Codex task.
 
-- Exposes one `lca-codex` model. Its reasoning selector maps Low/Medium/High/Extra High/Pro to the
-  matching ChatGPT browser reasoning mode; Extra High and Pro are advertised only when the
-  authenticated account exposes Pro.
+- Exposes one `lca-codex` model. Reasoning maps to zero-based positions in ChatGPT's live ARIA
+  thinking slider. The detected slider range determines which positions are advertised; translated
+  labels and model `menuitemradio` entries are never used as reasoning selectors.
 - Instant, Medium, High, Extra High, and Pro are all tool-capable when the custom connector is
   enabled. Reasoning effort selects the ChatGPT browser mode; it does not independently change
   local-tool access. An explicitly connector-disabled runtime remains read-only regardless of
   reasoning level.
-- ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client`.
+- The launcher snapshots `normal` or `temporary` chat mode at turn start. Normal Chat is the default
+  because the current ChatGPT Web UI exposes custom connectors there; Temporary Chat remains preserved
+  as an explicit mode for future connector support.
+- ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client` for tool-capable Normal Chat turns.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
 - Runtime readiness is conjunctive: both the tunnel and the Responses daemon must be healthy. The
@@ -115,7 +118,7 @@ flowchart TD
     S05 --> S06 --> S07
 ```
 
-### Phase C - Start one Temporary Chat generation
+### Phase C - Start one selected ChatGPT generation
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "22px"}, "flowchart": {"htmlLabels": true, "useMaxWidth": false}}}%%
@@ -124,7 +127,7 @@ flowchart TD
     classDef decision fill:#fff7ed,stroke:#f59e0b,stroke-width:2px,color:#7c2d12,font-size:22px
     classDef success fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:22px
 
-    subgraph PC["Phase C · Start one Temporary Chat generation"]
+    subgraph PC["Phase C · Start one selected ChatGPT generation"]
         direction TB
         S08["<b>STEP 08 · Prepare task-bound browser surface</b><br/><b>Owner:</b> Electron tab / browser worker<br/><b>Action:</b> lease tab, attach prompt/images<br/><b>Critical:</b> attach page CDP network observer BEFORE Send<br/><b>Receive:</b> armed network tracker"]:::card
         S09["<b>STEP 09 · Submit prompt to ChatGPT Web</b><br/><b>Route:</b> browser worker → ChatGPT Web<br/><b>Send:</b> text, images[], selected model/reasoning mode<br/><b>Receive:</b> page submission + exact conversation ownership"]:::card
@@ -194,7 +197,7 @@ flowchart TD
         S19["<b>STEP 19 · Post function_call_output continuation</b><br/><b>Route:</b> Codex → Responses daemon<br/><b>Send:</b> POST /v1/responses<br/><b>Params:</b> previous_response_id + input[] containing<br/>function_call_output with call_id + output, stream<br/><b>Receive:</b> continuation request"]:::card
         S20["<b>STEP 20 · Parse returned toolResult messages</b><br/><b>Route:</b> daemon → parser → adapter<br/><b>Receive:</b> toolResult with toolCallId, toolName,<br/>toolNamespace?, content, isError?<br/><b>Session:</b> reuse existing execution session and outstanding batch"]:::card
         S21["<b>STEP 21 · Complete blocked broker invocation</b><br/><b>Route:</b> adapter → broker<br/><b>Send:</b> completeTool(turn_token, call_id, result)<br/><b>Result:</b> content, structuredContent?, isError?<br/><b>Receive:</b> original blocked MCP invoke resolves"]:::card
-        S22["<b>STEP 22 · Return tool result to ChatGPT</b><br/><b>Route:</b> broker → MCP → connector → ChatGPT Web<br/><b>Receive:</b> connector tool result<br/><b>Critical:</b> SAME browser response/generation resumes<br/><b>Never:</b> no replacement Temporary Chat for this round-trip"]:::card
+        S22["<b>STEP 22 · Return tool result to ChatGPT</b><br/><b>Route:</b> broker → MCP → connector → ChatGPT Web<br/><b>Receive:</b> connector tool result<br/><b>Critical:</b> SAME browser response/generation resumes<br/><b>Never:</b> no replacement ChatGPT generation for this round-trip"]:::card
     end
 
     S15 --> S16 --> S17 --> S18 --> S19 --> S20 --> S21 --> S22
@@ -279,11 +282,19 @@ compaction contract and returned to Codex, which remains the owner of replacemen
 The desktop launcher owns one persistent Electron partition and up to five task-bound browser
 tabs. Each Codex task is leased an independent `WebContentsView` and surface ID; Playwright attaches
 to that exact surface through a launcher-owned loopback CDP endpoint. It does not launch another
-browser or copy authentication state. Each tab opens a fresh Temporary Chat, shares only the local
-login partition, and keeps its own document and lifecycle. Completed tabs remain inspectable until
-closed. Closing a running tab destroys its page and terminates that browser turn. A sixth concurrent
-turn fails explicitly; the cap avoids excessive parallel traffic that could trigger account abuse
-controls.
+browser or copy authentication state. Each tab opens a fresh ChatGPT document in the chat mode
+snapshotted when the turn is leased, shares only the local login partition, and keeps its own document
+and lifecycle. A Settings change never mutates an in-flight turn. Terminal tabs are released immediately
+so completed responses do not consume one of the five browser slots. When **Delete completed task chats**
+is enabled, a Normal Chat tab first attempts best-effort history cleanup on that same owned surface. The
+launcher accepts ownership only after the surface has observed a fresh Normal Chat document and then
+navigated to exactly one `https://chatgpt.com/c/<conversation-id>` URL. It opens that conversation's own
+options menu through trusted browser input, chooses the dedicated delete action, confirms it, and verifies
+that the surface left the owned conversation before releasing the tab. Temporary Chat, missing/mismatched
+ownership evidence, UI drift, or cleanup failure never cause title/sidebar lookup or deletion guesses; the
+terminal tab is still released. Closing a running tab destroys its page and terminates that browser turn.
+A sixth concurrent turn fails explicitly; the cap avoids excessive parallel traffic that could trigger
+account abuse controls.
 
 Within an open tab, normal generation lifecycle is network-scoped rather than DOM-scoped. Before Send,
 the worker attaches a page CDP network observer and arms it for the new submission. The exact page's
@@ -332,8 +343,8 @@ as fenced code are not serialized prematurely. Activity logs expose normalized o
 response content, credentials, or opaque conversation/turn identifiers.
 
 Normal tool-capable turns do not replay the entire accumulated Codex history through the
-visible composer. Before opening the fresh Temporary Chat, the adapter freezes the exact effective
-Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory
+visible composer. Before opening the fresh selected ChatGPT document, the adapter freezes the exact
+effective Codex context into an immutable per-turn broker snapshot and projects a bounded working-memory
 bootstrap: active system instructions, unknown/custom developer overrides, the Codex-resolved
 AGENTS/project instruction fragment, the latest readable compaction checkpoint, a recent
 conversation tail, the latest user request, and current-turn images. The recent tail is selected
@@ -345,7 +356,7 @@ cannot consume the bootstrap. Oversized retained entries use bounded previews wi
 `history_ref` values instead of replaying full logs.
 
 Standard Codex base-model, skill, permission, app, and plugin developer scaffolding plus older/deeper
-conversation state stays in the broker instead of being replayed into every Temporary Chat. One
+conversation state stays in the broker instead of being replayed into every fresh browser document. One
 read-only `codex_context` tool exposes `instructions` for Codex capability guidance plus
 `recent`, `search`, `get`, `full`, and `image` for deeper task state. A truncated working-memory entry
 can be expanded with `get`; historical images remain lazy. The model is explicitly told to resolve
@@ -397,7 +408,7 @@ turn fails closed instead of falling back to an opaque shell edit.
 
 Historical image bytes remain in the broker and are returned only when `codex_context` is called with
 `action=image` for an attachment reference discovered by a history result. They are no longer
-re-uploaded into every fresh Temporary Chat. Normal connector-backed turns and routed compaction use
+re-uploaded into every fresh browser document. Normal connector-backed turns and routed compaction use
 the same lazy snapshot transport, but only normal turns project the recent four-exchange/8k working
 set inline. Compaction uses a minimal bootstrap with the prior checkpoint and latest user state, then
 retrieves recent/deep history from the frozen snapshot as needed. There is no full-history JSON
@@ -430,14 +441,14 @@ between rows becomes native Codex commentary.
 ## Retry policy
 
 Provider retryability and permission to create a fresh ChatGPT browser generation are separate
-contracts. A transient provider failure may authorize one bounded fresh Temporary Chat only before
+contracts. A transient provider failure may authorize one bounded fresh ChatGPT generation only before
 any final-answer bytes have been emitted. Once final-answer text has entered the append-only
 Responses stream, the request is terminal so a replacement generation can never duplicate the
 visible prefix.
 
 Product usage limits are different again. Rate limits, quota exhaustion, and subscription limits may
 remain retryable to native Codex so its normal backoff or a later user retry can occur, but LCA Codex
-never opens a second Temporary Chat automatically for those errors. This preserves the product
+never opens a second ChatGPT generation automatically for those errors. This preserves the product
 usage-limit invariant without misclassifying a temporary 429 as a permanent API failure.
 
 ## Installation and service lifecycle

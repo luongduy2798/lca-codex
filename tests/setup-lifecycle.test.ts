@@ -23,18 +23,21 @@ test("setup accepts only a matching daemon that is ready for new Codex turns", (
   expect(setupProxyIsReady({ ...ready, version: "0.1.16" }, config)).toBe(false);
 });
 
-test("repeat launcher setup reuses the previously verified Pro capability", () => {
+test("repeat launcher setup reuses the previously verified thinking range", () => {
   expect(launcherCapabilityProbeRequired(undefined)).toBe(true);
   expect(launcherCapabilityProbeRequired({
     browserHost: "launcher",
+    effortLevelCount: 5,
     proAvailable: true,
   } as never)).toBe(false);
   expect(launcherCapabilityProbeRequired({
     browserHost: "launcher",
+    effortLevelCount: 3,
     proAvailable: false,
   } as never)).toBe(false);
   expect(launcherCapabilityProbeRequired({
     browserHost: "managed-chrome",
+    effortLevelCount: 5,
     proAvailable: true,
   } as never)).toBe(true);
 });

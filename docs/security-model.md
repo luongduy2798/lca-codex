@@ -74,13 +74,18 @@ or unauthenticated lifecycle control through ordinary requests.
 
 ChatGPT DOM and labels are not a stable API. Selectors are narrow and completion requires stable
 completed-turn evidence. UI drift fails the turn; it never chooses another model, starts another
-transport, or returns a fabricated success.
+transport, or returns a fabricated success. Optional Normal Chat history cleanup is even more
+conservative: it requires a fresh task surface followed by one exact `/c/<conversation-id>` navigation,
+uses dedicated structural delete controls rather than localized labels, and verifies that exact ID is no
+longer active. Missing or conflicting ownership evidence skips cleanup; LCA never searches by chat title
+or guesses a sidebar row to delete.
 
 ### Cross-turn data leakage
 
 Browser turns use at most five independent task-bound tabs in one private login partition. Every
-outer Codex task owns a fresh Temporary Chat document and an exact launcher surface lease; chats are
-never reused across tasks. The page-scoped conversation request fixes the exact conversation ID before
+outer Codex task owns a fresh ChatGPT document in the chat mode snapshotted by its exact launcher
+surface lease; documents are never reused across tasks. Changing the launcher chat-mode setting affects
+future leases only. The page-scoped conversation request fixes the exact conversation ID before
 global WebSocket completion evidence can end that turn, so another tab's completion is ignored. Closing
 a running tab destroys its page and terminates that turn. The
 five-tab limit bounds parallel account traffic. Tool calls remain in the same ChatGPT response. The

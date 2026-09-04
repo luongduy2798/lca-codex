@@ -6,14 +6,15 @@ import type { AppConfig } from "./config";
 import { atomicWriteFile } from "./config";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
-  CHATGPT_TEMPORARY_CHAT_URL,
-  detectChatGptProCapability,
+  assertChatGptPageMode,
+  CHATGPT_NORMAL_CHAT_URL,
+  detectChatGptEffortLevelCount,
 } from "./chatgpt-session";
 
 export interface BrowserLoginResult {
   storageStatePath: string;
   accountSurfaceUrl: string;
+  effortLevelCount: number;
   proAvailable: boolean;
 }
 
@@ -21,6 +22,7 @@ interface LoginVerificationMarker {
   version: 1;
   authenticated: true;
   verifiedAt: string;
+  effortLevelCount?: number;
   proAvailable?: boolean;
 }
 
@@ -28,12 +30,13 @@ export function loginVerificationMarkerPath(storageStatePath: string): string {
   return `${storageStatePath}.verified.json`;
 }
 
-function writeVerificationMarker(storageStatePath: string, proAvailable: boolean): void {
+function writeVerificationMarker(storageStatePath: string, effortLevelCount: number): void {
   const marker: LoginVerificationMarker = {
     version: 1,
     authenticated: true,
     verifiedAt: new Date().toISOString(),
-    proAvailable,
+    effortLevelCount,
+    proAvailable: effortLevelCount >= 5,
   };
   atomicWriteFile(loginVerificationMarkerPath(storageStatePath), `${JSON.stringify(marker)}\n`);
 }
@@ -41,7 +44,7 @@ function writeVerificationMarker(storageStatePath: string, proAvailable: boolean
 async function inspectStoredState(
   config: AppConfig,
   storageState: NonNullable<BrowserContextOptions["storageState"]>,
-): Promise<{ proAvailable: boolean; url: string }> {
+): Promise<{ effortLevelCount: number; url: string }> {
   const verifierBrowser = await chromium.launch({
     executablePath: config.chromeExecutablePath,
     headless: false,
@@ -52,11 +55,11 @@ async function inspectStoredState(
     const verifierContext = await verifierBrowser.newContext({ storageState });
     try {
       const verifierPage = await verifierContext.newPage();
-      await verifierPage.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await verifierPage.goto(CHATGPT_NORMAL_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await verifierPage.getByRole("textbox", { name: "Chat with ChatGPT" }).waitFor({ state: "visible", timeout: 60_000 });
       await assertAuthenticatedChatGptPage(verifierPage);
-      await assertTemporaryChatPage(verifierPage);
-      return { proAvailable: await detectChatGptProCapability(verifierPage), url: verifierPage.url() };
+      await assertChatGptPageMode(verifierPage, "normal");
+      return { effortLevelCount: await detectChatGptEffortLevelCount(verifierPage), url: verifierPage.url() };
     } finally {
       await verifierContext.close();
     }
@@ -65,18 +68,25 @@ async function inspectStoredState(
   }
 }
 
-export async function inspectBrowserLoginCapabilities(config: AppConfig): Promise<{ proAvailable: boolean }> {
+export async function inspectBrowserLoginCapabilities(config: AppConfig): Promise<{ effortLevelCount: number; proAvailable: boolean }> {
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
   const inspected = await inspectStoredState(config, config.storageStatePath);
-  writeVerificationMarker(config.storageStatePath, inspected.proAvailable);
-  return { proAvailable: inspected.proAvailable };
+  writeVerificationMarker(config.storageStatePath, inspected.effortLevelCount);
+  return { effortLevelCount: inspected.effortLevelCount, proAvailable: inspected.effortLevelCount >= 5 };
 }
 
-export function storedBrowserLoginCapabilities(config: AppConfig): { proAvailable?: boolean } {
+export function storedBrowserLoginCapabilities(config: AppConfig): { effortLevelCount?: number; proAvailable?: boolean } {
   if (!browserLoginStateExists(config)) return {};
   try {
     const marker = JSON.parse(readFileSync(loginVerificationMarkerPath(config.storageStatePath), "utf8")) as Partial<LoginVerificationMarker>;
-    return typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {};
+    if (Number.isInteger(marker.effortLevelCount) && marker.effortLevelCount! > 0) {
+      return { effortLevelCount: marker.effortLevelCount, proAvailable: marker.effortLevelCount! >= 5 };
+    }
+    if (typeof marker.proAvailable === "boolean") {
+      const effortLevelCount = marker.proAvailable ? 5 : 3;
+      return { effortLevelCount, proAvailable: marker.proAvailable };
+    }
+    return {};
   } catch {
     return {};
   }
@@ -100,7 +110,7 @@ export async function loginToChatGpt(
     "--disable-background-mode",
     "--no-first-run",
     "--no-default-browser-check",
-    CHATGPT_TEMPORARY_CHAT_URL,
+    CHATGPT_NORMAL_CHAT_URL,
   ], { env: process.env, stdio: "ignore" });
   const loginExit = await new Promise<number>((resolveExit, rejectExit) => {
     loginBrowser.once("error", rejectExit);
@@ -119,7 +129,7 @@ export async function loginToChatGpt(
   });
   try {
     const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+    await page.goto(CHATGPT_NORMAL_CHAT_URL, {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
@@ -132,13 +142,18 @@ export async function loginToChatGpt(
       throw new Error("The authenticated ChatGPT page did not produce a visible composer");
     }
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertChatGptPageMode(page, "normal");
     const state = await context.storageState();
 
     const inspected = await inspectStoredState(config, state);
     atomicWriteFile(config.storageStatePath, `${JSON.stringify(state)}\n`);
-    writeVerificationMarker(config.storageStatePath, inspected.proAvailable);
-    return { storageStatePath: config.storageStatePath, accountSurfaceUrl: page.url(), proAvailable: inspected.proAvailable };
+    writeVerificationMarker(config.storageStatePath, inspected.effortLevelCount);
+    return {
+      storageStatePath: config.storageStatePath,
+      accountSurfaceUrl: page.url(),
+      effortLevelCount: inspected.effortLevelCount,
+      proAvailable: inspected.effortLevelCount >= 5,
+    };
   } finally {
     await context.close();
     if (browserLoginStateExists(config)) rmSync(profileDir, { recursive: true, force: true });

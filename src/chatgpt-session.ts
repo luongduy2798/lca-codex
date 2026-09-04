@@ -1,6 +1,25 @@
 import type { Locator, Page } from "playwright-core";
 
+export type ChatGptChatMode = "normal" | "temporary";
+
+export const CHATGPT_NORMAL_CHAT_URL = "https://chatgpt.com/";
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+
+export function chatGptUrlForMode(mode: ChatGptChatMode): string {
+  return mode === "temporary" ? CHATGPT_TEMPORARY_CHAT_URL : CHATGPT_NORMAL_CHAT_URL;
+}
+
+export function isChatGptPageMode(urlValue: string, mode: ChatGptChatMode): boolean {
+  try {
+    const url = new URL(urlValue);
+    if (url.origin !== "https://chatgpt.com" || url.pathname !== "/") return false;
+    const temporary = url.searchParams.get("temporary-chat") === "true";
+    return mode === "temporary" ? temporary : !temporary;
+  } catch {
+    return false;
+  }
+}
+
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -12,11 +31,7 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
   `[data-testid="composer-intelligence-picker-content"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
   `[role="menu"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
   `[role="group"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
-  '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"])',
-  '[role="menu"]:has([role="menuitemradio"])',
-  '[role="group"]:has([role="menuitemradio"])',
 ].join(", ");
-export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
 export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
 export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
@@ -39,23 +54,23 @@ async function anyVisible(locator: Locator): Promise<boolean> {
 }
 
 export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> {
-  const composer = page.locator(
-    CHATGPT_COMPOSER_SELECTOR,
-  );
+  const composer = page.locator(CHATGPT_COMPOSER_SELECTOR);
   if (!await anyVisible(composer)) {
     throw new Error("ChatGPT authentication could not be verified: no visible composer is present");
   }
 }
 
-export async function assertTemporaryChatPage(page: Page): Promise<void> {
-  const url = new URL(page.url());
-  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
+export async function assertChatGptPageMode(page: Page, mode: ChatGptChatMode): Promise<void> {
+  if (!isChatGptPageMode(page.url(), mode)) {
+    throw new Error(`ChatGPT left the requested ${mode} chat surface (${page.url()})`);
   }
 }
 
-export async function detectChatGptProCapability(page: Page): Promise<boolean> {
+export async function assertTemporaryChatPage(page: Page): Promise<void> {
+  await assertChatGptPageMode(page, "temporary");
+}
+
+export async function detectChatGptEffortLevelCount(page: Page): Promise<number> {
   const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
   const composerForm = composer.locator("xpath=ancestor::form[1]");
   const effortButton = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
@@ -67,14 +82,18 @@ export async function detectChatGptProCapability(page: Page): Promise<boolean> {
   try {
     await menu.waitFor({ state: "visible", timeout: 70_000 });
     const slider = menu.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
-    if (await slider.isVisible().catch(() => false)) {
-      const min = Number(await slider.getAttribute("aria-valuemin") ?? "0");
-      const max = Number(await slider.getAttribute("aria-valuemax"));
-      if (Number.isFinite(min) && Number.isFinite(max)) return max - min + 1 >= 5;
+    await slider.waitFor({ state: "visible", timeout: 10_000 });
+    const min = Number(await slider.getAttribute("aria-valuemin") ?? "0");
+    const max = Number(await slider.getAttribute("aria-valuemax"));
+    if (!Number.isInteger(min) || !Number.isInteger(max) || max < min) {
+      throw new Error(`ChatGPT effort slider exposed an invalid range (${min}-${max})`);
     }
-    const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    return await efforts.count() >= 5;
+    return max - min + 1;
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }
+}
+
+export async function detectChatGptProCapability(page: Page): Promise<boolean> {
+  return await detectChatGptEffortLevelCount(page) >= 5;
 }

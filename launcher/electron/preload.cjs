@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setupMcp: (input) => ipcRenderer.invoke("launcher:setup-mcp", input),
   setMcpStep: (step) => ipcRenderer.invoke("launcher:set-mcp-step", step),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),
+  setChatMode: (mode) => ipcRenderer.invoke("launcher:set-chat-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setCodexUsageUpsellHidden: (enabled) => ipcRenderer.invoke("launcher:codex-usage-upsell-hidden", enabled),
   setCodexPerFileReviewEnabled: (enabled) => ipcRenderer.invoke("launcher:codex-per-file-review-enabled", enabled),

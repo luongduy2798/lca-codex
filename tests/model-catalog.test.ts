@@ -45,6 +45,7 @@ describe("native /models augmentation", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig();
+    config.effortLevelCount = 5;
     config.proAvailable = true;
     const result = augmentNativeModelCatalog(native, config);
     const models = result.models as Array<Record<string, unknown>>;
@@ -81,6 +82,7 @@ describe("native /models augmentation", () => {
 
   test("keeps the shared LCA Codex model in Codex's V1 spawn-agent model registry", () => {
     const config = defaultConfig();
+    config.effortLevelCount = 5;
     config.proAvailable = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const spawnOverrides = models

@@ -10,6 +10,8 @@ const DEFAULT_STATE = Object.freeze({
   runtimeAutoStart: false,
   bridgeEnabled: true,
   keepRunningOnClose: true,
+  chatMode: "normal",
+  deleteCompletedTaskChats: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
   reviewCodexChangesPerFile: false,
@@ -51,6 +53,7 @@ function readState(filePath) {
       "runtimeAutoStart",
       "bridgeEnabled",
       "keepRunningOnClose",
+      "deleteCompletedTaskChats",
       "showBrowserDuringTurns",
       "hideCodexUsageUpsell",
       "reviewCodexChangesPerFile",
@@ -58,6 +61,9 @@ function readState(filePath) {
       "sidebarOpen",
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];
+    }
+    if (state.chatMode !== "normal" && state.chatMode !== "temporary") {
+      state.chatMode = DEFAULT_STATE.chatMode;
     }
     if (state.browserSmokeVersion !== null
       && (typeof state.browserSmokeVersion !== "string" || state.browserSmokeVersion.length > 128)) {
@@ -99,6 +105,11 @@ function writeState(filePath, state) {
   writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+function validateChatMode(value) {
+  if (value !== "normal" && value !== "temporary") throw new Error("Chat mode is invalid");
+  return value;
+}
+
 function validateSidebarState(value) {
   if (!value || typeof value !== "object" || typeof value.open !== "boolean") {
     throw new Error("Sidebar state is invalid");
@@ -130,5 +141,6 @@ module.exports = {
   SIDEBAR_MIN_WIDTH,
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateChatMode,
   validateSidebarState,
 };

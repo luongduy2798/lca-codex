@@ -6,6 +6,8 @@ export interface LauncherState {
   runtimeAutoStart: boolean;
   bridgeEnabled: boolean;
   keepRunningOnClose: boolean;
+  chatMode: "normal" | "temporary";
+  deleteCompletedTaskChats: boolean;
   showBrowserDuringTurns: boolean;
   hideCodexUsageUpsell: boolean;
   reviewCodexChangesPerFile: boolean;
@@ -271,7 +273,8 @@ export interface LauncherApi {
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;
   setAutostart(enabled: boolean): Promise<{ state: LauncherState; supported: boolean; enabled: boolean }>;
-  setPreference(key: "runtimeAutoStart" | "keepRunningOnClose" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
+  setChatMode(mode: "normal" | "temporary"): Promise<LauncherState>;
+  setPreference(key: "runtimeAutoStart" | "keepRunningOnClose" | "deleteCompletedTaskChats" | "showBrowserDuringTurns", value: boolean): Promise<LauncherState>;
   setCodexUsageUpsellHidden(enabled: boolean): Promise<{ state: LauncherState; status: CodexUsageUpsellStatus }>;
   setCodexPerFileReviewEnabled(enabled: boolean): Promise<{ state: LauncherState; status: CodexPerFileReviewStatus }>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

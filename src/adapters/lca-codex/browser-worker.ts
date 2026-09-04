@@ -11,17 +11,18 @@ import { CHATGPT_MAX_INPUT_IMAGES, type CompiledLcaCodexPrompt, type LcaCodexPro
 import { estimateCompiledBrowserEffectiveInputTokens } from "./usage";
 import {
   assertAuthenticatedChatGptPage,
-  assertTemporaryChatPage,
+  assertChatGptPageMode,
+  chatGptUrlForMode,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
-  CHATGPT_EFFORT_ITEM_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_SELECTOR,
+  CHATGPT_NORMAL_CHAT_URL,
   CHATGPT_STOP_BUTTON_SELECTOR,
-  CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
+  type ChatGptChatMode,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import { connectLauncherBrowserHost, notifyLauncherTurn } from "../../launcher-browser-host";
@@ -289,6 +290,7 @@ export interface BrowserTurn {
 
 export interface ResolvedBrowserConfig {
   appName: string;
+  chatMode?: ChatGptChatMode;
   browserHost: "managed-chrome" | "launcher";
   browserHostDescriptorPath?: string;
   storageStatePath: string;
@@ -306,6 +308,11 @@ export interface ChatGptNetworkTurnState {
   conversationKnown: boolean;
   turnKnown: boolean;
   completed: boolean;
+}
+
+export interface ChatGptNetworkConversationOwnership {
+  conversationId?: string;
+  created: boolean;
 }
 
 export type ChatGptNetworkTurnTransition = "created" | "streaming" | "completed";
@@ -524,6 +531,13 @@ export class ChatGptNetworkTurnTracker {
       completed: this.completed,
     };
   }
+
+  ownership(): ChatGptNetworkConversationOwnership {
+    return {
+      ...(this.ownedConversationId ? { conversationId: this.ownedConversationId } : {}),
+      created: this.ownedConversationCreated,
+    };
+  }
 }
 
 class ChatGptNetworkTurnObserver {
@@ -540,6 +554,10 @@ class ChatGptNetworkTurnObserver {
 
   snapshot(): ChatGptNetworkTurnState {
     return this.tracker.snapshot();
+  }
+
+  ownership(): ChatGptNetworkConversationOwnership {
+    return this.tracker.ownership();
   }
 
   isAttached(): boolean {
@@ -851,7 +869,7 @@ class ChatGptBrowserDiagnostics {
         page.evaluate(({
           composerSelector,
           effortControlSelector,
-          effortItemSelector,
+          effortSliderSelector,
           assistantTurnSelector,
           stopButtonSelector,
           completionActionSelector,
@@ -906,7 +924,7 @@ class ChatGptBrowserDiagnostics {
               visibleCompletionActions: visibleCompletionActions.length,
             },
             effortControls: rows(effortControlSelector, 10),
-            effortItems: rows(effortItemSelector, 20),
+            effortSliders: rows(effortSliderSelector, 10),
             menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
             connectorRows: rows('.__menu-item[tabindex="0"]', 40),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
@@ -932,7 +950,7 @@ class ChatGptBrowserDiagnostics {
         }, {
           composerSelector: CHATGPT_COMPOSER_SELECTOR,
           effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
-          effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
+          effortSliderSelector: CHATGPT_EFFORT_SLIDER_SELECTOR,
           assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
           stopButtonSelector: CHATGPT_STOP_BUTTON_SELECTOR,
           completionActionSelector: CHATGPT_COMPLETION_ACTION_SELECTOR,
@@ -1001,7 +1019,11 @@ class ChatGptBrowserDiagnostics {
 export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
   const configured = provider.lcaCodex ?? {};
   const browserHost = configured.browserHost ?? "managed-chrome";
+  const chatMode = configured.chatMode ?? "normal";
   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
+  if (chatMode !== "normal" && chatMode !== "temporary") {
+    throw new Error(`Unsupported ChatGPT chat mode: ${String(chatMode)}`);
+  }
   const turnTimeoutMs = configured.turnTimeoutMs;
   if (browserHost === "launcher" && !browserHostDescriptorPath) {
     throw new Error("Launcher browser host requires lcaCodex.browserHostDescriptorPath");
@@ -1012,6 +1034,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
   }
   return {
     appName: configured.appName?.trim() || "lca-codex",
+    chatMode,
     browserHost,
     ...(browserHostDescriptorPath ? { browserHostDescriptorPath: resolve(expandUserPath(browserHostDescriptorPath)) } : {}),
     storageStatePath: resolve(expandUserPath(configured.storageStatePath?.trim() || join(getConfigDir(), "browser", "storage-state.json"))),
@@ -1228,9 +1251,9 @@ export class ChatGptBrowserWorker {
   }
 
   /**
-   * A Codex turn owns one isolated Temporary Chat document. Reusing the same
-   * ChatGPT SPA page can retain the previous transcript and autocomplete DOM,
-   * so an @app lookup may select stale UI from the preceding turn.
+   * A Codex turn owns one isolated ChatGPT document. Reusing the same SPA page can retain the
+   * previous transcript and autocomplete DOM, so an @app lookup may select stale UI from the
+   * preceding turn.
    */
   private async pageForNewTurn(): Promise<Page> {
     if (this.config.browserHost === "launcher") {
@@ -1267,121 +1290,62 @@ export class ChatGptBrowserWorker {
     }
     await captureDiagnostic?.("effort-menu-open-requested");
 
-    // ChatGPT exposes either an ARIA slider or a menuitemradio list for effort. Prefer the slider.
-    // Never clamp a mode outside its advertised range: Extra High/Pro must not degrade to High.
+    // Thinking effort is an indexed ARIA slider. The same popup now also contains model
+    // menuitemradio controls; those are deliberately ignored so locale/model labels can never be
+    // mistaken for reasoning levels.
     const effortSlider = effortMenu.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
-    const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    const effortChoice = effortChoices.nth(mode.uiEffortIndex);
-    let sliderReady = await effortSlider.isVisible().catch(() => false);
-    let choiceReady = await effortChoice.isVisible().catch(() => false);
-    if (!sliderReady && !choiceReady) {
-      // Do not spend five seconds proving the slider is absent. Whichever supported control
-      // hydrates first wins; the slider is still checked synchronously first when already present.
-      const firstReady = await Promise.any([
-        effortSlider.waitFor({ state: "visible", timeout: 1_000 }).then(() => "slider" as const),
-        effortChoice.waitFor({ state: "visible", timeout: 1_000 }).then(() => "choice" as const),
-      ]).catch(() => undefined);
-      sliderReady = firstReady === "slider";
-      choiceReady = firstReady === "choice";
-    }
-    if (sliderReady) {
-      const min = Number(await effortSlider.getAttribute("aria-valuemin") ?? "0");
-      const max = Number(await effortSlider.getAttribute("aria-valuemax"));
-      const value = Number(await effortSlider.getAttribute("aria-valuenow"));
-      const target = mode.uiEffortIndex;
-      if ([min, max, value].every(Number.isFinite) && target >= min && target <= max) {
-        if (value !== target) {
-          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
-          await effortSlider.focus();
-          const key = target > value ? "ArrowRight" : "ArrowLeft";
-          for (let step = 0; step < Math.abs(target - value); step += 1) await effortSlider.press(key);
-        }
-        const deadline = Date.now() + 40_000;
-        let confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
-        while (confirmed !== target && Date.now() < deadline) {
-          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
-          confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
-        }
-        if (confirmed !== target) {
-          throw new LcaCodexAdapterError(
-            `ChatGPT effort slider did not confirm ${mode.displayLabel}`
-            + ` (target=${target}; aria-valuenow=${JSON.stringify(Number.isFinite(confirmed) ? confirmed : null)})`,
-            { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
-          );
-        }
-        await captureDiagnostic?.("effort-selected");
-        await page.keyboard.press("Escape");
-        return mode;
-      }
-    }
-
-    const waitAbort = new AbortController();
     try {
-      const ready = await Promise.race([
-        (choiceReady
-          ? Promise.resolve("effort" as const)
-          : effortChoice.waitFor({ state: "visible", timeout: sliderReady ? 1_000 : 70_000, signal: waitAbort.signal }).then(() => "effort" as const)),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: sliderReady ? 1_000 : 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
+      await Promise.race([
+        effortSlider.waitFor({ state: "visible", timeout: 70_000 }),
+        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000 }).then(() => throwIfChatGptRateLimitDialog(page)),
       ]);
-      if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
-      await captureDiagnostic?.("effort-choice-visible");
     } catch (error) {
       if (error instanceof LcaCodexAdapterError) throw error;
       await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
-      const sliderRange = sliderReady
-        ? `${await effortSlider.getAttribute("aria-valuemin").catch(() => null) ?? "?"}-${await effortSlider.getAttribute("aria-valuemax").catch(() => null) ?? "?"}`
-        : "none";
       throw new LcaCodexAdapterError(
-        `ChatGPT effort UI does not expose ${mode.displayLabel}`
-        + ` (sliderRange=${sliderRange}; effortItemCount=${await effortChoices.count().catch(() => 0)})`,
+        "ChatGPT thinking picker did not expose an indexed effort slider",
         { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
       );
-    } finally {
-      waitAbort.abort();
     }
-    const selected = await effortChoice.getAttribute("aria-checked");
-    if (selected !== "true" && selected !== "false") {
-      throw new Error(`ChatGPT effort item index ${mode.uiEffortIndex} has no semantic checked state`);
+    const min = Number(await effortSlider.getAttribute("aria-valuemin") ?? "0");
+    const max = Number(await effortSlider.getAttribute("aria-valuemax"));
+    const value = Number(await effortSlider.getAttribute("aria-valuenow"));
+    const target = mode.uiEffortIndex;
+    if (![min, max, value].every(Number.isInteger) || max < min || value < min || value > max) {
+      throw new LcaCodexAdapterError(
+        `ChatGPT thinking slider exposed invalid index state (min=${min}; max=${max}; value=${value})`,
+        { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
+      );
     }
-    if (selected === "true") {
-      await captureDiagnostic?.("effort-selected");
-      await page.keyboard.press("Escape");
-      return mode;
+    if (target < min || target > max) {
+      throw new LcaCodexAdapterError(
+        `ChatGPT thinking slider does not expose requested index ${target} (range=${min}-${max})`,
+        { status: 409, errorType: "invalid_request_error", code: "unsupported_reasoning_effort", retryable: false },
+      );
     }
-    await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
-    await effortChoice.click();
-    await captureDiagnostic?.("effort-choice-clicked");
-
+    if (value !== target) {
+      await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
+      await effortSlider.focus();
+      const key = target > value ? "ArrowRight" : "ArrowLeft";
+      for (let step = 0; step < Math.abs(target - value); step += 1) await effortSlider.press(key);
+    }
     const deadline = Date.now() + 40_000;
-    let confirmed: string | null = null;
-    while (Date.now() < deadline) {
-      if (!await effortMenu.isVisible().catch(() => false)) {
-        const expanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
-        if (expanded !== "true") {
-          await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
-          await currentEffort.click();
-        }
-        await effortChoice.waitFor({
-          state: "visible",
-          timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
-        });
-      }
-      confirmed = await effortChoice.getAttribute("aria-checked");
-      if (confirmed === "true") {
-        await captureDiagnostic?.("effort-selected");
-        await page.keyboard.press("Escape");
-        return mode;
-      }
-      if (confirmed !== "false") {
-        throw new Error(`ChatGPT effort item index ${mode.uiEffortIndex} lost its semantic checked state`);
-      }
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+    let confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
+    while (confirmed !== target && Date.now() < deadline) {
+      await resolveChatGptBlockingSystemDialogs(page, captureDiagnostic);
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+      confirmed = Number(await effortSlider.getAttribute("aria-valuenow"));
     }
-    throw new Error(
-      `ChatGPT did not confirm effort item index ${mode.uiEffortIndex}`
-      + ` (aria-checked=${JSON.stringify(confirmed)})`,
-    );
+    if (confirmed !== target) {
+      throw new LcaCodexAdapterError(
+        `ChatGPT thinking slider did not confirm index ${target}`
+        + ` (aria-valuenow=${JSON.stringify(Number.isFinite(confirmed) ? confirmed : null)})`,
+        { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
+      );
+    }
+    await captureDiagnostic?.("effort-selected");
+    await page.keyboard.press("Escape");
+    return mode;
   }
 
   private async activeComposer(page: Page, timeoutMs = 30_000): Promise<Locator> {
@@ -1662,16 +1626,16 @@ export class ChatGptBrowserWorker {
 
   private async verifyConnectorExclusive(): Promise<string> {
     const page = await this.ensurePage();
-    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    if (page.url() !== CHATGPT_NORMAL_CHAT_URL) {
+      await page.goto(CHATGPT_NORMAL_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
     try {
       await this.activeComposer(page);
     } catch {
-      throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
+      throw new Error("LCA Codex login is expired or the Normal Chat surface is unavailable");
     }
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
+    await assertChatGptPageMode(page, "normal");
     await this.selectConnector(page);
     return this.config.appName;
   }
@@ -1966,12 +1930,17 @@ export class ChatGptBrowserWorker {
       helperPid: process.pid,
     });
     const surfaceId = lease.surfaceId;
+    const chatMode = lease.chatMode;
     if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
+    if (!chatMode) throw new Error("Launcher did not snapshot a chat mode for the ChatGPT turn");
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
+    let ownedConversationId: string | undefined;
     let originalError: unknown;
     try {
-      return await this.runBrowserTurn(turn, surfaceId);
+      return await this.runBrowserTurn(turn, surfaceId, chatMode, ownership => {
+        if (ownership.created && ownership.conversationId) ownedConversationId = ownership.conversationId;
+      });
     } catch (error) {
       originalError = error;
       terminal = error instanceof DOMException && error.name === "AbortError" ? "aborted" : "failed";
@@ -1984,6 +1953,7 @@ export class ChatGptBrowserWorker {
           traceId: turn.traceId,
           helperPid: process.pid,
           status: terminal,
+          ...(ownedConversationId ? { ownedConversationId } : {}),
           ...(terminalMessage ? { message: terminalMessage } : {}),
         });
       } catch (controlError) {
@@ -1995,7 +1965,12 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async runBrowserTurn(turn: BrowserTurn, launcherSurfaceId?: string): Promise<string> {
+  private async runBrowserTurn(
+    turn: BrowserTurn,
+    launcherSurfaceId?: string,
+    chatMode: ChatGptChatMode = this.config.chatMode ?? "normal",
+    onConversationOwnership?: (ownership: ChatGptNetworkConversationOwnership) => void,
+  ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
     const startedAt = Number.isFinite(turn.startedAt) && turn.startedAt! <= Date.now()
       ? turn.startedAt!
@@ -2068,10 +2043,11 @@ export class ChatGptBrowserWorker {
       console.info(
         `[lca-codex] browser turn ${turn.traceId} opened (transport=${prepared.transport}, promptChars=${prepared.text.length}, estimatedInputTokens=${estimatedInputTokens}, images=${prepared.images.length})`,
       );
-      await this.runStage(turn.traceId, "temporary_chat_navigation", browserStageTimeouts.navigation, () => (
-        page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
+      const chatUrl = chatGptUrlForMode(chatMode);
+      await this.runStage(turn.traceId, "chat_navigation", browserStageTimeouts.navigation, () => (
+        page.goto(chatUrl, { waitUntil: "domcontentloaded", timeout: 60_000 }).then(() => undefined)
       ), turn.abortSignal);
-      await diagnostics.capture(page, "temporary-chat-navigation-complete");
+      await diagnostics.capture(page, "chat-navigation-complete");
       await resolveChatGptBlockingSystemDialogs(
         page,
         async checkpoint => { await diagnostics.capture(page, checkpoint); },
@@ -2081,7 +2057,7 @@ export class ChatGptBrowserWorker {
           this.activeComposer(page)
         ), turn.abortSignal);
       } catch {
-        throw new Error("LCA Codex login is expired or the Temporary Chat surface is unavailable");
+        throw new Error(`LCA Codex login is expired or the ${chatMode} ChatGPT surface is unavailable`);
       }
       await diagnostics.capture(page, "composer-ready");
       await this.runStage(turn.traceId, "session_verification", browserStageTimeouts.sessionVerification, async () => {
@@ -2091,7 +2067,7 @@ export class ChatGptBrowserWorker {
         );
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
-        await assertTemporaryChatPage(page);
+        await assertChatGptPageMode(page, chatMode);
       }, turn.abortSignal);
       await diagnostics.capture(page, "session-verified");
       const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
@@ -2420,6 +2396,7 @@ export class ChatGptBrowserWorker {
       throw surfacedError;
     } finally {
       prepared.release();
+      onConversationOwnership?.(networkObserver.ownership());
       await networkObserver.detach();
       if (turnConnection) {
         await turnConnection.close().catch(error => {

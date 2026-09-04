@@ -9,7 +9,10 @@ export const LCA_CODEX_MODEL_ID = LCA_CODEX_BASE_MODEL;
 
 export interface LcaCodexCapabilities {
   localToolsEnabled: boolean;
-  proAvailable: boolean;
+  /** Live indexed thinking-slider positions. New callers should always provide this. */
+  effortLevelCount?: number;
+  /** Legacy compatibility for persisted/test callers; only used when effortLevelCount is absent. */
+  proAvailable?: boolean;
 }
 
 export interface LcaCodexModelMode {
@@ -28,7 +31,9 @@ export function resolveLcaCodexModelMode(
   if (modelId !== LCA_CODEX_MODEL_ID) {
     throw new Error(`LCA Codex model is not supported: ${modelId}`);
   }
-  const mode = resolveLcaCodexReasoningMode(reasoning, capabilities.proAvailable);
+  const effortLevelCount = capabilities.effortLevelCount
+    ?? (capabilities.proAvailable === true ? 5 : 3);
+  const mode = resolveLcaCodexReasoningMode(reasoning, effortLevelCount);
   return {
     modelId,
     effort: mode.adapterEffort,

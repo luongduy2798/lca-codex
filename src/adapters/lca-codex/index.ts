@@ -206,7 +206,8 @@ export function createLcaCodexAdapter(provider: CodexProviderConfig): ProviderAd
   const connectorName = provider.lcaCodex?.appName?.trim() || "lca-codex";
   const configuredCapabilities: LcaCodexCapabilities = {
     localToolsEnabled: provider.lcaCodex?.localToolsEnabled === true,
-    proAvailable: provider.lcaCodex?.proAvailable === true,
+    effortLevelCount: provider.lcaCodex?.effortLevelCount
+      ?? (provider.lcaCodex?.proAvailable === true ? 5 : 3),
   };
   const executionNamespace = createHash("sha256").update(JSON.stringify({
     baseUrl: provider.baseUrl,

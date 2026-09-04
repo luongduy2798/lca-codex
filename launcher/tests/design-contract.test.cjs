@@ -177,6 +177,10 @@ test("sidebar keeps the brand prominent, runtime actions clear, and Settings fre
   assert.doesNotMatch(styles, /\.browser-tab-strip\s*\{\s*padding-right:\s*150px/s);
   assert.match(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*1;/);
   assert.doesNotMatch(styles, /\.browser-tab\s*>\s*button\s*\{[\s\S]*?opacity:\s*0;/);
+  assert.match(appSource, /className="setting-row-copy"/);
+  assert.match(styles, /\.setting-row-copy\s*\{[^}]*padding:\s*12px 0;/s);
+  assert.doesNotMatch(styles, /\.setting-row\s*>\s*div\s*\{/);
+  assert.match(styles, /\.segmented-control button\.is-active\s*\{[^}]*background:\s*var\(--blue-300\)/s);
 });
 
 test("browser sidebar exposes the five-tab limit and mirrors live browser status color", () => {
@@ -471,8 +475,8 @@ test("MCP connector setup stays in the launcher's private ChatGPT session and ve
   assert.doesNotMatch(appSource, /api!\.openExternal\(snapshot\.urls\.connectors\)/);
   assert.match(preloadSource, /openChatGptConnectors:[\s\S]*?launcher:browser-connectors/);
   assert.match(electronMain, /launcher:browser-connectors[\s\S]*?browserHost\.openConnectorSettings\(\)/);
-  assert.match(browserHostSource, /CONNECTOR_SETTINGS_HASH = "#settings\/Connectors"[\s\S]*?openConnectorSettings[\s\S]*?loadURL\(TEMPORARY_CHAT_URL\)[\s\S]*?CONNECTOR_SETTINGS_HASH/);
-  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?loadURL\(TEMPORARY_CHAT_URL\)[\s\S]*?verifyConnectorWithBrowserHelper/);
+  assert.match(browserHostSource, /CONNECTOR_SETTINGS_HASH = "#settings\/Connectors"[\s\S]*?openConnectorSettings[\s\S]*?loadURL\(NORMAL_CHAT_URL\)[\s\S]*?CONNECTOR_SETTINGS_HASH/);
+  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?loadURL\(NORMAL_CHAT_URL\)[\s\S]*?verifyConnectorWithBrowserHelper/);
 });
 
 test("launcher refreshes persisted ChatGPT authentication before presenting setup", () => {

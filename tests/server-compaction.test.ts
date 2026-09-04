@@ -177,7 +177,7 @@ test("rejects an unknown routed compact model instead of treating it as LCA Code
   expect(body.error.message).toContain("model is not enabled");
 });
 
-test("rejects Pro-only reasoning levels before opening a browser when the account has no Pro access", async () => {
+test("rejects reasoning levels outside the configured ChatGPT thinking range before opening a browser", async () => {
   for (const [effort, label] of [
     ["xhigh", "Extra High"],
     ["max", "Pro"],
@@ -190,7 +190,7 @@ test("rejects Pro-only reasoning levels before opening a browser when the accoun
 
     expect(response.status).toBe(400);
     const body = await response.json() as { error: { message: string } };
-    expect(body.error.message).toContain(`${label} effort is not available for this account`);
+    expect(body.error.message).toContain(`${label} effort is not available for the current ChatGPT thinking range`);
   }
 });
 

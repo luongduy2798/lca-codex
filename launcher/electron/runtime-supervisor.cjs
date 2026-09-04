@@ -229,6 +229,12 @@ function validateConfig(config, descriptorPath, platform = process.platform) {
       throw new Error(`Runtime configuration has an invalid ${key}`);
     }
   }
+  const effortLevelCount = config.effortLevelCount === undefined
+    ? (config.proAvailable === true ? 5 : 3)
+    : config.effortLevelCount;
+  if (!Number.isInteger(effortLevelCount) || effortLevelCount < 1) {
+    throw new Error("Runtime configuration has an invalid effortLevelCount");
+  }
   if (!Array.isArray(config.runtimeCommand)
     || config.runtimeCommand.length === 0
     || config.runtimeCommand.some(part => typeof part !== "string" || !part.trim())) {
@@ -1711,26 +1717,39 @@ class RuntimeSupervisor {
     const health = await this.proxyHealthPayload(config);
     const daemonRunning = health?.service === "lca-codex"
       && health?.mode === config.mode
-      && health?.version === config.releaseVersion;
-    if (daemonRunning && health.pid !== state.daemonPid) {
-      throw new Error("The process on the Responses port does not match the stale launcher marker");
+      && health?.version === config.releaseVersion
+      && Number.isInteger(health?.pid)
+      && health.pid > 0;
+    let staleDaemonPid = state.daemonPid;
+    if (daemonRunning && health.pid !== staleDaemonPid) {
+      const staleOwnerStillRunning = state.ownerPid !== process.pid && processRunning(state.ownerPid);
+      const staleMarkedDaemonStillRunning = processRunning(staleDaemonPid);
+      const detachedDaemonMatchesRuntime = this.daemonPidMatchesRuntimeCommand(health.pid, config);
+      if (staleOwnerStillRunning || staleMarkedDaemonStillRunning || !detachedDaemonMatchesRuntime) {
+        throw new Error("The process on the Responses port does not match the stale launcher marker");
+      }
+      this.logger.warn("runtime.stale_daemon_marker_rebound", {
+        previousPid: staleDaemonPid,
+        daemonPid: health.pid,
+      });
+      staleDaemonPid = health.pid;
     }
-    if (!daemonRunning && processRunning(state.daemonPid)) {
+    if (!daemonRunning && processRunning(staleDaemonPid)) {
       if (!forceOwnedDaemon) {
         throw new Error(
-          `The stale daemon PID ${state.daemonPid} is still alive but did not provide matching health evidence`,
+          `The stale daemon PID ${staleDaemonPid} is still alive but did not provide matching health evidence`,
         );
       }
       if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) {
         throw new Error(`Another launcher process still owns the runtime (pid ${state.ownerPid})`);
       }
-      if (!this.daemonPidMatchesRuntimeCommand(state.daemonPid, config)) {
+      if (!this.daemonPidMatchesRuntimeCommand(staleDaemonPid, config)) {
         throw new Error(
-          `The stale daemon PID ${state.daemonPid} is still alive but could not be verified as an LCA Codex runtime`,
+          `The stale daemon PID ${staleDaemonPid} is still alive but could not be verified as an LCA Codex runtime`,
         );
       }
-      this.logger.warn("runtime.restart_forcing_unhealthy_stale_daemon", { pid: state.daemonPid });
-      await this.forceStopVerifiedPid("stale daemon", state.daemonPid);
+      this.logger.warn("runtime.restart_forcing_unhealthy_stale_daemon", { pid: staleDaemonPid });
+      await this.forceStopVerifiedPid("stale daemon", staleDaemonPid);
       await this.waitForPortRelease(config);
     }
     let managedTunnelRunning = false;
@@ -1748,7 +1767,7 @@ class RuntimeSupervisor {
         + " does not recognize it; refusing to terminate an unverified process",
       );
     }
-    if (!daemonRunning && !processRunning(state.daemonPid) && !managedTunnelRunning) {
+    if (!daemonRunning && !processRunning(staleDaemonPid) && !managedTunnelRunning) {
       this.clearState();
       return true;
     }
@@ -1758,7 +1777,7 @@ class RuntimeSupervisor {
 
     this.logger.warn("runtime.stale_owner_recovery_started", {
       ownerPid: state.ownerPid,
-      daemonPid: daemonRunning ? state.daemonPid : null,
+      daemonPid: daemonRunning ? staleDaemonPid : null,
       tunnelPid: managedTunnelRunning ? state.tunnelPid : null,
     });
     if (daemonRunning) {
@@ -1767,15 +1786,15 @@ class RuntimeSupervisor {
         drained = await this.acquireDrain(config);
         const shutdown = await this.control(config, "shutdown");
         if (shutdown.status !== "ok") throw new Error("stale daemon did not acknowledge graceful shutdown");
-        await this.waitForProcessExit("stale daemon", state.daemonPid);
+        await this.waitForProcessExit("stale daemon", staleDaemonPid);
         await this.waitForPortRelease(config);
       } catch (error) {
         if (forceOwnedDaemon) {
           this.logger.warn("runtime.restart_forcing_busy_stale_daemon", {
-            pid: state.daemonPid,
+            pid: staleDaemonPid,
             message: errorMessage(error),
           });
-          await this.forceStopVerifiedPid("stale daemon", state.daemonPid);
+          await this.forceStopVerifiedPid("stale daemon", staleDaemonPid);
           await this.waitForPortRelease(config);
           drained = false;
         } else if (drained) {

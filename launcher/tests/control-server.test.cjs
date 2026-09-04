@@ -8,7 +8,7 @@ test("browser control server authenticates and owns turn visibility", async () =
   const host = {
     beginTurn: (...args) => {
       calls.push(["start", ...args]);
-      return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1" };
+      return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", chatMode: "normal" };
     },
     endTurn: (...args) => calls.push(["end", ...args]),
   };
@@ -18,7 +18,7 @@ test("browser control server authenticates and owns turn visibility", async () =
       warn: (event, detail) => logs.push(["warn", event, detail]),
     },
     getBrowserHost: () => host,
-    getPreferences: () => ({ showBrowserDuringTurns: true }),
+    getPreferences: () => ({ showBrowserDuringTurns: true, chatMode: "normal", deleteCompletedTaskChats: true }),
   }).start();
   const descriptor = server.descriptor();
   try {
@@ -58,12 +58,13 @@ test("browser control server authenticates and owns turn visibility", async () =
         traceId: "abcdef123456",
         helperPid: process.pid,
         status: "completed",
+        ownedConversationId: "6a992aec-5688-83ec-9649-de1ce1eef46f",
       }),
     });
     assert.equal(end.status, 200);
     assert.deepEqual(calls, [
-      ["start", "abcdef123456", true, process.pid],
-      ["end", "abcdef123456", process.pid, "completed", true, undefined],
+      ["start", "abcdef123456", true, process.pid, "normal"],
+      ["end", "abcdef123456", process.pid, "completed", true, true, undefined, "6a992aec-5688-83ec-9649-de1ce1eef46f"],
     ]);
     assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);
     assert.equal(logs.some(([, event]) => event === "browser.turn_ended"), true);

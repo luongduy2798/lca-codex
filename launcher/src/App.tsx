@@ -2289,6 +2289,35 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        <SettingRow body={copy.chatModeBody} label={copy.chatMode}>
+          <div className="segmented-control" role="group" aria-label={copy.chatMode}>
+            <button
+              className={snapshot.state.chatMode === "normal" ? "is-active" : undefined}
+              disabled={busy}
+              onClick={() => void api!.setChatMode("normal").then(updateState).catch((cause) => setError(messageOf(cause)))}
+              type="button"
+            >
+              {copy.normalChat}
+            </button>
+            <button
+              className={snapshot.state.chatMode === "temporary" ? "is-active" : undefined}
+              disabled={busy}
+              onClick={() => void api!.setChatMode("temporary").then(updateState).catch((cause) => setError(messageOf(cause)))}
+              type="button"
+            >
+              {copy.temporaryChat}
+            </button>
+          </div>
+        </SettingRow>
+        <SettingRow body={copy.deleteCompletedTaskChatsBody} label={copy.deleteCompletedTaskChats}>
+          <Switch
+            checked={snapshot.state.deleteCompletedTaskChats}
+            disabled={busy}
+            onChange={(checked) => void api!.setPreference("deleteCompletedTaskChats", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow>
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}
@@ -2474,7 +2503,7 @@ function codexPerFileReviewStatusText(copy: Copy, status: LauncherSnapshot["code
 function SettingRow({ body, children, label }: { body: string; children: ReactNode; label: string }) {
   return (
     <div className="setting-row">
-      <div>
+      <div className="setting-row-copy">
         <strong>{label}</strong>
         <p>{body}</p>
       </div>
@@ -2712,8 +2741,8 @@ function browserTone(browser: BrowserState | null): "idle" | "ready" | "busy" | 
 
 function browserTabTitleFromTitle(value: string | undefined, copy: Copy): string {
   const title = value?.trim();
-  if (!title || title === "about:blank" || title.includes("lca-codex-browser-host")) return copy.temporaryChat;
-  return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.temporaryChat;
+  if (!title || title === "about:blank" || title.includes("lca-codex-browser-host")) return copy.browser;
+  return title.replace(/\s*[|–-]\s*ChatGPT\s*$/i, "") || copy.browser;
 }
 
 function browserTabTone(status: BrowserState["tabs"][number]["status"]): "idle" | "ready" | "busy" | "error" {
