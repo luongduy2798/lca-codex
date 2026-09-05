@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Pin patched transitive dependencies in the core and launcher lockfiles (`fast-uri` 3.1.6, `qs` 6.16.0, and `@xmldom/xmldom` 0.8.15) to resolve the seven security advisories blocking release verification.
+
 ### Added
 
 - Add a persisted **Normal Chat / Temporary Chat** launcher setting. Normal Chat is the default for current connector support; Temporary Chat remains available for future compatibility. Each browser turn snapshots the selected mode when its launcher tab is leased, so changing Settings never mutates an in-flight turn.
