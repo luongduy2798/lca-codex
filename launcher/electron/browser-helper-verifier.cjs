@@ -47,12 +47,15 @@ async function stopChild(child) {
   }
 }
 
-async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appName, logger }) {
+async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appName, chatMode, logger }) {
   if (!helper || typeof helper.executable !== "string" || typeof helper.script !== "string") {
     throw new Error("Browser helper verification command is invalid");
   }
   if (typeof descriptorPath !== "string" || !descriptorPath || typeof appName !== "string" || !appName) {
     throw new Error("Browser helper verification config is invalid");
+  }
+  if (chatMode !== "normal" && chatMode !== "temporary") {
+    throw new Error("Browser helper verification chat mode is invalid");
   }
   const id = `verify-${randomBytes(12).toString("hex")}`;
   const child = spawn(helper.executable, [helper.script], {
@@ -107,7 +110,7 @@ async function verifyConnectorWithBrowserHelper({ helper, descriptorPath, appNam
         void writeMessage(child, {
           type: "verify",
           id,
-          config: { appName, browserHostDescriptorPath: descriptorPath },
+          config: { appName, browserHostDescriptorPath: descriptorPath, chatMode },
         }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
         return;
       }

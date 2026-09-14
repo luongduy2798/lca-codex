@@ -2292,20 +2292,20 @@ function SettingsSurface({
         <SettingRow body={copy.chatModeBody} label={copy.chatMode}>
           <div className="segmented-control" role="group" aria-label={copy.chatMode}>
             <button
-              className={snapshot.state.chatMode === "normal" ? "is-active" : undefined}
-              disabled={busy}
-              onClick={() => void api!.setChatMode("normal").then(updateState).catch((cause) => setError(messageOf(cause)))}
-              type="button"
-            >
-              {copy.normalChat}
-            </button>
-            <button
               className={snapshot.state.chatMode === "temporary" ? "is-active" : undefined}
               disabled={busy}
               onClick={() => void api!.setChatMode("temporary").then(updateState).catch((cause) => setError(messageOf(cause)))}
               type="button"
             >
               {copy.temporaryChat}
+            </button>
+            <button
+              className={snapshot.state.chatMode === "normal" ? "is-active" : undefined}
+              disabled={busy}
+              onClick={() => void api!.setChatMode("normal").then(updateState).catch((cause) => setError(messageOf(cause)))}
+              type="button"
+            >
+              {copy.normalChat}
             </button>
           </div>
         </SettingRow>

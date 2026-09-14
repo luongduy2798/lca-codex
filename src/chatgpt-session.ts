@@ -70,6 +70,65 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
   await assertChatGptPageMode(page, "temporary");
 }
 
+const CHATGPT_PERSONALIZATION_CONTROL_SELECTOR = '#conversation-header-actions button[aria-haspopup="menu"]:visible';
+
+/** Verify each fresh Temporary Chat; the saved ChatGPT preference alone is not proof. */
+export async function ensureChatGptPersonalized(page: Page): Promise<void> {
+  const timeout = 10_000;
+  const control = page.locator(CHATGPT_PERSONALIZATION_CONTROL_SELECTOR);
+  let openedMenu: Locator | undefined;
+  let stage = "personalization control is missing or ambiguous";
+  const openMenu = async (): Promise<Locator> => {
+    await control.waitFor({ state: "visible", timeout });
+    if (await control.count() !== 1) throw new Error(stage);
+    if (await control.getAttribute("aria-expanded") !== "true") {
+      await control.click({ timeout });
+    }
+    await control.and(page.locator('[aria-expanded="true"][aria-controls]'))
+      .waitFor({ state: "visible", timeout });
+    const menuId = await control.getAttribute("aria-controls");
+    if (!menuId) throw new Error(stage);
+    const menu = page.locator(`[role="menu"][id=${JSON.stringify(menuId)}]:visible`);
+    openedMenu = menu;
+    await menu.waitFor({ state: "visible", timeout });
+    const items = menu.getByRole("menuitemradio");
+    await items.first().waitFor({ state: "visible", timeout });
+    if (await items.count() !== 2) throw new Error(stage);
+    return items;
+  };
+  try {
+    await assertTemporaryChatPage(page);
+    stage = "personalization control or menu is missing or ambiguous";
+    let items = await openMenu();
+    // ChatGPT orders Personalized first and Unpersonalized second in this header menu.
+    // Use radio state and position so translated labels never participate in selection.
+    const checked = await items.nth(0).getAttribute("aria-checked");
+    const otherChecked = await items.nth(1).getAttribute("aria-checked");
+    if (checked === "true" && otherChecked === "false") return;
+    if (checked !== "false" || otherChecked !== "true") throw new Error(stage);
+
+    stage = "Personalized was not confirmed after selection";
+    await items.nth(0).click({ timeout });
+    await control.and(page.locator('[aria-expanded="false"]'))
+      .waitFor({ state: "visible", timeout });
+    items = await openMenu();
+    await items.nth(0).and(page.locator('[aria-checked="true"]'))
+      .waitFor({ state: "visible", timeout });
+    if (await items.nth(0).getAttribute("aria-checked") !== "true"
+      || await items.nth(1).getAttribute("aria-checked") !== "false") {
+      throw new Error(stage);
+    }
+    await assertTemporaryChatPage(page);
+  } catch {
+    // Do not include arbitrary UI text or locator errors that may contain private page data.
+    throw new Error(`Temporary Chat: ${stage}. Enable Personalized in ChatGPT or select Normal Chat in Settings, then retry.`);
+  } finally {
+    if (openedMenu && await openedMenu.isVisible().catch(() => false)) {
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+  }
+}
+
 export async function detectChatGptEffortLevelCount(page: Page): Promise<number> {
   const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).last();
   const composerForm = composer.locator("xpath=ancestor::form[1]");

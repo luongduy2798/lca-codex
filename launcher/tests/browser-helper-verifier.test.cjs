@@ -19,6 +19,7 @@ test("launcher verification delegates exact connector selection to the browser h
       if (message.type !== "verify") return;
       if (message.config.appName !== "lca-codex") process.exit(2);
       if (message.config.browserHostDescriptorPath !== "/runtime/launcher-browser.json") process.exit(3);
+      if (message.config.chatMode !== "temporary") process.exit(4);
       send({ type: "result", id: message.id, text: message.config.appName });
     });
   `);
@@ -27,6 +28,7 @@ test("launcher verification delegates exact connector selection to the browser h
     helper: { executable: process.execPath, script },
     descriptorPath: "/runtime/launcher-browser.json",
     appName: "lca-codex",
+    chatMode: "temporary",
     logger: { info() {} },
   });
 
@@ -54,8 +56,20 @@ test("launcher verification consumes a helper input EOF after the result", async
     helper: { executable: process.execPath, script },
     descriptorPath: "/runtime/launcher-browser.json",
     appName: "lca-codex",
+    chatMode: "normal",
     logger: { info() {} },
   });
 
   assert.deepEqual(result, { ok: true, appName: "lca-codex" });
+});
+
+test("verification rejects missing or invalid chat modes before spawning a helper", async () => {
+  for (const chatMode of [undefined, "auto"]) {
+    await assert.rejects(verifyConnectorWithBrowserHelper({
+      helper: { executable: "/must-not-run", script: "/must-not-run" },
+      descriptorPath: "/runtime/launcher-browser.json",
+      appName: "lca-codex",
+      chatMode,
+    }), /verification chat mode is invalid/);
+  }
 });

@@ -17,7 +17,7 @@ const DEFAULT_EXPECTED = {
   runtimeAutoStart: false,
   bridgeEnabled: true,
   keepRunningOnClose: true,
-  chatMode: "normal",
+  chatMode: "temporary",
   deleteCompletedTaskChats: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,
@@ -70,6 +70,16 @@ test("chat mode accepts only Normal or Temporary", () => {
   assert.equal(validateChatMode("normal"), "normal");
   assert.equal(validateChatMode("temporary"), "temporary");
   assert.throws(() => validateChatMode("auto"), /invalid/);
+});
+
+test("missing modes default to Temporary while both saved choices survive reload", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-chat-mode-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "state.json");
+  for (const chatMode of [undefined, null, "invalid", "normal", "temporary"]) {
+    fs.writeFileSync(file, JSON.stringify({ version: 1, chatMode }));
+    assert.equal(createStateStore(file).read().chatMode, chatMode === "normal" ? "normal" : "temporary");
+  }
 });
 
 test("sidebar state accepts only bounded native shell dimensions", () => {

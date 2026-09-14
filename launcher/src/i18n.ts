@@ -213,7 +213,7 @@ export const copy = {
   keepRunningOnClose: "Keep launcher running when window closes",
   keepRunningOnCloseBody: "Hide the launcher in the system tray and preserve the runtime's current state until you explicitly stop or quit.",
   chatMode: "Chat mode",
-  chatModeBody: "Normal Chat supports ChatGPT connectors today. Temporary Chat is preserved for future connector support; changing this setting affects new turns only.",
+  chatModeBody: "Temporary Chat is the default. LCA enables Personalized to use connectors; this also allows ChatGPT memory and custom instructions. Select Normal Chat if Temporary Chat is unavailable. Changes affect new turns only.",
   deleteCompletedTaskChats: "Delete completed task chats",
   deleteCompletedTaskChatsBody: "Delete Normal Chat conversations created by LCA after a browser task finishes. Failed and aborted task chats are cleaned up too; Temporary Chat is unaffected.",
   showDuringTurns: "Show browser during turns",

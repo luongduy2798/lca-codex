@@ -18,6 +18,8 @@ const {
   isChatGptCloudflareChallengeResponse,
   isChatGptConversationMutationResponse,
   isTemporaryChatUrl,
+  NORMAL_CHAT_URL,
+  TEMPORARY_CHAT_URL,
   initializationNavigationWasSuperseded,
 } = require("../electron/browser-host.cjs");
 
@@ -374,10 +376,11 @@ test("task-chat cleanup fails closed on an ownership mismatch", async () => {
   assert.deepEqual(warnings, ["browser.chat_cleanup_skipped"]);
 });
 
-test("session inspection preserves the default authenticated Normal Chat surface", async () => {
+test("session inspection preserves an explicitly configured Normal Chat surface", async () => {
   let currentUrl = "https://chatgpt.com/";
   const navigations = [];
   const fixture = {
+    getPreferences: () => ({ chatMode: "normal" }),
     view: {
       webContents: {
         getURL: () => currentUrl,
@@ -575,7 +578,7 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
   assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
   assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/"]);
+  assert.deepEqual(calls[4], ["loadURL", TEMPORARY_CHAT_URL]);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
@@ -590,6 +593,7 @@ test("OAuth completion is confirmed on the primary configured Normal Chat surfac
     },
   };
   const fixture = {
+    getPreferences: () => ({ chatMode: "normal" }),
     activeTraceId: null,
     manualOperation: "ChatGPT login",
     authView: completedAuthView,
@@ -868,7 +872,7 @@ test("session inspection degrades to the conservative three-level range when the
     logger: { warn: (event, detail) => warnings.push([event, detail]) },
     view: {
       webContents: {
-        getURL: () => "https://chatgpt.com/",
+        getURL: () => TEMPORARY_CHAT_URL,
       },
     },
     probeAuthentication: async () => ({ authenticated: true }),
@@ -882,8 +886,8 @@ test("session inspection degrades to the conservative three-level range when the
 
   assert.deepEqual(inspected, {
     authenticated: true,
-    chatMode: "normal",
-    url: "https://chatgpt.com/",
+    chatMode: "temporary",
+    url: TEMPORARY_CHAT_URL,
     effortLevelCount: 3,
   });
   assert.equal(warnings.at(-1)?.[0], "browser.effort_range_probe_unavailable");
@@ -1104,6 +1108,7 @@ test("connector verification temporarily exposes a browser-visible background su
       helper: fixture.helper,
       descriptorPath: fixture.descriptorPath,
       appName: "lca-codex",
+      chatMode: "temporary",
       logger: fixture.logger,
     }],
     ["verification-surface", "restore"],
@@ -1168,6 +1173,7 @@ test("a replacement helper takes over only after the previous owner exited", () 
   const deadPid = 2_147_483_647;
   const tab = {
     id: "tab-dead-owner",
+    chatMode: "normal",
     surfaceId: "surface-dead-owner",
     traceId: "trace_dead_owner",
     helperPid: deadPid,
@@ -1202,36 +1208,48 @@ test("a replacement helper takes over only after the previous owner exited", () 
   assert.equal(warnings[0][1].previousHelperPid, deadPid);
 });
 
-test("connector verification switches its verification surface to Normal Chat", async () => {
-  const loaded = [];
-  const fixture = {
-    visible: true,
-    surfaceActive: true,
-    logger: { info() {} },
-    setState() {},
-    setSurfaceActive(active) { this.surfaceActive = active; },
-    show() { this.visible = true; },
-    hide() { this.visible = false; },
-    waitForAuthenticated: async () => {},
-    waitForVisibleComposer: async () => {},
-    beginConnectorVerificationSurface: () => () => {},
-    helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
-    descriptorPath: "/runtime/launcher-browser.json",
-    verifyConnectorWithBrowserHelper: async ({ appName }) => ({ ok: true, appName }),
-    view: {
-      webContents: {
-        getURL: () => "https://chatgpt.com/?temporary-chat=true",
-        loadURL: async (url) => { loaded.push(url); },
-        setBackgroundThrottling() {},
+test("connector verification snapshots either mode even if preferences change during navigation", async () => {
+  for (const chatMode of ["temporary", "normal"]) {
+    const loaded = [];
+    let preference = chatMode;
+    const helperModes = [];
+    const fixture = {
+      getPreferences: () => ({ chatMode: preference }),
+      visible: true,
+      surfaceActive: true,
+      logger: { info() {} },
+      setState() {},
+      setSurfaceActive(active) { this.surfaceActive = active; },
+      show() { this.visible = true; },
+      hide() { this.visible = false; },
+      waitForAuthenticated: async () => {},
+      waitForVisibleComposer: async () => {},
+      beginConnectorVerificationSurface: () => () => {},
+      helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
+      descriptorPath: "/runtime/launcher-browser.json",
+      verifyConnectorWithBrowserHelper: async ({ appName, chatMode }) => {
+        helperModes.push(chatMode);
+        return { ok: true, appName };
       },
-    },
-  };
+      view: {
+        webContents: {
+          getURL: () => "https://chatgpt.com/?temporary-chat=true",
+          loadURL: async (url) => {
+            loaded.push(url);
+            preference = chatMode === "temporary" ? "normal" : "temporary";
+          },
+          setBackgroundThrottling() {},
+        },
+      },
+    };
 
-  await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
+    await BrowserHost.prototype.runConnectorVerification.call(fixture, "lca-codex");
 
-  assert.deepEqual(loaded, ["https://chatgpt.com/"]);
-  assert.equal(fixture.visible, true);
-  assert.equal(fixture.surfaceActive, true);
+    assert.deepEqual(loaded, [chatMode === "temporary" ? TEMPORARY_CHAT_URL : NORMAL_CHAT_URL]);
+    assert.deepEqual(helperModes, [chatMode]);
+    assert.equal(fixture.visible, true);
+    assert.equal(fixture.surfaceActive, true);
+  }
 });
 
 test("connector setup opens ChatGPT Plugins in the owned private browser session", async () => {
@@ -1291,7 +1309,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
   assert.deepEqual(calls, [
     ["operation", "session refresh"],
     ["state", { status: "loading", message: "Checking saved ChatGPT session" }],
-    ["load", "https://chatgpt.com/"],
+    ["load", TEMPORARY_CHAT_URL],
     ["probe"],
   ]);
 });
@@ -1457,6 +1475,7 @@ test("a later provider round reuses its task tab and restores active ownership",
   const throttling = [];
   const tab = {
     id: "tab-reused",
+    chatMode: "normal",
     surfaceId: "surface-reused",
     traceId: "trace_reused",
     helperPid: 111,

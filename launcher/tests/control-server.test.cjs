@@ -2,6 +2,37 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("browser control defaults missing or invalid preferences to Temporary and preserves Normal", async () => {
+  let chatMode;
+  const modes = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {} },
+    getBrowserHost: () => ({
+      beginTurn: (_trace, _visible, _pid, mode) => {
+        modes.push(mode);
+        return { surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", chatMode: mode };
+      },
+    }),
+    getPreferences: () => ({ chatMode }),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    for (const value of [undefined, "invalid", "normal", "temporary"]) {
+      chatMode = value;
+      const response = await fetch(`${descriptor.endpoint}/v1/turn/start`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ phase: "start", traceId: "abcdef123456", helperPid: process.pid }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).chatMode, value === "normal" ? "normal" : "temporary");
+    }
+    assert.deepEqual(modes, ["temporary", "temporary", "normal", "temporary"]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];

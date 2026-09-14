@@ -31,10 +31,15 @@ current Codex task.
   enabled. Reasoning effort selects the ChatGPT browser mode; it does not independently change
   local-tool access. An explicitly connector-disabled runtime remains read-only regardless of
   reasoning level.
-- The launcher snapshots `normal` or `temporary` chat mode at turn start. Normal Chat is the default
-  because the current ChatGPT Web UI exposes custom connectors there; Temporary Chat remains preserved
-  as an explicit mode for future connector support.
-- ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client` for tool-capable Normal Chat turns.
+- The launcher snapshots `normal` or `temporary` chat mode at turn start. New configurations default
+  to Temporary Chat; existing valid saved modes are preserved. Before attaching a Temporary turn's
+  prompt, the worker verifies Personalized and selects it only if needed. Missing or ambiguous UI
+  fails explicitly. Normal Chat is a manual fallback in Settings, never an automatic retry path.
+- Connector verification snapshots the selected mode and passes it through the launcher/helper
+  protocol. It uses the same Personalized check as Temporary task turns instead of forcing Normal Chat.
+- ChatGPT uses a required custom MCP connector backed by `openai/tunnel-client` for tool-capable turns
+  in Personalized Temporary Chat or Normal Chat. Personalized also permits ChatGPT memory and custom
+  instructions according to account settings; the Codex capability boundaries remain unchanged.
 - Every connector call is bound to one outer Codex turn capability.
 - Tool calls and results remain in the same ChatGPT response while Codex executes them locally.
 - Runtime readiness is conjunctive: both the tunnel and the Responses daemon must be healthy. The

@@ -14,9 +14,10 @@
 </p>
 
 Pick the single **LCA Codex** model in Codex's native model picker, then choose one of the reasoning
-levels currently exposed by ChatGPT's indexed thinking slider. The launcher defaults to **Normal Chat**
-because ChatGPT connectors are currently available there, while **Temporary Chat** remains selectable
-for future connector support. Each turn snapshots that mode when it starts. With the tool bridge active,
+levels currently exposed by ChatGPT's indexed thinking slider. New launcher configurations default to
+**Temporary Chat**, with **Personalized** enabled automatically for connector access. **Normal Chat**
+remains a manually selected fallback in Settings. Existing saved modes are preserved.
+Each turn snapshots that mode when it starts. With the tool bridge active,
 a normal connector-backed turn's composer receives a bounded active bootstrap:
 active system/project instructions, the current checkpoint, up to four recent exchanges within an
 8k-token budget, the latest user request, and current-turn images. Deeper history and historical
@@ -33,7 +34,7 @@ Codex task ──Responses + SSE──▶ lca-codex ──embedded browser──
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
 routes only the selected model turn through a fresh launcher-owned ChatGPT document in the configured
-chat mode; MCP connects Normal Chat back to the tools of that same Codex task.
+chat mode; MCP connects ChatGPT back to the tools of that same Codex task.
 
 ## Highlights
 
@@ -46,12 +47,12 @@ chat mode; MCP connects Normal Chat back to the tools of that same Codex task.
   remain intact.
 - **Local-first task sessions.** Codex remains the source of truth for task history on your
   computer. Every browser turn starts in a fresh ChatGPT document using the chat mode selected in
-  launcher Settings. Tool-capable Normal Chat turns freeze that accumulated context into an immutable
+  launcher Settings. Tool-capable turns freeze that accumulated context into an immutable
   per-turn snapshot and retrieve selected
   older state over MCP on demand; browser chats are never reused as a second history authority.
 - **A ChatGPT Web bridge into the Codex harness.** Reasoning levels map by zero-based position in
   ChatGPT's live ARIA thinking slider, never by translated labels. The custom MCP connector uses the
-  same active Codex task bridge from Normal Chat. Filesystem, shell,
+  same active Codex task bridge from Personalized Temporary Chat or Normal Chat. Filesystem, shell,
   images, approvals, and configured tools/apps stay owned by Codex; calls and real results remain
   inside the same browser response—nothing is simulated as text.
 - **Bounded context at every reasoning level.** Browser reasoning effort no longer changes how much
@@ -67,8 +68,11 @@ chat mode; MCP connects Normal Chat back to the tools of that same Codex task.
 
 When **Temporary Chat** is selected, it is a ChatGPT privacy mode, not anonymity or local-only
 inference: prompts are still processed by OpenAI and are subject to the account's settings and OpenAI's
-[Temporary Chat policy](https://help.openai.com/en/articles/8914046-temporary-chat-faq). Normal Chat is
-the default because the current ChatGPT Web UI exposes custom connectors there. This project
+[Temporary Chat policy](https://help.openai.com/en/articles/8914046-temporary-chat-faq). Personalized
+also allows ChatGPT to use memory and custom instructions according to account settings. LCA verifies
+Personalized on each fresh Temporary task page before attaching the prompt. If personalization or
+connector selection fails, it reports an error; select Normal Chat in Settings to fall back manually.
+This project
 is unofficial; users remain responsible for complying with applicable OpenAI terms and workspace
 policies.
 
@@ -117,8 +121,9 @@ This source path requires Bun 1.3.14. The command installs locked dependencies a
 ## Runtime contract
 
 LCA Codex has one runtime shape: the **ChatGPT Web bridge**. The OpenAI tunnel and ChatGPT MCP
-connector are required before setup is complete. Normal Chat is the default connector-capable mode;
-Temporary Chat is retained as an explicit alternative for future connector support.
+connector are required before setup is complete. Personalized Temporary Chat is the default;
+Normal Chat is a manual fallback. Connector verification uses the selected chat mode. The browser
+smoke test checks sending and receiving a response, not connector availability.
 
 Every picker entry has one fixed ChatGPT reasoning mode. Codex still displays its built-in Effort and
 Speed rows, but changing them cannot silently change the selected browser model. Reasoning effort no

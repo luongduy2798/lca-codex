@@ -476,7 +476,7 @@ test("MCP connector setup stays in the launcher's private ChatGPT session and ve
   assert.match(preloadSource, /openChatGptConnectors:[\s\S]*?launcher:browser-connectors/);
   assert.match(electronMain, /launcher:browser-connectors[\s\S]*?browserHost\.openConnectorSettings\(\)/);
   assert.match(browserHostSource, /CONNECTOR_SETTINGS_HASH = "#settings\/Connectors"[\s\S]*?openConnectorSettings[\s\S]*?loadURL\(NORMAL_CHAT_URL\)[\s\S]*?CONNECTOR_SETTINGS_HASH/);
-  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?loadURL\(NORMAL_CHAT_URL\)[\s\S]*?verifyConnectorWithBrowserHelper/);
+  assert.match(browserHostSource, /runConnectorVerification[\s\S]*?loadURL\(chatUrlForMode\(chatMode\)\)[\s\S]*?verifyConnectorWithBrowserHelper/);
 });
 
 test("launcher refreshes persisted ChatGPT authentication before presenting setup", () => {

@@ -86,6 +86,7 @@ test("launcher browser ownership is explicit in provider configuration", () => {
   config.browserHost = "launcher";
   config.browserHostDescriptorPath = "/Users/example/.lca-codex/runtime/launcher-browser.json";
   expect(providerConfig(config).lcaCodex).toMatchObject({
+    chatMode: "temporary",
     browserHost: "launcher",
     browserHostDescriptorPath: config.browserHostDescriptorPath,
   });

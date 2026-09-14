@@ -13,13 +13,13 @@ import {
   assertAuthenticatedChatGptPage,
   assertChatGptPageMode,
   chatGptUrlForMode,
+  ensureChatGptPersonalized,
   CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPLETION_ACTION_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_SELECTOR,
-  CHATGPT_NORMAL_CHAT_URL,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_USER_TURN_SELECTOR,
   type ChatGptChatMode,
@@ -1019,7 +1019,7 @@ class ChatGptBrowserDiagnostics {
 export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
   const configured = provider.lcaCodex ?? {};
   const browserHost = configured.browserHost ?? "managed-chrome";
-  const chatMode = configured.chatMode ?? "normal";
+  const chatMode = configured.chatMode ?? "temporary";
   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
   if (chatMode !== "normal" && chatMode !== "temporary") {
     throw new Error(`Unsupported ChatGPT chat mode: ${String(chatMode)}`);
@@ -1626,16 +1626,20 @@ export class ChatGptBrowserWorker {
 
   private async verifyConnectorExclusive(): Promise<string> {
     const page = await this.ensurePage();
-    if (page.url() !== CHATGPT_NORMAL_CHAT_URL) {
-      await page.goto(CHATGPT_NORMAL_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    const chatMode = this.config.chatMode ?? "temporary";
+    const chatUrl = chatGptUrlForMode(chatMode);
+    if (page.url() !== chatUrl) {
+      await page.goto(chatUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
     }
+    await resolveChatGptBlockingSystemDialogs(page);
     try {
       await this.activeComposer(page);
     } catch {
-      throw new Error("LCA Codex login is expired or the Normal Chat surface is unavailable");
+      throw new Error(`LCA Codex login is expired or the ${chatMode} ChatGPT surface is unavailable`);
     }
     await assertAuthenticatedChatGptPage(page);
-    await assertChatGptPageMode(page, "normal");
+    await assertChatGptPageMode(page, chatMode);
+    if (chatMode === "temporary") await ensureChatGptPersonalized(page);
     await this.selectConnector(page);
     return this.config.appName;
   }
@@ -1968,7 +1972,7 @@ export class ChatGptBrowserWorker {
   private async runBrowserTurn(
     turn: BrowserTurn,
     launcherSurfaceId?: string,
-    chatMode: ChatGptChatMode = this.config.chatMode ?? "normal",
+    chatMode: ChatGptChatMode = this.config.chatMode ?? "temporary",
     onConversationOwnership?: (ownership: ChatGptNetworkConversationOwnership) => void,
   ): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("LCA Codex turn aborted", "AbortError");
@@ -2068,6 +2072,7 @@ export class ChatGptBrowserWorker {
         await throwIfChatGptSessionFailureAlert(page);
         await assertAuthenticatedChatGptPage(page);
         await assertChatGptPageMode(page, chatMode);
+        if (chatMode === "temporary") await ensureChatGptPersonalized(page);
       }, turn.abortSignal);
       await diagnostics.capture(page, "session-verified");
       const mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (

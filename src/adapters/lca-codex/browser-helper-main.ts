@@ -33,6 +33,7 @@ interface VerifyMessage {
   config: {
     appName: string;
     browserHostDescriptorPath: string;
+    chatMode: "normal" | "temporary";
   };
 }
 
@@ -159,14 +160,19 @@ async function verify(message: VerifyMessage): Promise<void> {
   }
   const appName = message.config.appName?.trim();
   const browserHostDescriptorPath = message.config.browserHostDescriptorPath?.trim();
+  const chatMode = message.config.chatMode;
   if (!appName || appName.length > 80 || !browserHostDescriptorPath) {
     throw new Error("Browser helper verification config is invalid");
+  }
+  if (chatMode !== "normal" && chatMode !== "temporary") {
+    throw new Error("Browser helper verification chat mode is invalid");
   }
   const provider: CodexProviderConfig = {
     adapter: "lca-codex",
     baseUrl: "https://chatgpt.com",
     lcaCodex: {
       appName,
+      chatMode,
       browserHost: "launcher",
       browserHostDescriptorPath,
     },

@@ -10,7 +10,7 @@ const DEFAULT_STATE = Object.freeze({
   runtimeAutoStart: false,
   bridgeEnabled: true,
   keepRunningOnClose: true,
-  chatMode: "normal",
+  chatMode: "temporary",
   deleteCompletedTaskChats: true,
   showBrowserDuringTurns: true,
   hideCodexUsageUpsell: false,

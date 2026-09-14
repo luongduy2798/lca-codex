@@ -388,7 +388,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     noReasoningModels: [],
     lcaCodex: {
       appName: config.appName,
-      chatMode: "normal",
+      chatMode: "temporary",
       browserHost: config.browserHost,
       browserHostDescriptorPath: config.browserHostDescriptorPath,
       storageStatePath: config.storageStatePath,

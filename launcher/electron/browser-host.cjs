@@ -153,7 +153,7 @@ function googleAccountChooserUrl(value) {
 }
 
 function normalizeChatMode(value) {
-  return value === "temporary" ? "temporary" : "normal";
+  return value === "normal" ? "normal" : "temporary";
 }
 
 function chatUrlForMode(mode) {
@@ -260,7 +260,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.publishState = publishState;
-    this.getPreferences = typeof getPreferences === "function" ? getPreferences : () => ({ chatMode: "normal" });
+    this.getPreferences = typeof getPreferences === "function" ? getPreferences : () => ({ chatMode: "temporary" });
     this.dispatchTrustedClick = dispatchTrustedClick;
     this.dispatchTrustedKey = dispatchTrustedKey;
     this.evaluatePage = evaluatePage;
@@ -954,8 +954,8 @@ class BrowserHost {
     return await this.withManualOperation("connector setup", async () => {
       const contents = this.view.webContents;
       this.show();
-      // Connector settings are currently hydrated only from Normal Chat. Keep setup on the same
-      // launcher-owned authenticated partition without silently changing the selected turn mode.
+      // Open account settings on the launcher-owned authenticated partition. This navigation
+      // does not change the selected mode for task turns or connector verification.
       await contents.loadURL(NORMAL_CHAT_URL);
       await this.waitForAuthenticated(60_000);
       await contents.executeJavaScript(
@@ -1877,9 +1877,7 @@ class BrowserHost {
   }
 
   async runConnectorVerification(appName) {
-    if (preferredChatModeFor(this) === "temporary") {
-      throw new Error("ChatGPT connectors are unavailable in Temporary Chat. Switch Chat mode to Normal and retry verification.");
-    }
+    const chatMode = preferredChatModeFor(this);
     if (typeof appName !== "string" || !appName.trim() || appName.length > 80) {
       throw new Error("Connector name is invalid");
     }
@@ -1892,15 +1890,15 @@ class BrowserHost {
     contents.setBackgroundThrottling(false);
     const restoreVerificationSurface = this.beginConnectorVerificationSurface();
     try {
-      // Connector discovery is currently hydrated only in Normal Chat. Reload so a connector
-      // created moments ago cannot be hidden by stale page state.
-      await this.view.webContents.loadURL(NORMAL_CHAT_URL);
+      // Refresh discovery in the snapshotted mode so newly installed connectors are visible.
+      await this.view.webContents.loadURL(chatUrlForMode(chatMode));
       await this.waitForAuthenticated(60_000);
       await this.waitForVisibleComposer();
       const result = await this.verifyConnectorWithBrowserHelper({
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
+        chatMode,
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });
