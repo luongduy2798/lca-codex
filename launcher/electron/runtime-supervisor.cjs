@@ -1711,21 +1711,53 @@ class RuntimeSupervisor {
     });
   }
 
-  async stopStaleOwnedRuntime(config, { forceOwnedDaemon = false } = {}) {
-    const state = this.readState();
-    if (!state) return false;
+  async verifyExternalDaemonControl(config, expectedHealth) {
+    try {
+      const drain = await this.control(config, "drain");
+      if (drain.status !== "ok" || drain.accepting_turns !== false
+        || !Number.isInteger(drain.active_http_turns) || drain.active_http_turns < 0
+        || !Number.isInteger(drain.active_browser_turns) || drain.active_browser_turns < 0) {
+        throw new Error("external daemon did not acknowledge the authenticated drain contract");
+      }
+      if (!await this.proxyHealth(
+        { ...config, releaseVersion: expectedHealth.version }, 2_000, expectedHealth.pid,
+      )) {
+        throw new Error("Responses daemon identity changed during ownership recovery");
+      }
+    } catch (error) {
+      try {
+        await this.control(config, "resume");
+      } catch (resumeError) {
+        throw new Error(appendFailure(errorMessage(error), "external daemon resume compensation failed", resumeError));
+      }
+      throw error;
+    }
+  }
+
+  async stopStaleOwnedRuntime(config, {
+    forceOwnedDaemon = false,
+    reclaimExternalDaemon = false,
+  } = {}) {
+    const savedState = this.readState();
+    if (!savedState && !reclaimExternalDaemon) return false;
     const health = await this.proxyHealthPayload(config);
     const daemonRunning = health?.service === "lca-codex"
       && health?.mode === config.mode
-      && health?.version === config.releaseVersion
+      && (health?.version === config.releaseVersion
+        || (reclaimExternalDaemon && typeof health?.version === "string" && health.version.length > 0))
       && Number.isInteger(health?.pid)
       && health.pid > 0;
+    if (!savedState && !daemonRunning) return false;
+    const state = savedState || this.snapshot("external");
+    const externalRecovery = reclaimExternalDaemon && daemonRunning
+      && (!savedState || health.pid !== state.daemonPid || health.version !== config.releaseVersion);
     let staleDaemonPid = state.daemonPid;
     if (daemonRunning && health.pid !== staleDaemonPid) {
       const staleOwnerStillRunning = state.ownerPid !== process.pid && processRunning(state.ownerPid);
       const staleMarkedDaemonStillRunning = processRunning(staleDaemonPid);
       const detachedDaemonMatchesRuntime = this.daemonPidMatchesRuntimeCommand(health.pid, config);
-      if (staleOwnerStillRunning || staleMarkedDaemonStillRunning || !detachedDaemonMatchesRuntime) {
+      if (staleOwnerStillRunning || staleMarkedDaemonStillRunning
+        || (!detachedDaemonMatchesRuntime && !externalRecovery)) {
         throw new Error("The process on the Responses port does not match the stale launcher marker");
       }
       this.logger.warn("runtime.stale_daemon_marker_rebound", {
@@ -1781,7 +1813,11 @@ class RuntimeSupervisor {
       tunnelPid: managedTunnelRunning ? state.tunnelPid : null,
     });
     if (daemonRunning) {
-      let drained = false;
+      // A manual Start may reclaim a source/older daemon that the packaged command
+      // matcher cannot recognize. Authenticate control and recheck its PID first;
+      // rejected or malformed control responses must never reach forced termination.
+      if (externalRecovery) await this.verifyExternalDaemonControl(config, health);
+      let drained = externalRecovery;
       try {
         drained = await this.acquireDrain(config);
         const shutdown = await this.control(config, "shutdown");
@@ -1789,7 +1825,10 @@ class RuntimeSupervisor {
         await this.waitForProcessExit("stale daemon", staleDaemonPid);
         await this.waitForPortRelease(config);
       } catch (error) {
-        if (forceOwnedDaemon) {
+        const canForce = forceOwnedDaemon && (!externalRecovery || await this.proxyHealth(
+          { ...config, releaseVersion: health.version }, 2_000, staleDaemonPid,
+        ));
+        if (canForce) {
           this.logger.warn("runtime.restart_forcing_busy_stale_daemon", {
             pid: staleDaemonPid,
             message: errorMessage(error),
@@ -1893,15 +1932,16 @@ class RuntimeSupervisor {
     this[name] = null;
   }
 
-  async startRuntime() {
+  async startRuntime({ reclaimExternalDaemon = false } = {}) {
     const observed = await this.observeRuntime();
     if (!observed.configured) throw new Error("Runtime is not configured. Complete Setup first.");
     if (observed.lifecycle === "foreign") {
       throw new Error(observed.detail || "The configured Responses port is owned by another process");
     }
     if (observed.lifecycle === "ready" && observed.owner === "current-launcher") return observed;
-    if (observed.lifecycle === "stale" || observed.owner === "external-runtime") {
-      await this.stopRuntime();
+    if (observed.lifecycle === "stale" || observed.owner === "external-runtime"
+      || (reclaimExternalDaemon && observed.lifecycle === "degraded")) {
+      await this.stopRuntime({ forceOwnedDaemon: reclaimExternalDaemon, reclaimExternalDaemon });
       const cleaned = await this.observeRuntime();
       if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
         throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
@@ -1916,12 +1956,12 @@ class RuntimeSupervisor {
     return status;
   }
 
-  async stopRuntime({ forceOwnedDaemon = false } = {}) {
+  async stopRuntime({ forceOwnedDaemon = false, reclaimExternalDaemon = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
     this.cancelStartRequested = true;
     this.lifecyclePhase = "stopping";
     this.publishRuntime();
-    this.stopPromise = this.performUserStop({ forceOwnedDaemon });
+    this.stopPromise = this.performUserStop({ forceOwnedDaemon, reclaimExternalDaemon });
     try {
       return await this.stopPromise;
     } finally {
@@ -1932,8 +1972,8 @@ class RuntimeSupervisor {
     }
   }
 
-  async performUserStop({ forceOwnedDaemon = false } = {}) {
-    await this.performStopForSetup({ forceOwnedDaemon });
+  async performUserStop({ forceOwnedDaemon = false, reclaimExternalDaemon = false } = {}) {
+    await this.performStopForSetup({ forceOwnedDaemon, reclaimExternalDaemon });
     this.logger.info("runtime.user_stopped");
     const status = await this.observeRuntime();
     this.publishRuntimeState?.(status);
@@ -1950,7 +1990,7 @@ class RuntimeSupervisor {
     }
   }
 
-  async performStopForSetup({ forceOwnedDaemon = false } = {}) {
+  async performStopForSetup({ forceOwnedDaemon = false, reclaimExternalDaemon = false } = {}) {
     if (this.startPromise) {
       try {
         await this.startPromise;
@@ -1963,19 +2003,24 @@ class RuntimeSupervisor {
     this.stopTunnelMonitor();
     let drained = false;
     let tunnelStopped = false;
+    let ownershipState = null;
     try {
-      const ownershipState = this.readState();
-      const healthyRuntime = config ? await this.proxyHealth(config) : false;
+      ownershipState = this.readState();
+      const observedHealth = config && reclaimExternalDaemon ? await this.proxyHealthPayload(config) : null;
+      const externalRuntime = observedHealth?.service === "lca-codex"
+        && observedHealth?.mode === config.mode
+        && Number.isInteger(observedHealth?.pid) && observedHealth.pid > 0;
+      const healthyRuntime = externalRuntime || (config ? await this.proxyHealth(config) : false);
       const runtimeMayBeLive = healthyRuntime || runtimeOwnershipMayBeLive(ownershipState);
-      if (config && healthyRuntime && !ownershipState && !this.daemon) {
+      if (config && healthyRuntime && !ownershipState && !this.daemon && !reclaimExternalDaemon) {
         throw new Error("a healthy runtime is missing launcher ownership evidence");
       }
       if (config
-        && ownershipState
+        && (ownershipState || reclaimExternalDaemon)
         && runtimeMayBeLive
         && !this.daemon
         && !this.tunnel) {
-        const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon });
+        const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon, reclaimExternalDaemon });
         if (!recovered) {
           throw new Error("an existing runtime could not be safely recovered");
         }
@@ -1995,7 +2040,7 @@ class RuntimeSupervisor {
             throw new Error("runtime configuration is missing while launcher ownership processes are still alive");
           }
         } else if (runtimeMayBeLive) {
-          const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon });
+          const recovered = await this.stopStaleOwnedRuntime(config, { forceOwnedDaemon, reclaimExternalDaemon });
           if (!recovered) {
             throw new Error("an existing runtime could not be safely recovered");
           }
@@ -2069,7 +2114,10 @@ class RuntimeSupervisor {
           restoredReady = false;
         }
       }
-      this.tryWriteState(restoredReady ? "ready" : "failed", message);
+      // Failed recovery must not erase the PID/owner evidence needed by the next Start.
+      if (this.daemon || this.tunnel || !ownershipState) {
+        this.tryWriteState(restoredReady ? "ready" : "failed", message);
+      }
       throw new Error(message);
     } finally {
       this.stopping = false;

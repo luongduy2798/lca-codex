@@ -433,9 +433,9 @@ function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
   });
 }
 
-async function startManagedRuntime() {
+async function startManagedRuntime({ reclaimExternalDaemon = false } = {}) {
   if (!runtimeLifecycle) throw new Error("Runtime lifecycle is not initialized");
-  return runtimeLifecycle.start();
+  return runtimeLifecycle.start({ reclaimExternalDaemon });
 }
 
 async function stopManagedRuntime({ restoreCodex = true } = {}) {
@@ -799,7 +799,7 @@ function registerIpc({ logger, stateStore }) {
   }));
 
   handle("launcher:runtime-status", () => publishRuntimeStatus());
-  handle("launcher:runtime-start", () => startManagedRuntime({ logger, stateStore }));
+  handle("launcher:runtime-start", () => startManagedRuntime({ reclaimExternalDaemon: true }));
   handle("launcher:runtime-stop", () => stopManagedRuntime({ logger, stateStore }));
   handle("launcher:runtime-restart", () => restartManagedRuntime({ logger, stateStore }));
 

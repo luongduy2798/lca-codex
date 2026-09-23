@@ -2,7 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.12] - Unreleased
+## [1.0.13] - Unreleased
+
+### Fixed
+
+- Make explicit launcher **Start** reclaim stale runtimes, including source daemons, missing PID markers, and older runtime versions, through authenticated lifecycle control.
+- Force-stop a verified daemon when graceful shutdown fails, recheck its identity before termination, and wait for the configured Responses port to be released before starting the replacement. Automatic startup and normal Stop retain graceful shutdown behavior.
+- Preserve existing PID and launcher ownership evidence when runtime recovery fails. Unrelated port occupants and runtimes owned by another live launcher remain protected.
+
+### Tests
+
+- Add regression coverage for manual Start, automatic startup, missing markers, version mismatches, failed authentication, malformed drain responses, and changed process identity. Isolated process tests cover both graceful and forced shutdown followed by reuse of the released Responses port.
+
+## [1.0.12] - Released
 
 ### Fixed
 

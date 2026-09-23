@@ -61,6 +61,54 @@ test("runtime start is ready before the bounded Codex tool-health probe finishes
   assert.equal(current.toolHealth.at(-1).live, true);
 });
 
+for (const lifecycle of ["stale", "degraded"]) {
+  test(`manual Start reclaims a ${lifecycle} runtime before upgrading and activating the route`, async () => {
+    const current = fixture();
+    let stopped = false;
+    current.runtimeSupervisor.observeRuntime = async () => stopped
+      ? { lifecycle: "stopped", owner: "none" }
+      : { lifecycle, owner: lifecycle === "stale" ? "external-runtime" : "current-launcher" };
+    current.runtimeSupervisor.stopRuntime = async (options) => {
+      assert.deepEqual(options, { forceOwnedDaemon: true, reclaimExternalDaemon: true });
+      current.calls.push("runtime:reclaim");
+      stopped = true;
+    };
+    current.runtimeSupervisor.startRuntime = async (options) => {
+      assert.deepEqual(options, { reclaimExternalDaemon: true });
+      current.calls.push("runtime:start");
+      return { lifecycle: "ready" };
+    };
+
+    assert.equal((await current.coordinator.start({ reclaimExternalDaemon: true })).lifecycle, "ready");
+    assert.ok(current.calls.indexOf("runtime:reclaim") < current.calls.indexOf("runtime:upgrade"));
+    assert.ok(current.calls.indexOf("runtime:upgrade") < current.calls.indexOf("runtime:start"));
+    assert.ok(current.calls.indexOf("runtime:start") < current.calls.indexOf("bridge:activate"));
+  });
+}
+
+test("automatic startup never opts into forced external-runtime recovery", async () => {
+  const current = fixture();
+  let stopped = false;
+  current.runtimeSupervisor.observeRuntime = async () => stopped
+    ? { lifecycle: "stopped", owner: "none" }
+    : { lifecycle: "stale", owner: "external-runtime" };
+  current.runtimeSupervisor.stopRuntime = async (options) => {
+    assert.deepEqual(options, { forceOwnedDaemon: false, reclaimExternalDaemon: false });
+    stopped = true;
+  };
+  await current.coordinator.start();
+  assert.equal(stopped, true);
+});
+
+test("manual Start leaves an unrelated Responses port occupant untouched", async () => {
+  const current = fixture();
+  current.runtimeSupervisor.observeRuntime = async () => ({ lifecycle: "foreign", owner: "foreign" });
+  await assert.rejects(current.coordinator.start({ reclaimExternalDaemon: true }), /owned by another process/);
+  for (const action of ["runtime:stop", "runtime:start", "runtime:upgrade", "bridge:activate"]) {
+    assert.equal(current.calls.includes(action), false);
+  }
+});
+
 test("runtime stop invalidates a slow health result so stale diagnostics cannot republish", async () => {
   const current = fixture();
   await current.coordinator.start();

@@ -1316,6 +1316,222 @@ test("launcher still rejects a mismatched Responses daemon that cannot be verifi
   }
 });
 
+function externalRuntimeFixture({ marker = true, version = "0.2.0" } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-external-recovery-"));
+  const descriptorPath = path.join(root, "launcher.json");
+  const config = launcherConfig(descriptorPath);
+  const calls = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => config.releaseVersion, isPackaged: true },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  if (marker) supervisor.writeState("failed");
+  const health = {
+    status: "ok", service: "lca-codex", mode: config.mode, version, pid: 123_456_789,
+  };
+  supervisor.readSetupConfig = () => config;
+  supervisor.proxyHealthPayload = async () => health;
+  supervisor.daemonPidMatchesRuntimeCommand = () => false;
+  supervisor.waitForKnownTunnelStatus = async () => ({
+    absent: true, state: "stopped", processRunning: false, pid: null,
+  });
+  supervisor.control = async (_config, action) => {
+    calls.push(action);
+    return { status: "ok", accepting_turns: false, active_http_turns: 0, active_browser_turns: 0 };
+  };
+  supervisor.waitForProcessExit = async () => { calls.push("exit"); };
+  supervisor.waitForPortRelease = async () => { calls.push("port-released"); };
+  supervisor.forceStopVerifiedPid = async () => { calls.push("force-stop"); };
+  return { root, config, supervisor, health, calls };
+}
+
+for (const options of [{}, { marker: false }, { version: "0.1.0" }]) {
+  test(`manual Start reclaims an authenticated external daemon ${JSON.stringify(options)}`, async () => {
+    const current = externalRuntimeFixture(options);
+    try {
+      assert.deepEqual(await current.supervisor.performStopForSetup({
+        forceOwnedDaemon: true, reclaimExternalDaemon: true,
+      }), { status: "stopped" });
+      assert.deepEqual(current.calls, ["drain", "drain", "shutdown", "exit", "port-released"]);
+      assert.equal(fs.existsSync(current.supervisor.statePath), false);
+    } finally {
+      fs.rmSync(current.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const failure of ["unauthorized", "malformed", "changed-pid"]) {
+  test(`manual Start never kills an external daemon after ${failure} control verification`, async () => {
+    const current = externalRuntimeFixture();
+    const originalState = current.supervisor.readState();
+    current.supervisor.control = async (_config, action) => {
+      current.calls.push(action);
+      if (action === "resume") return { status: "ok" };
+      if (failure === "unauthorized") throw new Error("HTTP 401");
+      if (failure === "malformed") {
+        return { status: "ok", accepting_turns: false, active_http_turns: -1, active_browser_turns: 0 };
+      }
+      current.supervisor.proxyHealthPayload = async () => ({ ...current.health, pid: current.health.pid + 1 });
+      return { status: "ok", accepting_turns: false, active_http_turns: 0, active_browser_turns: 0 };
+    };
+    try {
+      await assert.rejects(current.supervisor.performStopForSetup({
+        forceOwnedDaemon: true, reclaimExternalDaemon: true,
+      }), /HTTP 401|authenticated drain contract|identity changed/);
+      assert.deepEqual(current.calls, ["drain", "resume"]);
+      assert.deepEqual(current.supervisor.readState(), originalState);
+    } finally {
+      fs.rmSync(current.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("manual Start force-stops a verified external daemon when graceful draining remains busy", async () => {
+  const current = externalRuntimeFixture();
+  current.supervisor.acquireDrain = async () => { throw new Error("1 active browser turn"); };
+  try {
+    assert.equal(await current.supervisor.stopStaleOwnedRuntime(current.config, {
+      forceOwnedDaemon: true, reclaimExternalDaemon: true,
+    }), true);
+    assert.deepEqual(current.calls, ["drain", "force-stop", "port-released"]);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("external recovery rechecks the Responses PID before forced termination", async () => {
+  const current = externalRuntimeFixture();
+  current.supervisor.acquireDrain = async () => {
+    current.supervisor.proxyHealthPayload = async () => ({ ...current.health, pid: current.health.pid + 1 });
+    throw new Error("runtime changed while draining");
+  };
+  try {
+    await assert.rejects(current.supervisor.stopStaleOwnedRuntime(current.config, {
+      forceOwnedDaemon: true, reclaimExternalDaemon: true,
+    }), /runtime changed while draining/);
+    assert.deepEqual(current.calls, ["drain", "resume"]);
+  } finally {
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+test("manual Start preserves another live launcher's ownership evidence", async () => {
+  const current = externalRuntimeFixture();
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const originalState = { ...current.supervisor.readState(), ownerPid: owner.pid };
+  fs.writeFileSync(current.supervisor.statePath, JSON.stringify(originalState));
+  try {
+    await assert.rejects(current.supervisor.performStopForSetup({
+      forceOwnedDaemon: true, reclaimExternalDaemon: true,
+    }), /does not match the stale launcher marker/);
+    assert.deepEqual(current.calls, []);
+    assert.deepEqual(current.supervisor.readState(), originalState);
+  } finally {
+    owner.kill();
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+});
+
+async function verifyExternalRuntimeReplacement(busy) {
+  const current = externalRuntimeFixture();
+  const child = spawn(process.execPath, ["-e", `
+    const http = require("node:http");
+    let draining = false;
+    const server = http.createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/healthz") {
+        response.end(JSON.stringify({
+          status: "ok", service: "lca-codex", mode: "full", version: "0.1.0",
+          pid: process.pid, accepting_turns: !draining, broker_ready: true,
+        }));
+        return;
+      }
+      if (request.headers.authorization !== "Bearer runtime-supervisor-control-token-0123456789abcdef") {
+        response.writeHead(401).end("Unauthorized");
+        return;
+      }
+      if (request.url === "/admin/drain") draining = true;
+      if (request.url === "/admin/resume") draining = false;
+      if (request.url === "/admin/shutdown" && !draining) {
+        response.writeHead(409).end();
+        return;
+      }
+      response.end(JSON.stringify({
+        status: "ok", accepting_turns: !draining, active_http_turns: 0,
+        active_browser_turns: ${busy ? 1 : 0},
+      }));
+      if (request.url === "/admin/shutdown") {
+        setTimeout(() => server.close(() => process.exit(0)), 10);
+      }
+    });
+    server.listen(0, "127.0.0.1", () => process.send({ port: server.address().port }));
+  `], { detached: process.platform !== "win32", stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  let replacement;
+  try {
+    const address = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("isolated daemon did not start")), 5_000);
+      child.once("error", error => { clearTimeout(timeout); reject(error); });
+      child.once("message", message => { clearTimeout(timeout); resolve(message); });
+    });
+    current.config.port = address.port;
+    const supervisor = current.supervisor;
+    supervisor.readConfig = () => current.config;
+    for (const method of ["proxyHealthPayload", "control", "waitForProcessExit", "waitForPortRelease"]) {
+      delete supervisor[method];
+    }
+    if (busy) {
+      supervisor.acquireDrain = config => RuntimeSupervisor.prototype.acquireDrain.call(supervisor, config, 0);
+      supervisor.forceStopVerifiedPid = async (name, pid) => {
+        assert.equal(pid, child.pid);
+        current.calls.push("force-stop");
+        await RuntimeSupervisor.prototype.forceStopVerifiedPid.call(supervisor, name, pid);
+      };
+    }
+    supervisor.observeTunnelForMonitor = async () => ({
+      pid: null, ready: Boolean(replacement?.listening),
+      state: replacement?.listening ? "ready" : "stopped", processRunning: Boolean(replacement?.listening),
+    });
+    supervisor.startIfConfigured = async () => {
+      assert.ok(child.exitCode !== null || child.signalCode !== null);
+      if (!busy) assert.equal(child.exitCode, 0);
+      assert.equal(fs.existsSync(supervisor.statePath), false);
+      replacement = http.createServer((_request, response) => {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          ...current.health, pid: process.pid, accepting_turns: true, broker_ready: true,
+        }));
+      });
+      await new Promise((resolve, reject) => {
+        replacement.once("error", reject);
+        replacement.listen(address.port, "127.0.0.1", resolve);
+      });
+      supervisor.daemon = { pid: process.pid, exitCode: null, signalCode: null };
+      supervisor.writeState("ready");
+      return { status: "ready" };
+    };
+    const status = await supervisor.startRuntime({ reclaimExternalDaemon: true });
+    assert.equal(status.lifecycle, "ready");
+    assert.equal(status.owner, "current-launcher");
+    assert.equal(status.port.port, address.port);
+    assert.equal(supervisor.readState().daemonPid, process.pid);
+    assert.notEqual(supervisor.readState().daemonPid, child.pid);
+    assert.equal(current.calls.includes("force-stop"), busy);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    if (replacement) await new Promise(resolve => replacement.close(resolve));
+    fs.rmSync(current.root, { recursive: true, force: true });
+  }
+}
+
+for (const busy of [false, true]) {
+  test(`manual Start replaces an external process (${busy ? "forced" : "graceful"}) and reuses its port`, async () => {
+    await verifyExternalRuntimeReplacement(busy);
+  });
+}
+
 test("manual restart can reclaim a verified stale daemon that no longer serves health", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lca-codex-runtime-restart-stale-"));
   const descriptorPath = path.join(root, "launcher.json");

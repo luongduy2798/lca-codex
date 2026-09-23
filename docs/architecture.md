@@ -510,6 +510,14 @@ be completed, the operation fails closed and restores the drained runtime when p
 unexpected child exit is recovered with a bounded restart budget; a crash loop becomes an explicit
 launcher error.
 
+Explicit launcher **Start** also reclaims a stale or degraded runtime before starting fresh. An
+external/source daemon, including one with a missing PID marker or an older release, must acknowledge
+the authenticated drain contract and retain the same healthy service/PID identity before it can be
+reclaimed. If graceful shutdown fails, manual Start may force-stop that verified daemon after a fresh
+identity check, then wait for the configured Responses port to be released. It does not kill unrelated
+port occupants or take ownership away from another live launcher. Automatic startup and ordinary Stop
+retain graceful shutdown behavior; failed recovery preserves existing ownership evidence.
+
 ## Launcher Activity retention
 
 The launcher retains at most the current `launcher.jsonl` generation plus `launcher.jsonl.1`. Those

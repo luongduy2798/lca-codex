@@ -36,7 +36,7 @@ function createRuntimeLifecycleCoordinator({
       });
   };
 
-  const start = async () => {
+  const start = async ({ reclaimExternalDaemon = false } = {}) => {
     let runtimeStarted = false;
     const healthGeneration = invalidateToolHealth({ reset: true });
     try {
@@ -44,8 +44,12 @@ function createRuntimeLifecycleCoordinator({
       if (before.lifecycle === "foreign") {
         throw new Error(before.detail || "The configured Responses port is owned by another process");
       }
-      if (before.lifecycle === "stale" || before.owner === "external-runtime") {
-        await runtimeSupervisor.stopRuntime();
+      if (before.lifecycle === "stale" || before.owner === "external-runtime"
+        || (reclaimExternalDaemon && before.lifecycle === "degraded")) {
+        await runtimeSupervisor.stopRuntime({
+          forceOwnedDaemon: reclaimExternalDaemon,
+          reclaimExternalDaemon,
+        });
         const cleaned = await runtimeSupervisor.observeRuntime();
         if (cleaned.lifecycle === "foreign" || cleaned.lifecycle === "stale") {
           throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
@@ -53,7 +57,7 @@ function createRuntimeLifecycleCoordinator({
       }
       const upgrade = await runtimeHost.upgradeManagedRuntime();
       applyRuntimeUpgradeState(upgrade);
-      const status = await runtimeSupervisor.startRuntime();
+      const status = await runtimeSupervisor.startRuntime({ reclaimExternalDaemon });
       runtimeStarted = status.lifecycle === "ready";
       publishRuntimeState(status);
       if (runtimeStarted) {

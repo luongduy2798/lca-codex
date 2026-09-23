@@ -219,7 +219,8 @@ test("manual-first runtime controls are global and startup stays observe-only by
   assert.match(appSource, /function RuntimeServiceSurface/);
   assert.match(appSource, /setPreference\("runtimeAutoStart", checked\)/);
   assert.match(electronMain, /await publishRuntimeStatus\(\);\s*startRuntimeStatusMonitor\(\{ logger, stateStore \}\);\s*if \(stateStore\.read\(\)\.runtimeAutoStart === true\)/);
-  assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.startRuntime\(\)/);
+  assert.match(electronMain, /handle\("launcher:runtime-start", \(\) => startManagedRuntime\(\{ reclaimExternalDaemon: true \}\)\)/);
+  assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.startRuntime\(\{ reclaimExternalDaemon \}\)/);
   assert.match(runtimeLifecycleSource, /const status = await runtimeSupervisor\.stopRuntime\(\)/);
 });
 
@@ -363,7 +364,7 @@ test("runtime lifecycle owns the Codex bridge without exposing a separate switch
   assert.doesNotMatch(preloadSource, /launcher:bridge-enabled/);
   assert.doesNotMatch(i18nSource, /Codex bridge/);
   assert.match(electronMain, /createRuntimeLifecycleCoordinator\(/);
-  assert.match(runtimeLifecycleSource, /const start = async \(\) => \{[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
+  assert.match(runtimeLifecycleSource, /const start = async \(\{ reclaimExternalDaemon = false \} = \{\}\) => \{[\s\S]*?runtimeHost\.activateRuntimeBridge\(\)/);
   assert.match(runtimeLifecycleSource, /const stop = async \(\{ restoreCodex = true \} = \{\}\) => \{[\s\S]*?runtimeHost\.deactivateRuntimeBridge\(\)/);
   assert.doesNotMatch(runtimeLifecycleSource, /abortAllTurns/);
   assert.match(runtimeLifecycleSource, /const restart = async \(\) => \{[\s\S]*?stop\(\{ restoreCodex: false \}\)/);
