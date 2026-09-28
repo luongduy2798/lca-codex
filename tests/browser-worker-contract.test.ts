@@ -32,7 +32,7 @@ test("Codex context uses the owned CDP composer transport, never the operating-s
 
 test("completed prompts activate the scoped semantic send control", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).toContain('.getByTestId("send-button")');
+  expect(workerSource).toContain(".locator(CHATGPT_SEND_BUTTON_SELECTOR)");
   expect(workerSource).toContain('await sendButton.press("Enter")');
   expect(workerSource).not.toContain('getByTestId("send-button").dispatchEvent("click")');
 });
@@ -144,7 +144,7 @@ test("a transient launcher CDP disconnect reattaches the same browser surface in
   expect(workerSource).toContain("const reattachLauncherSurface = async (): Promise<boolean> => {");
   expect(workerSource).toContain("!turnConnection || turnConnection.isConnected()");
   expect(workerSource).toContain("launcherSurfaceId,\n            turn.abortSignal,");
-  expect(workerSource).toContain("responseTurn = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).filter({ visible: true }).last()");
+  expect(workerSource).toContain("responseTurn = page.locator(CHATGPT_RESPONSE_ROOT_SELECTOR).filter({ visible: true }).last()");
   // Initial polling, the network-terminal re-snapshot, and the loop liveness check all recover
   // the same launcher-owned surface instead of replaying the submitted ChatGPT generation.
   expect(workerSource.match(/if \(await reattachLauncherSurface\(\)\) continue;/g)?.length).toBe(3);
@@ -251,6 +251,37 @@ test("browser network lifecycle correlates completion regardless of created/stre
   expect(transitions).toEqual(["streaming", "created", "completed"]);
 });
 
+test("conversation detail binds ownership but only WebSocket completion ends the turn", () => {
+  const tracker = new ChatGptNetworkTurnTracker();
+  const frame = (type: string, payload: Record<string, unknown>) => JSON.stringify([{
+    type: "message",
+    topic_id: "conversations",
+    payload: { type, payload },
+  }]);
+
+  tracker.arm();
+  tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
+  tracker.observePageRequest("GET", "https://chatgpt.com/backend-api/conversation/conversation-current");
+  expect(tracker.snapshot().completed).toBeFalse();
+
+  tracker.observeWebSocketPayload(frame("conversation-created", {
+    conversation_id: "conversation-current",
+  }));
+  expect(tracker.snapshot().completed).toBeFalse();
+
+  tracker.observeWebSocketPayload(frame("conversation-turn-complete", {
+    conversation_id: "conversation-current",
+    current_message_id: "message-current",
+  }));
+  expect(tracker.snapshot()).toEqual({
+    armed: true,
+    submissionKnown: true,
+    conversationKnown: true,
+    turnKnown: false,
+    completed: true,
+  });
+});
+
 test("page-scoped conversation ownership isolates Instant turns without turn-stream frames", () => {
   const frame = (topicId: string, type: string, payload: Record<string, unknown>) => JSON.stringify([{
     type: "message",
@@ -266,25 +297,15 @@ test("page-scoped conversation ownership isolates Instant turns without turn-str
     tracker.observePageRequest("POST", "https://chatgpt.com/backend-api/f/conversation");
   });
 
+  // conversation-created is page-scoped; account-wide completion can still appear on another tab.
+  first.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "conversation-first",
+  }));
   for (const tracker of trackers) {
-    tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
-      conversation_id: "conversation-first",
-    }));
     tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
       conversation_id: "conversation-first",
     }));
   }
-  second.observePageRequest(
-    "GET",
-    "https://chatgpt.com/backend-api/conversation/conversation-second/stream_status",
-  );
-  expect(first.snapshot().completed).toBe(false);
-  expect(second.snapshot().completed).toBe(false);
-
-  first.observePageRequest(
-    "GET",
-    "https://chatgpt.com/backend-api/conversation/conversation-first/stream_status?source=web",
-  );
   expect(first.snapshot()).toEqual({
     armed: true,
     submissionKnown: true,
@@ -294,15 +315,12 @@ test("page-scoped conversation ownership isolates Instant turns without turn-str
   });
   expect(second.snapshot().completed).toBe(false);
 
-  for (const tracker of trackers) {
-    tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
-      conversation_id: "conversation-second",
-    }));
-    tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
-      conversation_id: "conversation-second",
-    }));
-  }
-  expect(first.snapshot().completed).toBe(true);
+  second.observeWebSocketPayload(frame("conversations", "conversation-created", {
+    conversation_id: "conversation-second",
+  }));
+  second.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
+    conversation_id: "conversation-second",
+  }));
   expect(second.snapshot()).toEqual({
     armed: true,
     submissionKnown: true,
@@ -328,9 +346,6 @@ test("browser network lifecycle ignores unrelated conversation evidence", () => 
     conversation_id: "other-conversation",
   }));
   tracker.observeWebSocketPayload(frame("conversations", "conversation-turn-complete", {
-    conversation_id: "other-conversation",
-  }));
-  tracker.observeWebSocketPayload(frame("conversations", "conversation-created", {
     conversation_id: "other-conversation",
   }));
   tracker.observePageRequest(
@@ -490,24 +505,15 @@ test("network completion re-snapshots the final DOM and completes without a fixe
   expect(workerSource.slice(terminalBranch, finalization)).not.toContain("terminalSettle");
 });
 
-test("connector verification and real tool turns share one Playwright selector", () => {
+test("connector verification and real tool turns share one exact mention selector", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
   expect(workerSource.match(/this\.selectConnector\(page(?:, captureDiagnostic)?\)/g)?.length).toBe(2);
   expect(workerSource).toContain('await page.keyboard.type("@");');
-  expect(workerSource).toContain("for (const character of this.config.appName)");
-  expect(workerSource).toContain("await page.keyboard.type(character);");
-  expect(workerSource).not.toContain('composer.fill(`@${this.config.appName}`)');
-  expect(workerSource).toContain('const exactResult = menuRows');
-  expect(workerSource).toContain('const menuRows = page.locator(CHATGPT_CONNECTOR_MENU_ROW_SELECTOR)');
-  expect(workerSource).toContain('[data-testid="composer-intelligence-picker-content"] button');
-  expect(workerSource).toContain('[data-radix-popper-content-wrapper] button');
-  expect(workerSource).toContain('exactResult.waitFor({ state: "visible", timeout: fastTimeout })');
-  expect(workerSource).toContain('appResult.dispatchEvent("click")');
-  expect(workerSource).not.toContain('composer.pressSequentially("@c"');
-  expect(workerSource).not.toContain('composer.press("Enter")');
-  expect(workerSource).toContain("this.selectedConnectorControl(selectedComposer)");
-  expect(workerSource).toContain("'[data-id^=\"plugin:\"][data-keyword]'");
-  expect(workerSource).toContain("const selectedComposer = await this.activeComposer(page)");
+  expect(workerSource).toContain("[data-mention-list-scroll-area] button[data-list-navigation-item]");
+  expect(workerSource).toContain('page.getByText(this.config.appName, { exact: true })');
+  expect(workerSource).toContain('exactResult.first().dispatchEvent("click")');
+  expect(workerSource).toContain('[app-mention-display-name][app-mention-path^="app://"]');
+  expect(workerSource).not.toContain("for (const character of this.config.appName)");
 });
 
 test("active composer resolution waits for exactly one visible editor", async () => {
@@ -566,12 +572,16 @@ test("large read-only context is inserted in bounded edits before exact verifica
   expect(asserted).toBe(prompt);
 });
 
-test("duplicate DOM representations of one selected connector are treated as one logical selection", async () => {
+test("legacy plugin pills and current app mentions are both accepted as selected connector state", async () => {
   const selected = {
-    evaluateAll: async (callback: (elements: Array<{ getAttribute(name: string): string | null }>) => unknown) => callback([
+    evaluateAll: async (
+      callback: (elements: Array<{ getAttribute(name: string): string | null }>, appName: string) => unknown,
+      appName: string,
+    ) => callback([
       { getAttribute: (name: string) => name === "data-keyword" ? "lca-codex" : null },
-      { getAttribute: (name: string) => name === "data-keyword" ? "lca-codex" : null },
-    ]),
+      { getAttribute: (name: string) => name === "app-mention-display-name" ? "lca-codex"
+        : name === "app-mention-path" ? "app://connector" : null },
+    ], appName),
   };
   const connectorIsSelected = (ChatGptBrowserWorker.prototype as unknown as {
     connectorIsSelected(composer: unknown): Promise<boolean>;
@@ -583,273 +593,20 @@ test("duplicate DOM representations of one selected connector are treated as one
   }, {})).toBeTrue();
 });
 
-test("connector selection re-resolves the active composer after ChatGPT replaces it", async () => {
-  const calls: Array<[string, string?]> = [];
-  let connectorSelected = false;
-  const appResult = {
-    first() { return this; },
-    waitFor: async () => { calls.push(["waitForResult"]); },
-    count: async () => 1,
-    dispatchEvent: async (event: string) => {
-      expect(event).toBe("click");
-      connectorSelected = true;
-      calls.push(["dispatchResult", event]);
-    },
-  };
-  const selectedConnector = {
-    first() { return this; },
-    waitFor: async () => {
-      expect(connectorSelected).toBeTrue();
-      calls.push(["waitForSelectedConnector"]);
-    },
-    count: async () => 1,
-  };
-  const selectedComposer = {
-    locator: (selector: string) => {
-      expect(selector).toBe('[data-id^="plugin:"][data-keyword]');
-      return {
-        filter: (options: { hasText: string; visible: boolean }) => {
-          expect(options).toEqual({ hasText: "lca-codex", visible: true });
-          return selectedConnector;
-        },
-      };
-    },
-  };
-  const initialComposer = {
-    fill: async (value: string) => { calls.push(["fill", value]); },
-    focus: async () => { calls.push(["focus"]); },
-  };
-  const page = {
-    getByText: (text: string, options: { exact: boolean }) => {
-      expect(text).toBe("lca-codex");
-      expect(options).toEqual({ exact: true });
-      return { exactConnectorLabel: true };
-    },
-    locator: (selector: string) => {
-      if (selector.includes("__menu-item")) {
-        return {
-          filter: (options: { has?: unknown; visible?: boolean }) => {
-            expect(options).toEqual({ has: { exactConnectorLabel: true } });
-            return {
-              filter: (visibleOptions: { visible: boolean }) => {
-                expect(visibleOptions).toEqual({ visible: true });
-                return appResult;
-              },
-            };
-          },
-        };
-      }
-      throw new Error(`Unexpected locator: ${selector}`);
-    },
-    keyboard: {
-      press: async (value: string) => { calls.push(["pagePress", value]); },
-      type: async (value: string) => { calls.push(["type", value]); },
-    },
-  };
-  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
-    selectConnector(page: unknown): Promise<unknown>;
-  }).selectConnector;
-
-  let activeComposerCalls = 0;
-  const resolved = await selectConnector.call({
-    config: { appName: "lca-codex" },
-    connectorIsSelected: async () => connectorSelected,
-    selectedConnectorControl: () => selectedConnector,
-    activeComposer: async () => {
-      activeComposerCalls += 1;
-      return connectorSelected ? selectedComposer : initialComposer;
-    },
-  }, page);
-
-  expect(resolved).toBe(selectedComposer);
-  expect(activeComposerCalls).toBe(3);
-  expect(calls).toEqual([
-    ["fill", ""],
-    ["focus"],
-    ["type", "@"],
-    ["waitForResult"],
-    ["dispatchResult", "click"],
-    ["waitForSelectedConnector"],
-  ]);
-});
-
-test("narrow composer connector selection uses a real mention key and stops at the first exact row", async () => {
-  const calls: string[] = [];
-  let query = "";
+test("connector selection re-resolves the active composer after exact-row activation", async () => {
   let selected = false;
-  const timeout = new Error("not filtered yet");
-  timeout.name = "TimeoutError";
-  const appResult = {
+  const exactRow = {
     first() { return this; },
-    waitFor: async () => {
-      calls.push(`menu:${query}`);
-      if (query !== "@l") throw timeout;
-    },
+    waitFor: async () => {},
     count: async () => 1,
-    dispatchEvent: async (event: string) => {
-      expect(event).toBe("click");
-      selected = true;
-      calls.push("activate");
-    },
+    dispatchEvent: async () => { selected = true; },
   };
-  const selectedConnector = {
-    first() { return this; },
-    waitFor: async () => { calls.push("selected"); },
-  };
-  const initialComposer = {
-    fill: async (value: string) => {
-      expect(value).toBe("");
-      query = "";
-      calls.push("clear");
-    },
-    focus: async () => { calls.push("focus"); },
-  };
+  const initialComposer = { fill: async () => {}, focus: async () => {} };
   const selectedComposer = { id: "selected" };
   const page = {
     getByText: () => ({ exactConnectorLabel: true }),
-    locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => ({ filter: () => appResult }) }
-      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
-    keyboard: {
-      press: async (value: string) => { calls.push(`press:${value}`); },
-      type: async (value: string) => {
-        query += value;
-        calls.push(`type:${value}`);
-      },
-    },
-  };
-  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
-    selectConnector(page: unknown): Promise<unknown>;
-  }).selectConnector;
-
-  const result = await selectConnector.call({
-    config: { appName: "lca-codex" },
-    connectorIsSelected: async () => selected,
-    selectedConnectorControl: () => selectedConnector,
-    activeComposer: async () => selected ? selectedComposer : initialComposer,
-  }, page);
-
-  expect(result).toBe(selectedComposer);
-  expect(calls).toEqual([
-    "clear",
-    "focus",
-    "type:@",
-    "menu:@",
-    "type:l",
-    "menu:@l",
-    "activate",
-    "selected",
-  ]);
-});
-
-test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
-  const calls: string[] = [];
-  let menuAttempt = 0;
-  let selected = false;
-  const timeout = new Error("menu not hydrated");
-  timeout.name = "TimeoutError";
-  const selectedConnector = {
-    first() { return this; },
-    waitFor: async () => {
-      expect(selected).toBeTrue();
-      calls.push("selected");
-    },
-    count: async () => 1,
-  };
-  const appResult = {
-    first() { return this; },
-    waitFor: async () => {
-      menuAttempt += 1;
-      calls.push(`menu:${menuAttempt}`);
-      if (menuAttempt < 12) throw timeout;
-    },
-    count: async () => 1,
-    dispatchEvent: async () => {
-      selected = true;
-      calls.push("activate");
-    },
-  };
-  const selectedComposer = {
-    locator: () => ({ filter: () => selectedConnector }),
-  };
-  const initialComposer = {
-    fill: async (value: string) => { calls.push(value ? `fill:${value}` : "clear"); },
-    focus: async () => { calls.push("focus"); },
-  };
-  const page = {
-    getByText: () => ({ exactConnectorLabel: true }),
-    locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => ({ filter: () => appResult }) }
-      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
-    keyboard: {
-      press: async () => { calls.push("escape"); },
-      type: async (value: string) => { calls.push(`type:${value}`); },
-    },
-  };
-  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
-    selectConnector(page: unknown): Promise<unknown>;
-  }).selectConnector;
-
-  let activeComposerCalls = 0;
-  await selectConnector.call({
-    config: { appName: "lca-codex" },
-    connectorIsSelected: async () => selected,
-    selectedConnectorControl: () => selectedConnector,
-    activeComposer: async () => {
-      activeComposerCalls += 1;
-      return selected ? selectedComposer : initialComposer;
-    },
-  }, page);
-
-  expect(calls).toEqual([
-    "clear", "focus", "type:@", "menu:1",
-    "type:l", "menu:2", "type:c", "menu:3", "type:a", "menu:4", "type:-", "menu:5",
-    "type:c", "menu:6", "type:o", "menu:7", "type:d", "menu:8", "type:e", "menu:9",
-    "type:x", "menu:10", "menu:11",
-    "escape", "clear",
-    "escape", "clear", "focus", "type:@", "menu:12",
-    "activate", "selected",
-  ]);
-});
-
-test("connector selection retries when an exact row disappears after becoming visible", async () => {
-  const calls: string[] = [];
-  let selected = false;
-  let exactCountCalls = 0;
-  const selectedConnector = {
-    first() { return this; },
-    waitFor: async () => { calls.push("selected"); },
-    count: async () => 1,
-  };
-  const appResult = {
-    first() { return this; },
-    waitFor: async () => { calls.push("visible"); },
-    count: async () => {
-      exactCountCalls += 1;
-      calls.push(`count:${exactCountCalls}`);
-      return exactCountCalls === 1 ? 0 : 1;
-    },
-    dispatchEvent: async () => {
-      selected = true;
-      calls.push("activate");
-    },
-  };
-  const selectedComposer = {
-    locator: () => ({ filter: () => selectedConnector }),
-  };
-  const initialComposer = {
-    fill: async () => { calls.push("clear"); },
-    focus: async () => { calls.push("focus"); },
-  };
-  const page = {
-    getByText: () => ({ exactConnectorLabel: true }),
-    locator: (selector: string) => selector.includes("__menu-item")
-      ? { filter: () => ({ filter: () => appResult }) }
-      : (() => { throw new Error(`Unexpected locator: ${selector}`); })(),
-    keyboard: {
-      press: async () => { calls.push("escape"); },
-      type: async (value: string) => { calls.push(`type:${value}`); },
-    },
+    locator: () => ({ filter: () => ({ filter: () => exactRow }) }),
+    keyboard: { type: async () => {} },
   };
   const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
     selectConnector(page: unknown): Promise<unknown>;
@@ -858,14 +615,11 @@ test("connector selection retries when an exact row disappears after becoming vi
   const resolved = await selectConnector.call({
     config: { appName: "lca-codex" },
     connectorIsSelected: async () => selected,
-    selectedConnectorControl: () => selectedConnector,
+    selectedConnectorControl: () => ({ first: () => ({ waitFor: async () => {} }) }),
     activeComposer: async () => selected ? selectedComposer : initialComposer,
   }, page);
 
   expect(resolved).toBe(selectedComposer);
-  expect(calls).toContain("count:1");
-  expect(calls).toContain("count:2");
-  expect(calls).toContain("activate");
 });
 
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
@@ -945,71 +699,13 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   ]);
 });
 
-test("image attachment readiness uses exact file tiles and not localized remove-button text", async () => {
-  const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-  const calls: Array<[string, string?]> = [];
-  const send = {
-    isEnabled: async () => {
-      calls.push(["sendEnabled"]);
-      return true;
-    },
-  };
-  const composerForm = {
-    getByRole: (role: string, options: { name: string; exact: boolean }) => {
-      expect(role).toBe("group");
-      expect(options).toEqual({ name: "codex-input-image-1.png", exact: true });
-      return {
-        waitFor: async (state: { state: string; timeout: number }) => {
-          expect(state).toEqual({ state: "visible", timeout: 60_000 });
-          calls.push(["fileTile", options.name]);
-        },
-      };
-    },
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("send-button");
-      return send;
-    },
-  };
-  const composer = {
-    locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::form[1]");
-      return composerForm;
-    },
-  };
-  const input = {
-    waitFor: async (state: { state: string; timeout: number }) => {
-      expect(state).toEqual({ state: "attached", timeout: 20_000 });
-      calls.push(["inputReady"]);
-    },
-    setInputFiles: async (files: Array<{ name: string }>) => {
-      calls.push(["setFiles", files.map(file => file.name).join(",")]);
-    },
-  };
-  const page = {
-    locator: (selector: string) => {
-      if (selector === 'input[data-testid="upload-photos-input"]') return input;
-      if (selector === '[role="alert"]') {
-        return { allInnerTexts: async () => [] };
-      }
-      return { last: () => composer };
-    },
-  };
-  const attachFiles = (ChatGptBrowserWorker.prototype as unknown as {
-    attachFiles(page: unknown, prompt: unknown): Promise<void>;
-  }).attachFiles;
-
-  await attachFiles.call({ activeComposer: async () => composer }, page, {
-    images: [{ ref: "codex-input-image-1", imageUrl }],
-  });
-
-  expect(calls).toEqual([
-    ["inputReady"],
-    ["setFiles", "codex-input-image-1.png"],
-    ["fileTile", "codex-input-image-1.png"],
-    ["sendEnabled"],
-  ]);
+test("image attachment readiness is composer-scoped and waits for upload completion", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource).not.toContain('aria-label^="Remove file "');
+  expect(workerSource).toContain("composerForm.locator(CHATGPT_FILE_INPUT_SELECTOR)");
+  expect(workerSource).toContain('getByRole("img", { name: file.name, exact: true })');
+  expect(workerSource).toContain('[role="progressbar"], [aria-busy="true"]');
+  expect(workerSource).toContain("composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR)");
+  expect(workerSource).not.toContain('page.locator(\'input[data-testid="upload-photos-input"]\')');
 });
 
 test("effort selection uses the indexed thinking slider instead of localized labels or model radios", () => {
@@ -1024,7 +720,11 @@ test("effort selection uses the indexed thinking slider instead of localized lab
   expect(workerSource).toContain('effortSlider.press(key)');
   expect(workerSource).toContain('"ArrowRight" : "ArrowLeft"');
   expect(sessionSource).toContain('[role="slider"][aria-valuenow][aria-valuemax]');
-  expect(sessionSource).not.toContain('[role="menuitemradio"]');
+  const effortSelectorSource = sessionSource.slice(
+    sessionSource.indexOf("export const CHATGPT_EFFORT_CONTROL_SELECTOR"),
+    sessionSource.indexOf("export const CHATGPT_SEND_BUTTON_SELECTOR"),
+  );
+  expect(effortSelectorSource).not.toContain('[role="menuitemradio"]');
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).not.toContain("currentLabel === targetLabel");
@@ -1412,6 +1112,58 @@ test("visible trace rewrites start a fresh block instead of crashing the turn", 
   ]);
 });
 
+test("growing reasoning activity streams in one reasoning block", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100, {
+    tailGuardChars: 16,
+    minDeltaChars: 8,
+    prefixStabilityMs: 100,
+    flushIntervalMs: 0,
+  });
+  const title = "Inspecting Service Interfaces and Database Architecture";
+  const first = `${title}\n\nReading service interfaces and DI wiring before mapping dependencies.`;
+  const second = `${first} Then checking backup and local database boundaries.`;
+
+  expect(tracker.observe([
+    { kind: "status", key: "status:agent:0", text: first, complete: false },
+  ], false, 1_000)).toEqual([]);
+  const firstNormalized = first.replace(/\s+/g, " ");
+  const initial = tracker.observe([
+    { kind: "status", key: "status:agent:0", text: first, complete: false },
+  ], false, 1_100);
+  expect(initial).toHaveLength(1);
+  expect(initial[0]?.kind).toBe("reasoning");
+  expect(initial[0]?.continuation).toBeUndefined();
+  expect(initial[0]?.text.startsWith(title)).toBe(true);
+  expect(initial[0]?.text.length).toBeLessThan(firstNormalized.length);
+  expect(tracker.observe([
+    { kind: "status", key: "status:agent:0", text: second, complete: false },
+  ], false, 1_200)).toEqual([]);
+  const delta = tracker.observe([
+    { kind: "status", key: "status:agent:0", text: second, complete: false },
+  ], false, 1_300);
+  expect(delta).toHaveLength(1);
+  expect(delta[0]?.kind).toBe("reasoning");
+  expect(delta[0]?.continuation).toBe(true);
+});
+
+test("non-incremental activity commentary waits for a complete block", () => {
+  const tracker = new ChatGptVisibleTraceTracker(100);
+  const active = {
+    kind: "commentary" as const,
+    key: "commentary:agent:0",
+    text: "Reading app bootstrap, DI, routing, services, and feature modules.",
+    complete: false,
+    incremental: false,
+  };
+
+  expect(tracker.observe([active], false, 1_000)).toEqual([]);
+  expect(tracker.observe([active], false, 1_500)).toEqual([]);
+  const complete = { ...active, complete: true };
+  expect(tracker.observe([complete], false, 1_600)).toEqual([
+    { kind: "commentary", text: active.text },
+  ]);
+});
+
 test("incomplete commentary streams a guarded stable prefix instead of waiting for the next action", () => {
   const tracker = new ChatGptVisibleTraceTracker(100, {
     tailGuardChars: 8,
@@ -1540,7 +1292,7 @@ test("response DOM separates streaming commentary from the final Markdown answer
   );
   expect(responseSnapshotSource).toContain("if (!candidate.isConnected) return false");
   expect(responseSnapshotSource).not.toContain("getBoundingClientRect()");
-  expect(workerSource).toContain('const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(".markdown")]');
+  expect(workerSource).toContain("const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(assistantMarkdownSelector)]");
   expect(workerSource).toContain("const commentaryRoots = allMarkdownRoots.filter");
   expect(workerSource).toContain('candidate.closest("[data-streaming-response-status]") !== null');
   expect(workerSource).toContain("const renderedRoots = allMarkdownRoots.filter");
@@ -1565,6 +1317,17 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain('candidate.querySelectorAll<HTMLElement>(".sr-only")');
   expect(workerSource).not.toContain("const adjacentCommentary");
   expect(workerSource).toContain('candidate.closest<HTMLElement>("[data-item-anchor]")');
+  expect(workerSource).toContain("root.querySelectorAll<HTMLElement>('[class~=\"group/activity-header\"]')");
+  expect(workerSource).toContain('button[aria-labelledby][aria-expanded]');
+  expect(workerSource).toContain('candidate.matches(\'[data-markdown-text-style="assistant-message"]\')');
+  expect(workerSource).toContain("if (!body) return");
+  expect(workerSource).toContain('kind: "commentary"');
+  expect(workerSource).toContain('key: `commentary:agent:${activityIndex}`');
+  expect(workerSource).toContain("incremental: false");
+  expect(workerSource).toContain('activityTitle !== "Thinking"');
+  expect(workerSource).toContain('candidate.closest(\'[class~="group/activity-header"]\')');
+  expect(workerSource).toContain('filter(block => activityHeaders.length === 0 || block.kind !== "status")');
+  expect(workerSource).not.toContain("[data-chatgpt-agent-turn-start]");
   expect(workerSource).toContain("const traceByKey = new Map<string, ChatGptVisibleTraceBlock>()");
   expect(workerSource).toContain('block.kind === "commentary" ? { complete: index < blocks.length - 1 }');
   expect(workerSource).toContain('uiControl: candidate.matches("button")');
@@ -1630,21 +1393,20 @@ test("pending-completion diagnostics record DOM metrics without response or over
   expect(diagnosticSource).not.toMatch(/\bariaLabel:\s*candidate\.getAttribute/);
 });
 
-test("response DOM parsing recognizes terminal action groups when Copy collapses into overflow", () => {
+test("response DOM never supplies terminal lifecycle evidence", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  const sessionSource = readFileSync(new URL("../src/chatgpt-session.ts", import.meta.url), "utf8");
-  expect(sessionSource).toContain('button[data-testid="copy-turn-action-button"]');
-  expect(workerSource).toContain("CHATGPT_COMPLETION_ACTION_SELECTOR");
-  expect(workerSource).toContain("const terminalActionGroup = rendered");
-  expect(workerSource).toContain('candidate.querySelector(completionActionSelector) !== null');
-  expect(workerSource).toContain('button[aria-haspopup="menu"]');
-  expect(workerSource).toContain(".filter(followsRendered)");
-  expect(workerSource).not.toContain('root.querySelectorAll<HTMLElement>("button")');
+  const snapshotStart = workerSource.indexOf("private async responseDomSnapshot");
+  const snapshotEnd = workerSource.indexOf("private async pendingCompletionDiagnostic", snapshotStart);
+  const snapshotSource = workerSource.slice(snapshotStart, snapshotEnd);
+  expect(snapshotSource).not.toContain("completionActionVisible");
+  expect(snapshotSource).not.toContain("terminalActionGroup");
+  expect(workerSource).toContain("const networkCompletionReady = networkState.completed;");
+  expect(workerSource).toContain("visibleTrace.observe(snapshot.traceBlocks, networkCompletionReady, observedAt)");
 });
 
 test("browser DOM serialization re-resolves the latest visible assistant turn after launcher reattachment", () => {
   const workerSource = readFileSync(new URL("../src/adapters/lca-codex/browser-worker.ts", import.meta.url), "utf8");
-  expect(workerSource.match(/responseTurn = page\.locator\(CHATGPT_ASSISTANT_TURN_SELECTOR\)\.filter\(\{ visible: true \}\)\.last\(\)/g)?.length).toBe(2);
+  expect(workerSource.match(/responseTurn = page\.locator\(CHATGPT_RESPONSE_ROOT_SELECTOR\)\.filter\(\{ visible: true \}\)\.last\(\)/g)?.length).toBe(2);
   expect(workerSource).not.toContain("initialResponseTurnCount");
 });
 

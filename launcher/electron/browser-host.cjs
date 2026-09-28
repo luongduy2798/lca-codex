@@ -39,27 +39,48 @@ const COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
-  '[contenteditable="true"][role="textbox"]',
-  "textarea",
+  '[contenteditable="true"][role="textbox"][data-composer-markdown]',
 ].join(", ");
 const PRO_CAPABILITY_CONTROL_TIMEOUT_MS = 5_000;
 const PRO_CAPABILITY_MENU_TIMEOUT_MS = 4_000;
 const PRO_CAPABILITY_RESET_TIMEOUT_MS = 2_000;
+const EFFORT_CONTROL_SELECTOR = [
+  '[data-testid="composer-intelligence-picker-trigger"]',
+  'button[aria-haspopup="menu"][data-tone="neutral"]',
+  'button[aria-label="Select ChatGPT model"][data-composer-navigation-target="reasoning"]',
+].join(", ");
+const SEND_BUTTON_SELECTOR = [
+  '[data-testid="send-button"]',
+  'button[type="submit"][aria-label="Send"]',
+].join(", ");
 const EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="slider"][aria-valuenow][aria-valuemax])',
   '[role="menu"]:has([role="slider"][aria-valuenow][aria-valuemax])',
   '[role="group"]:has([role="slider"][aria-valuenow][aria-valuemax])',
 ].join(", ");
-const COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+const COMPLETION_ACTION_SELECTOR = [
+  'button[data-testid="copy-turn-action-button"]',
+  'button[aria-label="Copy message"]',
+].join(", ");
+const ASSISTANT_MARKDOWN_SELECTOR = [
+  ".markdown",
+  '[data-markdown-text-style="assistant-message"]',
+].join(", ");
+const STOP_BUTTON_SELECTOR = [
+  '[data-testid="stop-button"]',
+  'button[aria-label="Stop"]',
+].join(", ");
 const ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+  '[data-turn-key]:has([data-conversation-role="assistant"])',
 ].join(", ");
 const USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+  '[data-turn-key]:has([data-user-message-bubble="true"])',
 ].join(", ");
 const CONVERSATION_OPTIONS_SELECTOR = '[data-testid="conversation-options-button"]';
 const DELETE_CHAT_MENU_ITEM_SELECTOR = '[data-testid="delete-chat-menu-item"]';
@@ -1432,7 +1453,7 @@ class BrowserHost {
       const outcome = await this.view.webContents.executeJavaScript(`(() => {
         const turns = Array.from(document.querySelectorAll(${JSON.stringify(ASSISTANT_TURN_SELECTOR)}));
         const latest = turns.at(-1);
-        const rendered = latest?.querySelector('.markdown');
+        const rendered = latest?.querySelector(${JSON.stringify(ASSISTANT_MARKDOWN_SELECTOR)});
         const text = rendered ? (rendered.innerText || rendered.textContent || '').trim() : '';
         const completionActionVisible = latest
           ? Array.from(latest.querySelectorAll(${JSON.stringify(COMPLETION_ACTION_SELECTOR)})).some((button) => {
@@ -1444,7 +1465,7 @@ class BrowserHost {
                 && rect.height > 0;
             })
           : false;
-        const stopVisible = Array.from(document.querySelectorAll('[data-testid="stop-button"]')).some((button) => {
+        const stopVisible = Array.from(document.querySelectorAll(${JSON.stringify(STOP_BUTTON_SELECTOR)})).some((button) => {
           const style = getComputedStyle(button);
           const rect = button.getBoundingClientRect();
           return style.display !== 'none'
@@ -1569,7 +1590,14 @@ class BrowserHost {
   async readSmokeSendButton() {
     return await this.evaluateBrowserPage(`(() => {
       /* smoke-send-button-read */
-      const button = ${visibleElementScript('[data-testid="send-button"]')};
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      const form = composer?.closest('form');
+      const button = Array.from(form?.querySelectorAll(${JSON.stringify(SEND_BUTTON_SELECTOR)}) || [])
+        .find((element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        });
       if (!button) return { ready: false, reason: 'missing' };
       if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
         return { ready: false, reason: 'disabled' };
@@ -1595,7 +1623,14 @@ class BrowserHost {
   async focusSmokeSendButton() {
     return await this.evaluateBrowserPage(`(() => {
       /* smoke-send-button-focus */
-      const button = ${visibleElementScript('[data-testid="send-button"]')};
+      const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+      const form = composer?.closest('form');
+      const button = Array.from(form?.querySelectorAll(${JSON.stringify(SEND_BUTTON_SELECTOR)}) || [])
+        .find((element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        });
       if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
       button.focus({ preventScroll: true });
       return document.activeElement === button;
@@ -1650,7 +1685,7 @@ class BrowserHost {
       const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
       const form = composer?.closest('form');
       const controls = Array.from(form?.querySelectorAll(
-        'button[aria-haspopup="menu"][data-tone="neutral"]'
+        ${JSON.stringify(EFFORT_CONTROL_SELECTOR)}
       ) || []).filter(visible);
       const control = controls.at(-1);
       if (!control) {
@@ -1703,7 +1738,7 @@ class BrowserHost {
         };
         const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
         const control = Array.from(composer?.closest('form')?.querySelectorAll(
-          'button[aria-haspopup="menu"][data-tone="neutral"]'
+          ${JSON.stringify(EFFORT_CONTROL_SELECTOR)}
         ) || []).filter(visible).at(-1);
         const controlledId = control?.getAttribute('aria-controls');
         const controlled = controlledId ? document.getElementById(controlledId) : null;

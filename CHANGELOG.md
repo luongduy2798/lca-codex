@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.14] - Unreleased
+## [1.0.14] - Released
 
 ### Fixed
 
@@ -10,10 +10,14 @@ All notable changes to this project will be documented in this file.
 - Disable and unload verified legacy `lca-token.codex` and current terminal LaunchAgents before stopping their daemons, preventing KeepAlive from repeatedly reclaiming the Responses port.
 - Keep Stop available during startup, reject overlapping replacements, and ignore obsolete lifecycle/health callbacks. Cleanup continues after individual failures and never revives a runtime the user requested to stop.
 - Recheck OS process identity before termination, preserve unrelated port occupants and failed-cleanup evidence, and retain browser login state and user configuration.
+- Adapt Playwright to ChatGPT's current composer, effort, Send, connector mention, image-upload, assistant Markdown, and Temporary Chat personalization DOM while preserving the existing single-Send flow. Personalization now supports the current header control and menu shape even when `aria-controls` is absent.
+- Restore visible ChatGPT agent-activity prose in Codex without mixing it into tool/status activity: ignore transient activity titles such as `Thinking` / `Inspected ...`, read only the local assistant Markdown body, and emit each completed activity as one intact commentary block so tool calls cannot split or replay the same sentence.
+- Bind provisional conversation ownership from the current conversation-detail request when `stream_status` is absent, but keep DOM as a content source only: correlated WebSocket lifecycle evidence remains the sole terminal authority for task completion.
 
 ### Tests
 
 - Cover multi-port cleanup, legacy KeepAlive, orphaned workers, PID reuse, unavailable health, partial cleanup failures, and Stop racing Start/Restart using isolated fixtures and injected process/service discovery.
+- Cover the current exact connector row, composer-scoped image upload readiness, Temporary Chat personalization without `aria-controls`, current response/activity selectors, intact non-incremental commentary blocks, provisional conversation-detail ownership, and WS-only completion.
 
 ## [1.0.13] - Released
 

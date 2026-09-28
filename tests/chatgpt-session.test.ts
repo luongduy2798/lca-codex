@@ -2,13 +2,34 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
 import {
+  CHATGPT_ASSISTANT_MARKDOWN_SELECTOR,
+  CHATGPT_ASSISTANT_TURN_SELECTOR,
   CHATGPT_COMPOSER_SELECTOR,
+  CHATGPT_EFFORT_CONTROL_SELECTOR,
+  CHATGPT_FILE_INPUT_SELECTOR,
+  CHATGPT_RESPONSE_ROOT_SELECTOR,
+  CHATGPT_SEND_BUTTON_SELECTOR,
+  CHATGPT_STOP_BUTTON_SELECTOR,
+  CHATGPT_USER_TURN_SELECTOR,
   CHATGPT_NORMAL_CHAT_URL,
   CHATGPT_TEMPORARY_CHAT_URL,
   ensureChatGptPersonalized,
 } from "../src/chatgpt-session";
 import { ChatGptBrowserWorker, resolveBrowserConfig } from "../src/adapters/lca-codex/browser-worker";
 import { resolveBrowserRetryPolicy } from "../src/adapters/lca-codex/retry-policy";
+
+test("current ChatGPT UI selectors keep legacy fallbacks and exact new controls", () => {
+  expect(CHATGPT_COMPOSER_SELECTOR).toContain('[contenteditable="true"][role="textbox"][data-composer-markdown]');
+  expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('button[aria-label="Select ChatGPT model"][data-composer-navigation-target="reasoning"]');
+  expect(CHATGPT_SEND_BUTTON_SELECTOR).toContain('button[type="submit"][aria-label="Send"]');
+  expect(CHATGPT_STOP_BUTTON_SELECTOR).toContain('button[aria-label="Stop"]');
+  expect(CHATGPT_FILE_INPUT_SELECTOR).toContain('input[type="file"][accept="image/*"][multiple]');
+  expect(CHATGPT_ASSISTANT_TURN_SELECTOR).toContain('[data-turn-key]:has([data-conversation-role="assistant"])');
+  expect(CHATGPT_RESPONSE_ROOT_SELECTOR).toContain("[data-chatgpt-conversation-selection-target]");
+  expect(CHATGPT_RESPONSE_ROOT_SELECTOR).toContain("[data-request-input-activity-root]");
+  expect(CHATGPT_USER_TURN_SELECTOR).toContain('[data-turn-key]:has([data-user-message-bubble="true"])');
+  expect(CHATGPT_ASSISTANT_MARKDOWN_SELECTOR).toContain('[data-markdown-text-style="assistant-message"]');
+});
 
 function personalizationPage(options: {
   initial?: "Personalized" | "Unpersonalized";
@@ -31,7 +52,7 @@ function personalizationPage(options: {
       : options.radioState === "conflicting" ? "true"
       : String(index === (state === "Personalized" ? 0 : 1));
     const count = () => {
-      if (condition === '[aria-expanded="true"][aria-controls]' && (!open || !menuId)) return 0;
+      if (condition === '[aria-expanded="true"]' && !open) return 0;
       if (condition === '[aria-expanded="false"]' && open) return 0;
       if (condition === '[aria-checked="true"]' && checked() !== "true") return 0;
       if (kind === "control") return controls;
@@ -84,7 +105,9 @@ function personalizationPage(options: {
       if (selector === CHATGPT_COMPOSER_SELECTOR) return locator("composer");
       if (selector === '[role="dialog"]') return locator("empty");
       if (selector.startsWith("[aria-")) return locator(selector);
-      if (selector === '#conversation-header-actions button[aria-haspopup="menu"]:visible') return locator("control");
+      if (selector.includes('#conversation-header-actions button[aria-haspopup="menu"]:visible')) return locator("control");
+      if (selector === '[role="menu"]:visible') return locator("menu");
+      if (selector === '[role="menuitemradio"]') return locator("items");
       expect(selector).toBe('[role="menu"][id="personalization-menu"]:visible');
       return locator("menu");
     },
@@ -101,6 +124,12 @@ test("remembered first-item selection is inspected without reselecting it", asyn
   }
 });
 
+test("current Temporary Chat personalization menu works without aria-controls", async () => {
+  const fixture = personalizationPage({ initial: "Personalized", menuId: null });
+  await ensureChatGptPersonalized(fixture.page);
+  expect(fixture.clicks).toEqual(["control"]);
+});
+
 test("personalization selects item zero and verifies radio state regardless of translated labels", async () => {
   for (const labels of [["Personalized", "Unpersonalized"], ["Cá nhân hóa", "Không cá nhân hóa"], ["個人化", "非個人化"]] as [string, string][]) {
     const fixture = personalizationPage({ labels });
@@ -114,7 +143,7 @@ test("personalization selects item zero and verifies radio state regardless of t
 
 test("missing, ambiguous, or ineffective personalization UI fails without browser retry", async () => {
   for (const options of [
-    { controls: 0 }, { controls: 2 }, { menuId: null },
+    { controls: 0 }, { controls: 2 },
     { optionCount: 0 }, { optionCount: 1 }, { optionCount: 3 }, { selectionWorks: false },
     { radioState: "missing" as const }, { radioState: "conflicting" as const },
   ]) {

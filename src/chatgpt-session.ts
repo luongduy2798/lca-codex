@@ -24,25 +24,57 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
+  '[contenteditable="true"][role="textbox"][data-composer-markdown]',
 ].join(", ");
-export const CHATGPT_EFFORT_CONTROL_SELECTOR = 'button[aria-haspopup="menu"][data-tone="neutral"]';
+export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
+  '[data-testid="composer-intelligence-picker-trigger"]',
+  'button[aria-haspopup="menu"][data-tone="neutral"]',
+  'button[aria-label="Select ChatGPT model"][data-composer-navigation-target="reasoning"]',
+].join(", ");
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[role="slider"][aria-valuenow][aria-valuemax]';
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   `[data-testid="composer-intelligence-picker-content"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
   `[role="menu"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
   `[role="group"]:has(${CHATGPT_EFFORT_SLIDER_SELECTOR})`,
 ].join(", ");
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+export const CHATGPT_SEND_BUTTON_SELECTOR = [
+  '[data-testid="send-button"]',
+  'button[type="submit"][aria-label="Send"]',
+].join(", ");
+export const CHATGPT_FILE_INPUT_SELECTOR = [
+  'input[data-testid="upload-photos-input"]',
+  'input[type="file"][accept="image/*"][multiple]',
+].join(", ");
+export const CHATGPT_STOP_BUTTON_SELECTOR = [
+  '[data-testid="stop-button"]',
+  'button[aria-label="Stop"]',
+].join(", ");
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = [
+  'button[data-testid="copy-turn-action-button"]',
+  'button[aria-label="Copy message"]',
+].join(", ");
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+  '[data-turn-key]:has([data-conversation-role="assistant"])',
+].join(", ");
+// The new UI can render public progress before mounting an assistant turn. This is a content
+// scope only; neither its presence nor its disappearance is lifecycle evidence.
+export const CHATGPT_RESPONSE_ROOT_SELECTOR = [
+  CHATGPT_ASSISTANT_TURN_SELECTOR,
+  "[data-chatgpt-conversation-selection-target]",
+  "[data-request-input-activity-root]",
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+  '[data-turn-key]:has([data-user-message-bubble="true"])',
+].join(", ");
+export const CHATGPT_ASSISTANT_MARKDOWN_SELECTOR = [
+  ".markdown",
+  '[data-markdown-text-style="assistant-message"]',
 ].join(", ");
 
 async function anyVisible(locator: Locator): Promise<boolean> {
@@ -70,7 +102,10 @@ export async function assertTemporaryChatPage(page: Page): Promise<void> {
   await assertChatGptPageMode(page, "temporary");
 }
 
-const CHATGPT_PERSONALIZATION_CONTROL_SELECTOR = '#conversation-header-actions button[aria-haspopup="menu"]:visible';
+const CHATGPT_PERSONALIZATION_CONTROL_SELECTOR = [
+  '#conversation-header-actions button[aria-haspopup="menu"]:visible',
+  'button[aria-haspopup="menu"]:visible:has(+ span button[aria-label="Turn off temporary chat"])',
+].join(", ");
 
 /** Verify each fresh Temporary Chat; the saved ChatGPT preference alone is not proof. */
 export async function ensureChatGptPersonalized(page: Page): Promise<void> {
@@ -84,13 +119,16 @@ export async function ensureChatGptPersonalized(page: Page): Promise<void> {
     if (await control.getAttribute("aria-expanded") !== "true") {
       await control.click({ timeout });
     }
-    await control.and(page.locator('[aria-expanded="true"][aria-controls]'))
+    await control.and(page.locator('[aria-expanded="true"]'))
       .waitFor({ state: "visible", timeout });
     const menuId = await control.getAttribute("aria-controls");
-    if (!menuId) throw new Error(stage);
-    const menu = page.locator(`[role="menu"][id=${JSON.stringify(menuId)}]:visible`);
+    const menus = menuId
+      ? page.locator(`[role="menu"][id=${JSON.stringify(menuId)}]:visible`)
+      : page.locator('[role="menu"]:visible').filter({ has: page.locator('[role="menuitemradio"]') });
+    await menus.first().waitFor({ state: "visible", timeout });
+    if (await menus.count() !== 1) throw new Error(stage);
+    const menu = menus.first();
     openedMenu = menu;
-    await menu.waitFor({ state: "visible", timeout });
     const items = menu.getByRole("menuitemradio");
     await items.first().waitFor({ state: "visible", timeout });
     if (await items.count() !== 2) throw new Error(stage);

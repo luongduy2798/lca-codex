@@ -60,8 +60,9 @@ ChatGPT DOM polling ── visible trace + semantic Markdown ──────�
 ```
 
 The page's conversation POST proves that its submission left the composer. The same page's
-`stream_status` request supplies the exact conversation ID, including for Instant mode where no
-`conversation-turn-stream` event is emitted. WebSocket `conversation-created`,
+`stream_status` request supplies the exact conversation ID. On UI variants that omit
+`stream_status`, a conversation-detail request is only a provisional candidate and becomes owned
+after matching WebSocket stream/completion evidence names that exact ID. WebSocket `conversation-created`,
 `conversation-turn-stream`, and `conversation-turn-complete` evidence is buffered until it matches that
 page-owned ID. A completion for an unrelated conversation is ignored. A completion carrying a turn ID
 must match the exact owned turn; matching conversation creation never overrides a conflicting turn ID.
@@ -304,9 +305,11 @@ account abuse controls.
 Within an open tab, normal generation lifecycle is network-scoped rather than DOM-scoped. Before Send,
 the worker attaches a page CDP network observer and arms it for the new submission. The exact page's
 conversation POST proves submission, and its subsequent `stream_status` request fixes the conversation
-owner. This page-local binding is required because WebSocket lifecycle traffic can include other tabs,
-and Instant mode may emit creation/completion without a turn-stream frame. Creation, stream, and
-completion evidence is buffered until ownership is known. Completion is terminal only when its
+owner. If that request is absent, a same-page conversation-detail fetch remains provisional until the
+same conversation ID is also named by WebSocket stream/completion evidence; unrelated detail fetches cannot
+claim the turn. This page-local binding is required because WebSocket lifecycle traffic can include
+other tabs, and Instant mode may emit creation/completion without a turn-stream frame. Creation, stream,
+and completion evidence is buffered until ownership is known. Completion is terminal only when its
 conversation matches the page owner and either an ID-less completion has matching creation evidence or
 the completion carries the exact owned turn ID. A conflicting turn ID is always ignored. Requests and
 frames seen before arming are ignored.
