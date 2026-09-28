@@ -126,8 +126,12 @@ function discoverOwned(snapshot, { uid, config, coreHome, known = [], ownedChild
   return { processes: [...processes.values()], services };
 }
 
-function createSystem({ platform = process.platform, home = os.homedir(), execute = run } = {}) {
-  const uid = platform === "win32" ? os.userInfo().username : process.getuid();
+function createSystem({
+  platform = process.platform,
+  home = os.homedir(),
+  execute = run,
+  uid = platform === "win32" ? os.userInfo().username : process.getuid(),
+} = {}) {
   let deadline = Infinity;
   const command = (file, args, timeout = 3_000) => {
     if (Date.now() >= deadline) throw new Error("Runtime cleanup deadline exceeded");

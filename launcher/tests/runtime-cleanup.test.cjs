@@ -225,7 +225,7 @@ for (const disabledValue of ["true", "disabled"]) {
 test(`macOS service shutdown recognizes ${disabledValue} and verifies unload`, async () => {
   const calls = [];
   const label = "io.github.luongduy2798.lca-token.codex.daemon";
-  const system = createSystem({ platform: "darwin", execute: async (file, args) => {
+  const system = createSystem({ platform: "darwin", uid: 501, execute: async (file, args) => {
     calls.push([file, ...args]);
     return { code: args[0] === "list" ? 113 : 0, stdout: args[0] === "print-disabled" ? `"${label}" => ${disabledValue}` : "" };
   } });
