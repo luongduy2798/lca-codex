@@ -70,6 +70,16 @@ request and long-lived browser/tool loop are idle, flush response state, and sto
 token does not turn loopback into a hostile-local-process security boundary; it prevents accidental
 or unauthenticated lifecycle control through ordinary requests.
 
+Explicit UI Stop, Start, and Restart additionally authorize local OS termination of verified LCA
+runtime processes for the current user, including busy or unhealthy runtimes. This authority stays in
+the Electron main process: no unauthenticated HTTP force-stop endpoint is added. Runtime discovery
+requires executable/entrypoint identity or an observed owned-worker relationship; an HTTP service name,
+port number, process name, or stale PID marker alone is insufficient. PID owner, creation time,
+executable, and command are rechecked before each signal. Manual cleanup disables only verified LCA
+terminal LaunchAgents before terminating their processes, including the exact legacy Codex labels.
+It never signals an unverified process group, kills the launcher UI, or deletes browser login state.
+Automatic startup and Quit do not inherit this manual authorization.
+
 ### Browser/UI drift
 
 ChatGPT DOM and labels are not a stable API. Selectors are narrow and completion requires stable

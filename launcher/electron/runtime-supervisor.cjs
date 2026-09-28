@@ -10,6 +10,7 @@ const {
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
+const { cleanupRuntimes } = require("./runtime-cleanup.cjs");
 
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
@@ -278,6 +279,7 @@ class RuntimeSupervisor {
     publishOperation,
     publishRuntimeState,
     runtimeInvocationFactory = runtimeInvocation,
+    runtimeCleanup = cleanupRuntimes,
   }) {
     this.app = app;
     this.logger = logger;
@@ -289,6 +291,12 @@ class RuntimeSupervisor {
     this.publishOperation = publishOperation;
     this.publishRuntimeState = publishRuntimeState;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
+    this.runtimeCleanup = runtimeCleanup;
+    this.runtimeGeneration = 0;
+    this.controlChildren = new Set();
+    this.manualResetting = false;
+    this.manualCleanupPromise = null;
+    this.manuallyStopped = false;
     this.configPath = path.join(coreHome, "config.json");
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
@@ -389,7 +397,9 @@ class RuntimeSupervisor {
 
   publishRuntime() {
     if (typeof this.publishRuntimeState !== "function") return;
+    const generation = this.runtimeGeneration;
     void this.observeRuntime().then((state) => {
+      if (generation !== this.runtimeGeneration) return;
       this.publishRuntimeState(state);
     }).catch((error) => {
       this.logger.warn("runtime.status_publish_failed", { message: errorMessage(error) });
@@ -420,7 +430,7 @@ class RuntimeSupervisor {
     } catch (error) {
       return {
         configured: fs.existsSync(this.configPath),
-        lifecycle: "error",
+        lifecycle: this.manualResetting ? "stopping" : this.manuallyStopped ? "stopped" : "error",
         owner: "none",
         mode: null,
         detail: errorMessage(error),
@@ -525,7 +535,7 @@ class RuntimeSupervisor {
     let lifecycle = this.lifecyclePhase;
     let detail = null;
     if (!lifecycle) {
-      if (config.releaseVersion !== this.app.getVersion()) {
+      if (config.releaseVersion !== this.app.getVersion() && !this.manuallyStopped) {
         lifecycle = daemonIsLca || stateDaemonRunning || stateTunnelRunning ? "stale" : "error";
         detail = `Runtime ${config.releaseVersion} must be upgraded for launcher ${this.app.getVersion()}`;
       } else if (owner === "foreign") {
@@ -676,6 +686,8 @@ class RuntimeSupervisor {
   }
 
   spawnChild(name, invocation) {
+    if (this.manualResetting || this.cancelStartRequested) throw new Error("Runtime start was cancelled");
+    const generation = this.runtimeGeneration;
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: DETACH_OWNED_CHILD,
@@ -708,6 +720,7 @@ class RuntimeSupervisor {
       const expected = this.stopping || this.expectedExits.has(child);
       this.expectedExits.delete(child);
       if (this[name] === child) this[name] = null;
+      if (generation !== this.runtimeGeneration) return;
       const detail = error
         ? `${name} failed to start: ${error.message}`
         : `${name} exited (${signal || code})`
@@ -1109,6 +1122,7 @@ class RuntimeSupervisor {
   }
 
   startTunnelMonitor(config) {
+    if (this.manualResetting) return;
     this.stopTunnelMonitor();
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
@@ -1225,6 +1239,7 @@ class RuntimeSupervisor {
   }
 
   async startDaemon(config) {
+    if (this.manualResetting || this.cancelStartRequested) throw new Error("Runtime start was cancelled");
     if (this.daemon) {
       const child = this.daemon;
       const identity = Number.isInteger(child.pid)
@@ -1259,7 +1274,10 @@ class RuntimeSupervisor {
   }
 
   async startIfConfigured() {
+    if (this.manualResetting) throw new Error("Runtime cleanup is in progress");
+    const generation = this.runtimeGeneration;
     if (this.stopPromise) await this.stopPromise;
+    if (generation !== this.runtimeGeneration) throw new Error("Runtime start was cancelled");
     if (this.startPromise) return this.startPromise;
     this.cancelStartRequested = false;
     this.startPromise = this.startConfigured();
@@ -1272,6 +1290,7 @@ class RuntimeSupervisor {
 
   async startConfigured() {
     if (this.cancelStartRequested) throw new Error("Runtime start was cancelled");
+    this.manuallyStopped = false;
     let config;
     try {
       config = this.readConfig();
@@ -1345,13 +1364,16 @@ class RuntimeSupervisor {
     this.publishOperation?.({ name: "runtime-start", status: "running", message: "Starting local runtime" });
     try {
       await this.startTunnel(config, "runtime-start");
+      if (this.cancelStartRequested) throw new Error("Runtime start was cancelled");
       await this.startDaemon(config);
+      if (this.cancelStartRequested) throw new Error("Runtime start was cancelled");
       this.writeState("ready");
       this.lifecyclePhase = null;
       this.publishRuntime();
       this.publishOperation?.({ name: "runtime-start", status: "completed", message: "Local runtime is ready" });
       return { status: "ready", daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid };
     } catch (error) {
+      if (this.manualResetting) throw error;
       this.stopping = true;
       let cleanupError;
       try {
@@ -1596,6 +1618,7 @@ class RuntimeSupervisor {
   }
 
   async runTunnelCommand(config, args, timeoutMs, label) {
+    if (this.manualResetting) throw new Error("Runtime start was cancelled");
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
     return await new Promise((resolve, reject) => {
@@ -1605,6 +1628,10 @@ class RuntimeSupervisor {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
+      this.controlChildren.add(child);
+      const removeControl = () => this.controlChildren.delete(child);
+      child.once("error", removeControl);
+      child.once("exit", removeControl);
       const stdout = [];
       const stderr = [];
       let stdoutBytes = 0;
@@ -1933,7 +1960,9 @@ class RuntimeSupervisor {
   }
 
   async startRuntime({ reclaimExternalDaemon = false } = {}) {
+    const generation = this.runtimeGeneration;
     const observed = await this.observeRuntime();
+    if (this.manualResetting || generation !== this.runtimeGeneration) throw new Error("Runtime start was cancelled");
     if (!observed.configured) throw new Error("Runtime is not configured. Complete Setup first.");
     if (observed.lifecycle === "foreign") {
       throw new Error(observed.detail || "The configured Responses port is owned by another process");
@@ -1947,13 +1976,77 @@ class RuntimeSupervisor {
         throw new Error(cleaned.detail || "Previous runtime could not be cleaned safely");
       }
     }
+    if (generation !== this.runtimeGeneration) throw new Error("Runtime start was cancelled");
     const runtime = await this.startIfConfigured();
+    if (generation !== this.runtimeGeneration) throw new Error("Runtime start was cancelled");
     if (runtime.status !== "ready") {
       throw new Error(`Local runtime is ${runtime.status}${runtime.detail ? `: ${runtime.detail}` : ""}`);
     }
     const status = await this.observeRuntime();
+    if (generation !== this.runtimeGeneration) throw new Error("Runtime start was cancelled");
     this.publishRuntimeState?.(status);
     return status;
+  }
+
+  cancelPendingStart() {
+    this.cancelStartRequested = true;
+    this.manualResetting = true;
+    this.manuallyStopped = false;
+    this.stopping = true;
+    this.lifecyclePhase = "stopping";
+    this.runtimeGeneration += 1;
+    this.stopTunnelMonitor();
+    for (const child of this.controlChildren) {
+      this.expectedExits.add(child);
+      // These are children spawned by this supervisor, never arbitrary PIDs.
+      try { terminateOwnedProcessTree(child, "SIGKILL"); } catch (error) {
+        this.logger.warn("runtime.control_cancel_failed", { pid: child.pid, message: errorMessage(error) });
+      }
+    }
+    this.publishRuntime();
+  }
+
+  stopAllRuntimes() {
+    if (this.manualCleanupPromise) return this.manualCleanupPromise;
+    if (!this.manualResetting) this.cancelPendingStart();
+    this.publishOperation?.({ name: "runtime-stop", status: "running", message: "Stopping all LCA Codex runtimes" });
+    this.manualCleanupPromise = (async () => {
+      let pendingFailure = null;
+      const pending = this.startPromise;
+      if (pending) {
+        let timer;
+        try {
+          await Promise.race([
+            pending.catch(() => {}),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Pending runtime start did not cancel")), 5_000); }),
+          ]);
+        } catch (error) { pendingFailure = error; }
+        finally { clearTimeout(timer); }
+      }
+      try {
+        await this.runtimeCleanup({ coreHome: this.coreHome, logger: this.logger,
+          ownedChildren: [this.daemon, this.tunnel, ...this.controlChildren].filter(Boolean) });
+        if (pendingFailure) throw pendingFailure;
+        this.daemon = null;
+        this.tunnel = null;
+        this.lastChildFailure = { daemon: null, tunnel: null };
+        this.manuallyStopped = true;
+        this.publishOperation?.({ name: "runtime-stop", status: "completed", message: "All LCA Codex runtimes stopped" });
+      } catch (error) {
+        this.logger.error("runtime.cleanup_failed", { message: errorMessage(error) });
+        this.publishOperation?.({ name: "runtime-stop", status: "failed", message: errorMessage(error) });
+        throw error;
+      } finally {
+        this.stopTunnelMonitor();
+        this.manualResetting = false;
+        this.stopping = false;
+        this.lifecyclePhase = null;
+        this.runtimeGeneration += 1;
+        this.publishRuntime();
+      }
+      return await this.observeRuntime();
+    })().finally(() => { this.manualCleanupPromise = null; });
+    return this.manualCleanupPromise;
   }
 
   async stopRuntime({ forceOwnedDaemon = false, reclaimExternalDaemon = false } = {}) {

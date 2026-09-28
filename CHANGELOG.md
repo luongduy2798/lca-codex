@@ -2,7 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.13] - Unreleased
+## [1.0.14] - Unreleased
+
+### Fixed
+
+- Give UI **Stop**, **Start**, and **Restart** one complete cleanup path: cancel running tasks, stop verified LCA runtimes across ports, and create a fresh runtime only after cleanup succeeds. Automatic startup and Quit retain graceful behavior.
+- Disable and unload verified legacy `lca-token.codex` and current terminal LaunchAgents before stopping their daemons, preventing KeepAlive from repeatedly reclaiming the Responses port.
+- Keep Stop available during startup, reject overlapping replacements, and ignore obsolete lifecycle/health callbacks. Cleanup continues after individual failures and never revives a runtime the user requested to stop.
+- Recheck OS process identity before termination, preserve unrelated port occupants and failed-cleanup evidence, and retain browser login state and user configuration.
+
+### Tests
+
+- Cover multi-port cleanup, legacy KeepAlive, orphaned workers, PID reuse, unavailable health, partial cleanup failures, and Stop racing Start/Restart using isolated fixtures and injected process/service discovery.
+
+## [1.0.13] - Released
 
 ### Fixed
 

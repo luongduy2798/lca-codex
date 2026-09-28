@@ -28,6 +28,8 @@ function fixture() {
     async cancelActiveOperation() { calls.push("runtime:cancel-operation"); },
   };
   const runtimeSupervisor = {
+    cancelPendingStart() { calls.push("runtime:cancel-start"); },
+    async stopAllRuntimes() { calls.push("runtime:stop-all"); return { lifecycle: "stopped" }; },
     async observeRuntime() { calls.push("runtime:observe"); return { lifecycle: "stopped", owner: "none" }; },
     async startRuntime() { calls.push("runtime:start"); return { lifecycle: "ready" }; },
     async stopRuntime() { calls.push("runtime:stop"); return { lifecycle: "stopped" }; },
@@ -42,9 +44,98 @@ function fixture() {
     applyRuntimeUpgradeState: () => calls.push("runtime:upgrade-state"),
     startCatalogVerificationMonitor: () => calls.push("catalog:start"),
     stopCatalogVerificationMonitor: () => calls.push("catalog:stop"),
+    abortBrowserTurns: () => calls.push("browser:abort-all"),
   });
   return { calls, coordinator, health, runtimeHost, runtimeStates, runtimeSupervisor, toolHealth };
 }
+
+for (const action of ["start", "restart"]) {
+  test(`manual ${action} always performs full cleanup, including when already ready`, async () => {
+    const f = fixture();
+    f.runtimeSupervisor.observeRuntime = async () => ({ lifecycle: "ready" });
+    assert.equal((await f.coordinator[action]({ manual: true })).lifecycle, "ready");
+    for (const name of ["runtime:cancel-start", "browser:abort-all", "bridge:deactivate", "runtime:stop-all"]) {
+      assert.ok(f.calls.indexOf(name) >= 0);
+      assert.ok(f.calls.indexOf(name) < f.calls.indexOf("runtime:start"));
+    }
+    assert.ok(f.calls.indexOf("runtime:stop-all") < f.calls.indexOf("runtime:upgrade"));
+    assert.ok(f.calls.indexOf("runtime:start") < f.calls.indexOf("bridge:activate"));
+  });
+}
+
+test("manual Stop still cleans all processes when native route restoration fails", async () => {
+  const f = fixture();
+  f.runtimeHost.deactivateRuntimeBridge = async () => { throw new Error("route restore failed"); };
+  await assert.rejects(f.coordinator.stop({ manual: true }), /route restore failed/);
+  assert.ok(f.calls.includes("runtime:stop-all"));
+  assert.equal(f.runtimeStates.at(-1).lifecycle, "stopped");
+  assert.equal(f.calls.includes("bridge:activate"), false);
+});
+
+test("cleanup failure prevents replacement and never resumes the old runtime", async () => {
+  const f = fixture();
+  f.runtimeSupervisor.stopAllRuntimes = async () => { throw new Error("verified PID did not exit"); };
+  await assert.rejects(f.coordinator.start({ manual: true }), /verified PID/);
+  assert.equal(f.calls.includes("runtime:start"), false);
+  assert.equal(f.calls.includes("runtime:upgrade"), false);
+  assert.equal(f.calls.includes("bridge:activate"), false);
+});
+
+test("Stop cancels a pending manual Start without queueing a replacement", async () => {
+  const f = fixture();
+  const pending = deferred();
+  f.runtimeHost.upgradeManagedRuntime = () => pending.promise;
+  const start = f.coordinator.start({ manual: true });
+  const cancelled = assert.rejects(start, /cancelled by Stop/);
+  await new Promise(resolve => setImmediate(resolve));
+  await f.coordinator.stop({ manual: true });
+  pending.resolve({ updated: false });
+  await cancelled;
+  assert.equal(f.calls.includes("runtime:start"), false);
+  assert.equal(f.calls.includes("bridge:activate"), false);
+});
+
+test("late Ready and tool-health results cannot override a manual Stop", async () => {
+  const f = fixture();
+  const pending = deferred();
+  f.runtimeSupervisor.startRuntime = () => pending.promise;
+  const start = f.coordinator.start({ manual: true });
+  const cancelled = assert.rejects(start, /cancelled by Stop/);
+  await new Promise(resolve => setImmediate(resolve));
+  await f.coordinator.stop({ manual: true });
+  pending.resolve({ lifecycle: "ready" });
+  f.health.resolve({ live: true });
+  await cancelled;
+  assert.equal(f.runtimeStates.at(-1).lifecycle, "stopped");
+  assert.equal(f.calls.includes("bridge:activate"), false);
+  assert.equal(f.toolHealth.at(-1).live, false);
+});
+
+test("duplicate Stops share cleanup and Stop during initial cleanup cancels Start", async () => {
+  const f = fixture();
+  const pending = deferred();
+  let cleanupCount = 0;
+  f.runtimeSupervisor.stopAllRuntimes = () => { cleanupCount++; return pending.promise; };
+  const start = f.coordinator.start({ manual: true });
+  const cancelled = assert.rejects(start, /cancelled by Stop/);
+  await new Promise(resolve => setImmediate(resolve));
+  const stop1 = f.coordinator.stop({ manual: true });
+  const stop2 = f.coordinator.stop({ manual: true });
+  assert.equal(stop1, stop2);
+  await assert.rejects(f.coordinator.restart({ manual: true }), /already running/);
+  pending.resolve({ lifecycle: "stopped" });
+  await Promise.all([stop1, stop2, cancelled]);
+  assert.equal(cleanupCount, 1);
+  assert.equal(f.calls.includes("runtime:start"), false);
+});
+
+test("automatic start and Quit never opt into manual cleanup", async () => {
+  const f = fixture();
+  await f.coordinator.start();
+  await f.coordinator.quit({ commit: async () => {} });
+  assert.equal(f.calls.includes("runtime:stop-all"), false);
+  assert.equal(f.calls.includes("browser:abort-all"), false);
+});
 
 test("runtime start is ready before the bounded Codex tool-health probe finishes", async () => {
   const current = fixture();

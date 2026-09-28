@@ -510,13 +510,24 @@ be completed, the operation fails closed and restores the drained runtime when p
 unexpected child exit is recovered with a bounded restart budget; a crash loop becomes an explicit
 launcher error.
 
-Explicit launcher **Start** also reclaims a stale or degraded runtime before starting fresh. An
-external/source daemon, including one with a missing PID marker or an older release, must acknowledge
-the authenticated drain contract and retain the same healthy service/PID identity before it can be
-reclaimed. If graceful shutdown fails, manual Start may force-stop that verified daemon after a fresh
-identity check, then wait for the configured Responses port to be released. It does not kill unrelated
-port occupants or take ownership away from another live launcher. Automatic startup and ordinary Stop
-retain graceful shutdown behavior; failed recovery preserves existing ownership evidence.
+Explicit launcher **Stop**, **Start**, and **Restart** share a manual cleanup boundary. Stop cancels
+active browser turns and pending startup, restores the native Codex route, and terminates all verified
+LCA runtime processes owned by the current OS user across listening ports. Start and Restart perform
+the same cleanup before creating a fresh tunnel and daemon, then reconnect Codex only after readiness.
+Stop can interrupt a pending Start; repeated Stops share cleanup and obsolete callbacks cannot publish
+Ready afterward. Cleanup continues if native-route restoration or another cleanup stage fails, reports
+the remaining failures, and never restarts a stopped component as compensation.
+
+Manual cleanup discovers source and packaged runtime identities independently of health, configuration
+version, and PID markers. Before every signal, it rechecks the process owner, creation time, executable,
+and command. On macOS it first disables and unloads verified terminal LaunchAgents, including legacy
+`lca-token.codex` daemon/tunnel labels, so KeepAlive cannot reclaim the Responses port. Definitions and
+user data are retained. A short authenticated graceful shutdown is attempted where available, followed
+by bounded TERM/KILL escalation. An unavailable HTTP control contract does not prevent stopping an
+independently verified OS process. Unrelated port occupants are never terminated. Successful cleanup
+requires no remaining verified runtime processes/listeners or loaded respawning service; only then may
+dead broker sockets and ownership markers be removed. Automatic startup, setup, and Quit retain their
+graceful lifecycle rules and never opt into this manual force policy.
 
 ## Launcher Activity retention
 

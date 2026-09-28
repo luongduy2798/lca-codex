@@ -528,9 +528,11 @@ function RuntimeActionButtons({
   setError: (error: string | null) => void;
 }) {
   const [activeAction, setActiveAction] = useState<"start" | "stop" | "restart" | null>(null);
+  const actionGeneration = useRef(0);
   const busy = activeAction !== null;
   const run = async (action: "start" | "stop" | "restart") => {
-    if (busy) return;
+    if (busy && (action !== "stop" || activeAction === "stop")) return;
+    const generation = ++actionGeneration.current;
     setActiveAction(action);
     setError(null);
     try {
@@ -538,36 +540,34 @@ function RuntimeActionButtons({
       else if (action === "stop") await api!.stopRuntime();
       else await api!.restartRuntime();
     } catch (cause) {
-      setError(messageOf(cause));
+      if (generation === actionGeneration.current) setError(messageOf(cause));
     } finally {
-      setActiveAction(null);
+      if (generation === actionGeneration.current) setActiveAction(null);
     }
   };
-  const unavailable = !runtime.configured || runtime.lifecycle === "foreign";
+  const unavailable = !runtime.configured;
   const stopping = runtime.lifecycle === "stopping";
-  const showStart = runtime.lifecycle === "stopped" || runtime.lifecycle === "stale";
+  const showStart = ["stopped", "stale", "foreign"].includes(runtime.lifecycle);
   const showRestart = ["ready", "degraded", "error"].includes(runtime.lifecycle);
-  const showStop = !["stopped", "foreign"].includes(runtime.lifecycle);
+  const starting = runtime.lifecycle === "starting";
   return (
     <div className={`runtime-actions${compact ? " is-compact" : ""}`}>
       {showStart ? (
-        <button className="runtime-inline-button is-primary" disabled={busy || unavailable || stopping} onClick={() => void run("start")} type="button">
+        <button className="runtime-inline-button is-primary" disabled={busy || unavailable || stopping || starting} onClick={() => void run("start")} type="button">
           {activeAction === "start" ? <ButtonSpinner /> : null}
           {activeAction === "start" ? copy.startingRuntime : copy.startRuntime}
         </button>
       ) : null}
       {showRestart ? (
-        <button className="runtime-inline-button" disabled={busy || unavailable || stopping} onClick={() => void run("restart")} type="button">
+        <button className="runtime-inline-button" disabled={busy || unavailable || stopping || starting} onClick={() => void run("restart")} type="button">
           {activeAction === "restart" ? <ButtonSpinner /> : null}
           {activeAction === "restart" ? copy.restartingRuntime : copy.restartRuntime}
         </button>
       ) : null}
-      {showStop ? (
-        <button className="runtime-inline-button" disabled={busy || stopping || runtime.lifecycle === "foreign"} onClick={() => void run("stop")} type="button">
-          {activeAction === "stop" ? <ButtonSpinner /> : null}
-          {activeAction === "stop" ? copy.stoppingRuntime : copy.stopRuntime}
-        </button>
-      ) : null}
+      <button className="runtime-inline-button" disabled={activeAction === "stop"} onClick={() => void run("stop")} type="button">
+        {activeAction === "stop" ? <ButtonSpinner /> : null}
+        {activeAction === "stop" ? copy.stoppingRuntime : copy.stopRuntime}
+      </button>
     </div>
   );
 }

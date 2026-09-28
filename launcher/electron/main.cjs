@@ -117,6 +117,7 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let catalogVerificationGeneration = 0;
 let runtimeStatusTimer = null;
 let runtimeStatusInFlight = false;
 let updateController = null;
@@ -360,7 +361,9 @@ async function publishRuntimeStatus() {
       port: { host: "127.0.0.1", port: null, occupied: false, identity: "none" },
     };
   }
+  const generation = runtimeSupervisor.runtimeGeneration;
   const status = await runtimeSupervisor.observeRuntime();
+  if (generation !== runtimeSupervisor.runtimeGeneration) return publishRuntimeStatus();
   send("launcher:runtime-state", status);
   updateTrayRuntimeStatus(status);
   return status;
@@ -433,28 +436,30 @@ function applyRuntimeUpgradeState(upgrade, { logger, stateStore }) {
   });
 }
 
-async function startManagedRuntime({ reclaimExternalDaemon = false } = {}) {
+async function startManagedRuntime({ reclaimExternalDaemon = false, manual = false } = {}) {
   if (!runtimeLifecycle) throw new Error("Runtime lifecycle is not initialized");
-  return runtimeLifecycle.start({ reclaimExternalDaemon });
+  return runtimeLifecycle.start({ reclaimExternalDaemon, manual });
 }
 
-async function stopManagedRuntime({ restoreCodex = true } = {}) {
+async function stopManagedRuntime({ restoreCodex = true, manual = false } = {}) {
   if (!runtimeLifecycle) throw new Error("Runtime lifecycle is not initialized");
-  return runtimeLifecycle.stop({ restoreCodex });
+  return runtimeLifecycle.stop({ restoreCodex, manual });
 }
 
-async function restartManagedRuntime() {
+async function restartManagedRuntime({ manual = false } = {}) {
   if (!runtimeLifecycle) throw new Error("Runtime lifecycle is not initialized");
-  return runtimeLifecycle.restart();
+  return runtimeLifecycle.restart({ manual });
 }
 
 function stopCatalogVerificationMonitor() {
+  catalogVerificationGeneration += 1;
   if (catalogVerificationTimer) clearInterval(catalogVerificationTimer);
   catalogVerificationTimer = null;
 }
 
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
+  const generation = catalogVerificationGeneration;
   const check = async () => {
     const current = stateStore.read();
     const verificationPending = current.codexRestartRequired === true || current.codexCatalogVerified !== true;
@@ -467,6 +472,7 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
     try {
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
+      if (generation !== catalogVerificationGeneration) return;
       if (!Number.isInteger(health?.successful_model_catalog_requests)
         || health.successful_model_catalog_requests < 1) return;
       const lastRequestAt = Date.parse(health.last_successful_model_catalog_request_at ?? "");
@@ -799,9 +805,9 @@ function registerIpc({ logger, stateStore }) {
   }));
 
   handle("launcher:runtime-status", () => publishRuntimeStatus());
-  handle("launcher:runtime-start", () => startManagedRuntime({ reclaimExternalDaemon: true }));
-  handle("launcher:runtime-stop", () => stopManagedRuntime({ logger, stateStore }));
-  handle("launcher:runtime-restart", () => restartManagedRuntime({ logger, stateStore }));
+  handle("launcher:runtime-start", () => startManagedRuntime({ manual: true }));
+  handle("launcher:runtime-stop", () => stopManagedRuntime({ manual: true }));
+  handle("launcher:runtime-restart", () => restartManagedRuntime({ manual: true }));
 
   handle("launcher:open-external", async (_event, url) => {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
@@ -1363,6 +1369,7 @@ async function start() {
     applyRuntimeUpgradeState: (upgrade) => applyRuntimeUpgradeState(upgrade, { logger, stateStore }),
     startCatalogVerificationMonitor: () => startCatalogVerificationMonitor({ logger, stateStore }),
     stopCatalogVerificationMonitor,
+    abortBrowserTurns: () => browserHost.abortAllTurns(),
   });
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
